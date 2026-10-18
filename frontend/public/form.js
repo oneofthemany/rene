@@ -4,6 +4,8 @@
 // sending defaults, so REA applies its own documented defaults. Schema shapes
 // without a faithful simple widget fall back to a JSON editor.
 
+import { isLocalPath, openPicker, wantsFolder } from "./browse.js";
+
 /** Classifies one property schema into a widget kind. */
 export function classify(schema) {
   if (schema === true || schema === undefined) return { kind: "json" };
@@ -165,7 +167,7 @@ function createField(name, schema, isRequired) {
 
   const error = document.createElement("div");
   error.className = "error";
-  const widget = createWidget(shape, schema, id);
+  const widget = createWidget(shape, schema, id, name);
   element.append(widget.control, error);
 
   const fail = (message) => {
@@ -202,8 +204,8 @@ const WIDGETS = {
   json: jsonWidget,
 };
 
-function createWidget(shape, schema, id) {
-  return WIDGETS[shape.kind](shape, schema, id);
+function createWidget(shape, schema, id, name) {
+  return WIDGETS[shape.kind](shape, schema, id, name);
 }
 
 function enumWidget(shape, schema, id) {
@@ -274,7 +276,7 @@ function numberWidget(shape, schema, id) {
   };
 }
 
-function stringWidget(shape, schema, id) {
+function stringWidget(shape, schema, id, name) {
   const input = document.createElement("input");
   input.id = id;
   input.spellcheck = false;
@@ -285,6 +287,26 @@ function stringWidget(shape, schema, id) {
     input.placeholder = "/absolute/path";
   const control = document.createElement("div");
   control.append(input);
+  if (isLocalPath(schema)) {
+    // Picks a host path through the bridge; typing a path still works.
+    control.className = "path-control";
+    const browse = document.createElement("button");
+    browse.type = "button";
+    browse.className = "quiet";
+    browse.textContent = "Browse…";
+    browse.setAttribute("aria-label", `Browse for ${name}`);
+    browse.addEventListener("click", () =>
+      openPicker({
+        start: input.value,
+        folder: wantsFolder(name),
+        onPick: (path) => {
+          input.value = path;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+        },
+      }),
+    );
+    control.append(browse);
+  }
   if (shape.suggestions?.length) {
     const list = document.createElement("datalist");
     list.id = `${id}-options`;

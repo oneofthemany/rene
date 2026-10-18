@@ -5,11 +5,12 @@
 // HTTP API to the browser UI in ./public. It forwards MCP requests unchanged:
 // REA keeps ownership of validation, sessions, Evidence, and cleanup.
 
-import { spawn } from "node:child_process";
-import { randomBytes, timingSafeEqual } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { readdir, readFile, realpath, stat, unlink } from "node:fs/promises";
+import { homedir } from "node:os";
 import { createServer } from "node:http";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { Client, ProtocolError } from "@modelcontextprotocol/client";
@@ -25,6 +26,8 @@ const { values: options } = parseArgs({
     "timeout-ms": { type: "string", default: String(10 * 60_000) },
     "max-concurrent": { type: "string", default: "4" },
     open: { type: "boolean", default: false },
+    // Written by start.sh before it execs this process; removed on clean exit.
+    "pid-file": { type: "string" },
   },
 });
 
@@ -42,12 +45,14 @@ const STDERR_TAIL_BYTES = 16 * 1024;
 const MODULES = [
   "api.js",
   "app.js",
+  "browse.js",
   "calls.js",
   "catalog.js",
   "form.js",
   "markdown.js",
   "render.js",
   "results.js",
+  "setup.js",
   "workflows.js",
 ];
 const STATIC_FILES = new Map([
@@ -183,6 +188,215 @@ function ensureMcp() {
 }
 
 // ---------------------------------------------------------------------------
+// Agent registration
+//
+// `rea setup` owns registration: client detection, additive config edits,
+// backups and recovery. The bridge only runs it as a short-lived child, one
+// at a time, and never edits an agent's configuration itself.
+
+const SETUP_TIMEOUT_MS = 120_000;
+const CLIENT_ID = /^[a-z][a-z0-9_]{0,40}$/;
+let setupBusy = false;
+
+/** Runs `rea setup` with JSON output; resolves to its parsed report. */
+function runSetup(args) {
+  return new Promise((resolvePromise, reject) => {
+    execFile(
+      process.execPath,
+      [options.rea, "setup", "--format", "json", ...args],
+      {
+        timeout: SETUP_TIMEOUT_MS,
+        maxBuffer: 16 * 1024 * 1024,
+        // The registered server inherits provider settings setup reads from here.
+        env: process.env,
+      },
+      (error, stdout, stderr) => {
+        let report;
+        try {
+          report = JSON.parse(stdout);
+        } catch {
+          return reject(
+            new Error(
+              `rea setup did not return JSON${error ? `: ${error.message}` : ""}. ${stderr.slice(-2000)}`.trim(),
+            ),
+          );
+        }
+        // A refused plan still reports why as JSON.
+        resolvePromise(report);
+      },
+    ).stdin?.end();
+  });
+}
+
+/** Stable digest of what a plan would change, so apply can refuse a moved plan. */
+function planFingerprint(report) {
+  const actions = (report.plannedActions ?? []).map(
+    ({ id, kind, target, operation, detail, backupPath }) => ({
+      id,
+      kind,
+      target,
+      operation,
+      detail,
+      backupPath,
+    }),
+  );
+  return createHash("sha256").update(JSON.stringify(actions)).digest("hex");
+}
+
+function clientArgs(clients) {
+  return clients.flatMap((client) => ["--client", client]);
+}
+
+/** Validates { clients: string[] }; an empty list means every detected agent. */
+function readClients(body) {
+  const clients = body?.clients;
+  if (
+    !Array.isArray(clients) ||
+    clients.length > 40 ||
+    !clients.every(
+      (client) => typeof client === "string" && CLIENT_ID.test(client),
+    )
+  )
+    return undefined;
+  return [...new Set(clients)];
+}
+
+async function exclusiveSetup(response, work) {
+  if (setupBusy)
+    return sendJson(response, 409, {
+      error: "Another setup run is in progress.",
+    });
+  setupBusy = true;
+  try {
+    return await work();
+  } catch (cause) {
+    return sendJson(response, 502, { error: describeError(cause) });
+  } finally {
+    setupBusy = false;
+  }
+}
+
+/** Plans registration without applying it: detection, current state, changes. */
+async function setupPlan(request, response) {
+  const clients = readClients(await readJsonBody(request));
+  if (!clients)
+    return sendJson(response, 400, {
+      error: "Expected { clients: string[] } of client ids.",
+    });
+  return exclusiveSetup(response, async () => {
+    const report = await runSetup([
+      "--dry-run",
+      ...(clients.length === 0 ? ["--all-detected"] : clientArgs(clients)),
+    ]);
+    return sendJson(response, 200, {
+      report,
+      fingerprint: planFingerprint(report),
+    });
+  });
+}
+
+/** Applies the reviewed plan, refusing if a fresh plan no longer matches it. */
+async function setupApply(request, response) {
+  const body = await readJsonBody(request);
+  const clients = readClients(body);
+  if (!clients || clients.length === 0 || typeof body.fingerprint !== "string")
+    return sendJson(response, 400, {
+      error:
+        "Expected { clients: string[] (at least one), fingerprint: string }.",
+    });
+  return exclusiveSetup(response, async () => {
+    const fresh = await runSetup(["--dry-run", ...clientArgs(clients)]);
+    const fingerprint = planFingerprint(fresh);
+    if (fingerprint !== body.fingerprint)
+      return sendJson(response, 409, {
+        error:
+          "The plan changed since you reviewed it. Review the new plan before applying.",
+        report: fresh,
+        fingerprint,
+      });
+    const report = await runSetup(["--yes", ...clientArgs(clients)]);
+    return sendJson(response, 200, { report });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Path picker
+//
+// A browser file input never reveals a real path, and REA needs absolute
+// host paths, so the page asks the bridge for directory listings. Only names
+// and entry types leave this process; file contents are never read.
+
+const MAX_ENTRIES = 5000;
+
+async function entryType(directory, entry) {
+  if (entry.isDirectory()) return { type: "dir", link: false };
+  if (entry.isFile()) return { type: "file", link: false };
+  if (entry.isSymbolicLink()) {
+    try {
+      const target = await stat(join(directory, entry.name));
+      return {
+        type: target.isDirectory() ? "dir" : target.isFile() ? "file" : "other",
+        link: true,
+      };
+    } catch {
+      return { type: "broken", link: true };
+    }
+  }
+  return { type: "other", link: false };
+}
+
+/** Lists one directory: { path, parent, home, entries, truncated }. */
+async function listDirectory(request, response) {
+  const body = await readJsonBody(request);
+  const requested = body?.path;
+  if (
+    requested !== undefined &&
+    (typeof requested !== "string" || !isAbsolute(requested))
+  )
+    return sendJson(response, 400, {
+      error: "Expected { path?: absolute path }.",
+    });
+  let path;
+  try {
+    path = await realpath(requested || homedir());
+    // A file path opens the folder that holds it.
+    if (!(await stat(path)).isDirectory()) path = dirname(path);
+  } catch (cause) {
+    return sendJson(response, 404, {
+      error: `Cannot open ${requested}: ${describeError(cause)}`,
+    });
+  }
+  let dirents;
+  try {
+    dirents = await readdir(path, { withFileTypes: true });
+  } catch (cause) {
+    return sendJson(response, 403, {
+      error: `Cannot list ${path}: ${describeError(cause)}`,
+    });
+  }
+  const shown = dirents.slice(0, MAX_ENTRIES);
+  const entries = await Promise.all(
+    shown.map(async (entry) => ({
+      name: entry.name,
+      ...(await entryType(path, entry)),
+    })),
+  );
+  entries.sort(
+    (a, b) =>
+      Number(b.type === "dir") - Number(a.type === "dir") ||
+      a.name.localeCompare(b.name),
+  );
+  const parent = dirname(path);
+  return sendJson(response, 200, {
+    path,
+    parent: parent === path ? null : parent,
+    home: homedir(),
+    entries,
+    truncated: dirents.length > shown.length,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // HTTP boundary
 
 const server = createServer((request, response) => {
@@ -248,6 +462,10 @@ async function routeApi(request, response, url) {
     await ensureMcp();
     return sendJson(response, 200, status());
   }
+  // Registration doesn't need the MCP child, so it works while that is down.
+  if (route === "POST /api/setup/plan") return setupPlan(request, response);
+  if (route === "POST /api/setup/apply") return setupApply(request, response);
+  if (route === "POST /api/fs/list") return listDirectory(request, response);
 
   await ensureMcp();
   if (route === "GET /api/tools") {
@@ -506,16 +724,38 @@ function openBrowser(url) {
   child.unref();
 }
 
+/** Removes the pid file only while it still records this process. */
+async function releasePidFile() {
+  const path = options["pid-file"];
+  if (!path) return;
+  try {
+    const [recorded] = (await readFile(path, "utf8")).split("\n");
+    if (recorded === String(process.pid)) await unlink(path);
+  } catch {
+    // Missing or unreadable: nothing of ours to remove.
+  }
+}
+
 let shuttingDown = false;
-async function shutdown() {
+async function shutdown(exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
   server.close();
   await stopMcp();
-  process.exit(0);
+  await releasePidFile();
+  process.exit(exitCode);
 }
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+process.on("SIGINT", () => shutdown());
+process.on("SIGTERM", () => shutdown());
+
+server.on("error", (cause) => {
+  process.stderr.write(
+    cause.code === "EADDRINUSE"
+      ? `Port ${port} is already in use. Stop the program using it, or pass --port.\n`
+      : `The bridge could not listen: ${describeError(cause)}\n`,
+  );
+  void shutdown(1);
+});
 
 server.listen(port, "127.0.0.1", () => {
   const address = server.address();

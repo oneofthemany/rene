@@ -14,6 +14,7 @@ import {
   showEntry as drawEntry,
   showLive,
 } from "./results.js";
+import { showSetup } from "./setup.js";
 import { renderWorkflowPanel, showWorkflowForm } from "./workflows.js";
 
 const state = {
@@ -83,6 +84,13 @@ document
     event.currentTarget.setAttribute("aria-expanded", String(!log.hidden));
     if (!log.hidden) await refreshStatus();
   });
+
+document.getElementById("open-setup").addEventListener("click", () => {
+  state.selected = { kind: "setup" };
+  state.view = undefined;
+  renderCatalog();
+  void showSetup(document.getElementById("tool-view"));
+});
 
 document.getElementById("restart").addEventListener("click", async (event) => {
   const button = event.currentTarget;
