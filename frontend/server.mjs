@@ -129,8 +129,24 @@ async function startMcp() {
     ),
     stderr: "pipe",
   });
-  const client = new Client({ name: "rea-frontend", version: "0.1.0" });
+  // REA advertises listChanged; the SDK refetches every page and hands back
+  // the new list. catalogVersion tells pages to reload their catalog.
+  const onChanged = (key) => (error, items) => {
+    if (error || !items || mcp !== record) return;
+    record[key] = items;
+    record.catalogVersion++;
+  };
+  const client = new Client(
+    { name: "rea-frontend", version: "0.1.0" },
+    {
+      listChanged: {
+        tools: { onChanged: onChanged("tools") },
+        prompts: { onChanged: onChanged("prompts") },
+      },
+    },
+  );
   const record = {
+    catalogVersion: 0,
     state: "starting",
     client,
     transport,
@@ -659,6 +675,7 @@ function status() {
     serverVersion: mcp.serverVersion,
     toolCount: mcp.tools.length,
     promptCount: mcp.prompts.length,
+    catalogVersion: mcp.catalogVersion,
     startedAt: mcp.startedAt,
     maxConcurrent,
     activeCalls: [...calls.entries()].map(([id, call]) => ({

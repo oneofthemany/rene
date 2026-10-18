@@ -54,6 +54,7 @@ document.getElementById("token-form").addEventListener("submit", (event) => {
 // ---------------------------------------------------------------------------
 // Server status
 
+let loadedCatalog;
 async function refreshStatus() {
   const dot = document.querySelector("#server-status .dot");
   const text = document.querySelector("#server-status .server-text");
@@ -68,6 +69,10 @@ async function refreshStatus() {
           : "Starting REA…";
     document.getElementById("server-log").textContent =
       status.stderrTail || "No server output yet.";
+    // A restart or a list_changed notification gives REA a new catalog.
+    const catalog = `${status.startedAt}:${status.catalogVersion}`;
+    if (status.state === "ready" && loadedCatalog && catalog !== loadedCatalog)
+      void loadTools();
     return status;
   } catch (cause) {
     dot.dataset.state = "failed";
@@ -110,6 +115,8 @@ document.getElementById("restart").addEventListener("click", async (event) => {
 // Catalog
 
 async function loadTools() {
+  const status = await apiJson("/api/status");
+  loadedCatalog = `${status.startedAt}:${status.catalogVersion}`;
   const [{ tools }, { prompts }] = await Promise.all([
     apiJson("/api/tools"),
     apiJson("/api/prompts"),
