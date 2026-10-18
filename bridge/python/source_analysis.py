@@ -336,8 +336,8 @@ def blocking_report(request):
 #   cite      a source comment cites ``name.md §N`` and the doc or section is gone
 #   path      a doc names a tree file (`dir/x.py`) that doesn't exist
 #   symbol    a doc names ``func()`` or ``Class.method()`` defined nowhere
-#   heading   a numbered heading below its predecessor (a section in the wrong place)
-#   config    a module-level mirror of a YAML config disagrees with it
+#   heading   a numbered heading out of order, or under the wrong section
+#   config    a module-level mirror of a YAML config lacks a match in it
 #   undocumented  a backend route no doc or frontend file mentions (on request)
 
 ROUTE_METHODS = {"get", "post", "put", "delete", "patch", "websocket"}
@@ -377,10 +377,12 @@ def route_matches(path, routes):
 class RouteScan(ast.NodeVisitor):
     """FastAPI/Starlette-style decorators, with APIRouter(prefix=...) applied."""
 
-    def __init__(self, rel):
+    def __init__(self, rel, calls):
         self.rel = rel
         self.prefix = {}
         self.found = []
+        self.templates = []
+        self.calls = calls
 
     def visit_Assign(self, node):
         if isinstance(node.value, ast.Call) and getattr(node.value.func, "id", None) == "APIRouter":
@@ -408,8 +410,59 @@ class RouteScan(ast.NodeVisitor):
                                "path": self.prefix.get(owner, "") + path,
                                "file": self.rel, "line": d.lineno})
 
+    def _path_of(self, arg, names):
+        """A literal or f-string path; a parameter hole stays as {=name}."""
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            return arg.value
+        if isinstance(arg, ast.JoinedStr):
+            out = []
+            for v in arg.values:
+                if isinstance(v, ast.Constant):
+                    out.append(v.value)
+                elif isinstance(v.value, ast.Name) and v.value.id in names:
+                    out.append(names[v.value.id])
+                else:
+                    out.append("{}")
+            return "".join(out)
+        if isinstance(arg, ast.Name):
+            return names.get(arg.id)
+        return None
+
     def visit_FunctionDef(self, node):
         self._deco(node)
+        # app.get(path)(handler): routes registered by call, not decorator. A
+        # path built from a parameter is a template, filled from call sites.
+        params = [a.arg for a in node.args.args]
+        names = {name: "{=" + name + "}" for name in params}
+        for stmt in ast.walk(node):
+            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+                path = self._path_of(stmt.value, names)
+                if path is not None:
+                    names[stmt.targets[0].id] = path
+        for call in ast.walk(node):
+            inner = call.func if isinstance(call, ast.Call) else None
+            if (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute)
+                    and inner.func.attr in ROUTE_METHODS and inner.args):
+                path = self._path_of(inner.args[0], names)
+                if path is None or not path.startswith("/"):
+                    continue
+                owner = inner.func.value.id if isinstance(inner.func.value, ast.Name) else ""
+                route = {"method": inner.func.attr.upper(), "path": self.prefix.get(owner, "") + path,
+                         "file": self.rel, "line": inner.lineno}
+                if "{=" in path:
+                    self.templates.append((node.name, params, route))
+                else:
+                    self.found.append(route)
+        self.generic_visit(node)
+
+    def visit_Call(self, node):
+        # Literal arguments at each call site, for filling route templates.
+        name = node.func.id if isinstance(node.func, ast.Name) else (
+            node.func.attr if isinstance(node.func, ast.Attribute) else None)
+        if name:
+            self.calls.setdefault(name, []).append(
+                [a.value if isinstance(a, ast.Constant) and isinstance(a.value, str) else None
+                 for a in node.args])
         self.generic_visit(node)
 
     visit_AsyncFunctionDef = visit_FunctionDef
@@ -433,18 +486,37 @@ def headings(md):
     return out
 
 
-def out_of_order(md):
-    """Numbered headings after a later-numbered one; a heading numbered 1 restarts."""
-    last, last_line = None, 0
+def misplaced_headings(md):
+    """Numbered headings out of order among their siblings, or numbered under
+    the wrong section: 7.6 placed outside a section 7 the doc does have.
+    Headings in code fences are not headings."""
+    heads, in_code = [], False
     for lineno, line in enumerate(md.splitlines(), 1):
-        m = NUMBERED.match(line)
-        if not m:
-            continue
-        num = tuple(int(x) for x in m.group(1).split("."))
-        if last and num < last and num[-1] != 1:
-            yield lineno, ".".join(map(str, num)), ".".join(map(str, last)), last_line
-        last, last_line = num, lineno
-
+        if line.lstrip().startswith("```"):
+            in_code = not in_code
+        m = None if in_code else re.match(r"^(#+)\s", line)
+        if m:
+            n = NUMBERED.match(line)
+            num = tuple(int(x) for x in n.group(1).split(".")) if n else None
+            heads.append((lineno, len(m.group(1)), num, line.lstrip("#").strip()))
+    present = {num for _, _, num, _ in heads if num}
+    stack = []  # open ancestors: [level, num, title, last numbered child]
+    for lineno, level, num, title in heads:
+        while stack and stack[-1][0] >= level:
+            stack.pop()
+        parent = stack[-1] if stack else None
+        if num:
+            owner = num[:-1]
+            if len(num) > 1 and owner in present and not any(a[1] == owner for a in stack):
+                where = parent[2] if parent else "the top of the doc"
+                yield lineno, f"section {'.'.join(map(str, num))} sits under '{where}', not section {'.'.join(map(str, owner))}"
+            if parent is not None:
+                last = parent[3]
+                # A heading numbered 1 starts a fresh run (steps in a recipe).
+                if last and num < last[0] and num[-1] != 1:
+                    yield lineno, f"section {'.'.join(map(str, num))} comes after section {'.'.join(map(str, last[0]))} (line {last[1]})"
+                parent[3] = (num, lineno)
+        stack.append([level, num, title, None])
 
 def runtime_files(tree):
     """Anchored, literal .gitignore entries: files a doc may name that are made at runtime."""
@@ -512,6 +584,10 @@ def config_findings(tree, mirrors):
                             "detail": f"{name} mirrors '{section}', which {yaml_rel} lacks"})
                 continue
             for path, a, b in diff(defaults, side, section):
+                # A mirror fills gaps in what a settings UI edits; the YAML may
+                # hold more. Only a default it lacks, or a different value, drifts.
+                if a is MISSING:
+                    continue
                 out.append({"kind": "config", "file": module_rel, "line": node.lineno,
                             "detail": f"{path}: {name} has {shown(a)}, {yaml_rel} has {shown(b)}"})
     return out, {"status": "checked", "reason": None}
@@ -536,16 +612,17 @@ def drift_report(request):
     docs_dirs = tuple(d.rstrip("/") + "/" for d in request["docs_dirs"])
     ignore_symbols = set(request["ignore_symbols"]) | PLATFORM
 
-    routes, defs = [], set()
+    routes, defs, templates, calls = [], set(), [], {}
     for rel, full in tree.walk([".py"]):
         if rel.startswith(backend_skip):
             continue
         parsed = tree.parse(rel, full)
         if parsed is None:
             continue
-        scan = RouteScan(rel)
+        scan = RouteScan(rel, calls)
         scan.visit(parsed)
         routes += scan.found
+        templates += scan.templates
         for n in ast.walk(parsed):
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 defs.add(n.name)
@@ -562,6 +639,16 @@ def drift_report(request):
         defs.update(re.findall(r"^\s*(?:async\s+)?([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{", text, re.M))
         defs.update(re.findall(r"\bfun\s+([A-Za-z_]\w*)", text))
 
+    # Fill each parameter-built path from every call that passes literals; an
+    # unresolved one is dropped, never kept as a wildcard that hides drift.
+    for func, params, route in templates:
+        for args in calls.get(func, []):
+            path = route["path"]
+            for index, param in enumerate(params):
+                if f"{{={param}}}" in path and index < len(args) and args[index] is not None:
+                    path = path.replace(f"{{={param}}}", args[index])
+            if "{=" not in path:
+                routes.append({**route, "path": path})
     served = {norm(r["path"]) for r in routes}
     mentioned = set()
     out = []
@@ -591,9 +678,8 @@ def drift_report(request):
             continue
         # Citations name a doc by file name; the first one found wins.
         docs.setdefault(rel.rsplit("/", 1)[-1], (text, rel))
-        for lineno, num, prev, prev_line in out_of_order(text):
-            out.append({"kind": "heading", "file": rel, "line": lineno,
-                        "detail": f"section {num} comes after section {prev} (line {prev_line})"})
+        for lineno, detail in misplaced_headings(text):
+            out.append({"kind": "heading", "file": rel, "line": lineno, "detail": detail})
         if "/" not in rel or rel.startswith(docs_dirs):
             checked.append((text, rel))
     made_at_runtime = runtime_files(tree)

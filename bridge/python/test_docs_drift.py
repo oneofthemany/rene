@@ -21,6 +21,13 @@ TREE = {
             @app.get("/api/unmentioned")
             async def quiet(): ...
         """,
+    "routes/lan.py": """
+        def register(app, kind):
+            base = f"/api/{kind}"
+            app.get(base)(lambda: None)
+            app.post(f"{base}/discover")(lambda: None)
+        """,
+    "main.py": "from routes.lan import register\nregister(app, 'shelly')\n",
     "modules/x_api.py": """
         from fastapi import APIRouter
         router = APIRouter(prefix="/api/x")
@@ -48,11 +55,14 @@ TREE = {
         Calls `helper()` and `vanished()` and `time.monotonic()`.
         Lives in `modules/x_api.py` and `modules/nope.py`; secrets in `config/secrets.yaml`.
         `GET /api/x/status` and `POST /api/x/gone`, and the `/api/device` namespace.
+        `/api/shelly` and `POST /api/shelly/discover` come from a registration call.
         """,
     "README.md": "Health at `/api/healthz`.\n",
+    "docs/steps.md": "# Steps\n## 1. Setup\n### 1.1 Pieces\n#### 1. One\n#### 2. Two\n#### 3. Three\n"
+                     "```\n# not a heading\n```\n## 2. Use\n## 4. Later\n## 3. Misplaced\n",
     "nested/README.md": "Nothing here.\n",
     ".gitignore": "/config/secrets.yaml\n*.log\n",
-    "config/config.yaml": "media:\n  enabled: false\n  port: 80\nextra:\n  a: 1\n",
+    "config/config.yaml": "media:\n  enabled: false\n  port: 80\n  yaml_only: 1\nextra:\n  a: 1\n",
     "routes/config_routes.py": """
         MEDIA_DEFAULTS = {"enabled": True, "port": 80, "only_here": 1}
         OCTOPUS_DEFAULTS = {"enabled": False}
@@ -129,7 +139,11 @@ class DocsDriftTest(unittest.TestCase):
         ])
 
     def test_misplaced_heading(self):
-        self.assertEqual(self.details("heading"), ["section 2.9 comes after section 4 (line 8)"])
+        found = self.details("heading")
+        self.assertIn("section 2.9 sits under '4. Later', not section 2", found)
+        # Siblings only: a fresh 1-2-3 run under 1.1 and a fenced '#' line are fine.
+        self.assertIn("section 3 comes after section 4 (line 11)", found)
+        self.assertEqual(len(found), 2, found)
 
     def test_paths_skip_runtime_files_and_symbols_skip_the_platform(self):
         self.assertEqual(self.details("path"), ["doc names modules/nope.py, which does not exist"])
@@ -153,11 +167,15 @@ class DocsDriftTest(unittest.TestCase):
         self.assertIn("media.enabled: MEDIA_DEFAULTS has true, config/config.yaml has false", found)
         self.assertIn("media.only_here: MEDIA_DEFAULTS has 1, config/config.yaml has nothing", found)
         self.assertIn("OCTOPUS_DEFAULTS mirrors 'octopus', which config/config.yaml lacks", found)
+        # config.yaml's media.port matches; extra YAML keys are not drift.
+        self.assertFalse(any("extra" in d or ": MEDIA_DEFAULTS has nothing" in d for d in found), found)
 
     def test_reports_what_it_read(self):
         report = self.run_helper()
         self.assertGreater(report["files"]["scanned"], 5)
-        self.assertEqual(report["routes"], 4)
+        # 4 decorated, plus the 2 the lan template fills for 'shelly'.
+        self.assertEqual(report["routes"], 6)
+        self.assertFalse(any("shelly" in d for d in self.details("route")))
         self.assertEqual(report["frontend_calls"], 5)
 
 

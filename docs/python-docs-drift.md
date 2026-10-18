@@ -33,7 +33,7 @@ rea inspect-python-docs-drift /src/app --settings drift.json --undocumented --js
 | `path`         | A doc names a backticked tree file, such as `` `routes/x.py` ``, that does not exist and is not an anchored `.gitignore` entry                                                               |
 | `symbol`       | A doc names `` `func()` `` or `` `Class.method()` `` that no Python, JavaScript or Kotlin file defines; the stdlib, builtins and browser globals are ignored, and `ignore_symbols` adds more |
 | `heading`      | A numbered heading sorts below the one before it, e.g. a `7.6` after `11`; a heading numbered 1 starts a fresh run                                                                           |
-| `config`       | A module-level `NAME_DEFAULTS` dict literal disagrees, key by key, with section `name` of its YAML config                                                                                    |
+| `config`       | A module-level `NAME_DEFAULTS` dict literal has a default its YAML config section `name` lacks, or a different value. YAML keys the mirror doesn't repeat are not drift                      |
 | `undocumented` | With `undocumented`, a backend route that no doc or frontend file mentions                                                                                                                   |
 
 Backend routes are FastAPI/Starlette-style decorators (`@app.get(...)`,
