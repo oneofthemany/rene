@@ -11,6 +11,7 @@ export const CLI_COMMANDS = Object.freeze({
   inspectDuckdbDatabase: "inspect-duckdb-database",
   inspectPythonClient: "inspect-python-client",
   inspectPythonBlockingCalls: "inspect-python-blocking-calls",
+  inspectPythonDocsDrift: "inspect-python-docs-drift",
   inspectEvmInterface: "inspect-evm-interface",
   inspectWebNetworkCapture: "inspect-web-network-capture",
   observeWebExecution: "observe-web-execution",

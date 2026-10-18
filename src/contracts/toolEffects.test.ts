@@ -58,6 +58,14 @@ const EXECUTION_WORDING_EXCEPTIONS: Readonly<Record<string, string>> = {
     "inspects the operator-selected apktool launcher; never installs it",
   inspect_pcap_client:
     "probes the operator-selected tshark and capinfos; never installs them",
+  inspect_duckdb_client:
+    "probes the operator-selected duckdb CLI; never installs it",
+  inspect_python_client:
+    "probes the operator-selected Python interpreter; never installs it",
+  inspect_python_docs_drift:
+    "parses source with REA's own helper under the operator's Python, without executing the target",
+  inspect_duckdb_database:
+    "runs the operator-selected duckdb CLI read-only on an owned copy, without views or caller SQL",
   inspect_jeb_client: "talks to a caller-started JEB; never launches it",
   open_jeb_project: "the engine analyzes the file; REA does not execute it",
   inspect_adb_client:

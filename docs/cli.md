@@ -85,6 +85,13 @@ from an asyncio event loop, using a caller-supplied Python 3.8+ (`python3` on
 paths and loop-listener names. See
 [Python event-loop blocking](python-blocking-calls.md).
 
+## Python docs drift
+
+`rea inspect-python-docs-drift ROOT --json` reports frontend calls and doc
+routes no backend serves, broken `name.md §N` citations, missing files and
+functions named in docs, misplaced numbered headings and config mirrors that
+disagree with their YAML. See [Python application docs drift](python-docs-drift.md).
+
 ## Native analysis
 
 Inspect embedded Go build metadata without installing Go or configuring a
