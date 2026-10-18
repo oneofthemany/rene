@@ -13,7 +13,7 @@ export type PcapCommandCleanup = BoundedToolCommandCleanup;
 export type PcapCommandOutput = BoundedToolCommandOutput;
 export type PcapCommandLimits = BoundedToolCommandLimits;
 
-const PCAP_FAILURES: BoundedToolFailures = {
+export const PCAP_FAILURES: BoundedToolFailures = {
   toolUnavailable: pcapToolUnavailable,
   label: "Packet capture tool",
   unsupportedInput:

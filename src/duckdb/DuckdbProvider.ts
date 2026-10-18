@@ -23,20 +23,16 @@ import {
   AnalysisProtocolError,
 } from "../domain/analysisErrorCore.js";
 import { AnalysisError } from "../domain/analysisErrorBase.js";
-import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
-import { analysisErrorWithCleanupFailure } from "../domain/analysisErrorCleanup.js";
 import { err, ok, type Result } from "../domain/result.js";
 import { ProviderCleanupError } from "../domain/providerCleanupError.js";
-import type { ProviderProcessSupervisor } from "../process/ProviderProcess.js";
-import {
-  runBoundedToolCommand,
-  type BoundedToolCommandCleanup,
-  type BoundedToolCommandLauncher,
-  type BoundedToolFailures,
-  type BoundedToolNativeBound,
+import type {
+  BoundedToolCommandLauncher,
+  BoundedToolFailures,
+  BoundedToolNativeBound,
 } from "../process/BoundedToolCommand.js";
 import { prepareNativeToolBound } from "../process/NativeToolBound.js";
 import { ArtifactAnalysisResources } from "../process/ArtifactAnalysisResources.js";
+import { OwnedToolCommands } from "../process/OwnedToolCommands.js";
 import { readLinuxResourceLimits } from "../process/LinuxResourceLimits.js";
 import { readStableArtifact } from "../artifacts/readStableArtifact.js";
 import {
@@ -91,15 +87,6 @@ const DUCKDB_BOUND = {
 } as const;
 
 const QUERY_LIMITS = { timeoutMs: 300_000, maxOutputBytes: 32 * 1024 ** 2 };
-
-interface RetainedDuckdbCommand {
-  readonly snapshot: DuckdbSnapshot | undefined;
-  readonly resources: readonly string[];
-  readonly reason: string;
-  readonly capturedOutput: BoundedToolCommandCleanup["capturedOutput"];
-  ownerReleased: boolean;
-  failure: ProviderCleanupError | undefined;
-}
 
 export interface DuckdbProviderOptions {
   readonly environment?: Readonly<Record<string, string | undefined>>;
@@ -157,14 +144,14 @@ export class DuckdbProvider {
       details: { max_concurrent_inspections: 1 },
     },
   );
+  readonly #commands = new OwnedToolCommands<DuckdbSnapshot>(
+    "duckdb",
+    DATABASE_OPERATION,
+    this.#resources,
+    "database snapshot",
+  );
   private readonly environment: Readonly<Record<string, string | undefined>>;
   private readonly launcher: BoundedToolCommandLauncher | undefined;
-  private readonly snapshots = new Set<DuckdbSnapshot>();
-  private readonly snapshotFailures = new Map<DuckdbSnapshot, AnalysisError>();
-  private readonly commands = new Map<
-    ProviderProcessSupervisor,
-    RetainedDuckdbCommand
-  >();
   private nativeBound: BoundedToolNativeBound | undefined;
   private nativeLimitations: readonly string[] = [];
 
@@ -173,7 +160,7 @@ export class DuckdbProvider {
     this.launcher = options.launcher;
   }
 
-  private async run(
+  private run(
     operation: DuckdbOperation,
     command: string,
     args: readonly string[],
@@ -182,61 +169,26 @@ export class DuckdbProvider {
     snapshot?: DuckdbSnapshot,
     inputPath?: string,
   ) {
-    let cleanup: BoundedToolCommandCleanup | undefined;
-    let retained: RetainedDuckdbCommand | undefined;
-    const output = await runBoundedToolCommand({
-      operation,
-      command,
-      arguments: args,
-      limits,
-      signal,
-      failures: DUCKDB_FAILURES,
-      environment:
-        snapshot === undefined
-          ? this.environment
-          : { ...this.environment, HOME: snapshot.homePath },
-      ...(inputPath === undefined ? {} : { inputPath }),
-      ...(inputPath === undefined || this.nativeBound === undefined
-        ? {}
-        : { nativeBound: this.nativeBound }),
-      ...(this.launcher === undefined ? {} : { launcher: this.launcher }),
-      retain: (owner, resources, reason, capturedOutput) => {
-        retained = {
-          snapshot,
-          resources,
-          reason,
-          capturedOutput,
-          ownerReleased: false,
-          failure: undefined,
-        };
-        this.commands.set(owner, retained);
-        cleanup = { reason, resources, capturedOutput };
+    return this.#commands.runClean(
+      {
+        operation,
+        command,
+        arguments: args,
+        limits,
+        signal,
+        failures: DUCKDB_FAILURES,
+        environment:
+          snapshot === undefined
+            ? this.environment
+            : { ...this.environment, HOME: snapshot.homePath },
+        ...(inputPath === undefined ? {} : { inputPath }),
+        ...(inputPath === undefined || this.nativeBound === undefined
+          ? {}
+          : { nativeBound: this.nativeBound }),
+        ...(this.launcher === undefined ? {} : { launcher: this.launcher }),
       },
-    });
-    if (cleanup !== undefined) {
-      const failure = new ProviderCleanupError(
-        "duckdb",
-        [
-          ...new Set([
-            ...(snapshot === undefined ? [] : [snapshot.path]),
-            ...cleanup.resources,
-          ]),
-        ],
-        {
-          reason: cleanup.reason,
-          previous_error: null,
-          captured_output: {
-            stdout: output.stdout,
-            stderr: output.stderr,
-            truncated: cleanup.capturedOutput.truncated,
-          },
-        },
-        { operation },
-      );
-      if (retained !== undefined) retained.failure = failure;
-      throw failure;
-    }
-    return output;
+      snapshot,
+    );
   }
 
   private async client(operation: DuckdbOperation, signal?: AbortSignal) {
@@ -317,74 +269,8 @@ export class DuckdbProvider {
     this.nativeLimitations = prepared.limitations;
   }
 
-  private async discard(
-    snapshot: DuckdbSnapshot,
-  ): Promise<AnalysisError | undefined> {
-    try {
-      if (
-        [...this.commands.values()].some(
-          (command) => command.snapshot === snapshot && !command.ownerReleased,
-        )
-      )
-        throw new Error(
-          "An unreleased command still owns the database snapshot",
-        );
-      await snapshot.close();
-      this.snapshots.delete(snapshot);
-      this.snapshotFailures.get(snapshot)?.resolveCleanup();
-      this.snapshotFailures.delete(snapshot);
-      return undefined;
-    } catch (cause) {
-      return new ProviderCleanupError(
-        "duckdb",
-        [snapshot.path],
-        { reason: String(cause) },
-        { operation: DATABASE_OPERATION, cause },
-      );
-    }
-  }
-
-  async close(): Promise<void> {
-    const failures: unknown[] = [];
-    try {
-      await this.#resources.close();
-    } catch (cause) {
-      failures.push(cause);
-    }
-    for (const [owner, command] of this.commands) {
-      if (command.ownerReleased) continue;
-      try {
-        const result = await owner.stop();
-        if (result.status === "incomplete") failures.push(result.reason);
-        else if (result.status === "not-owned")
-          failures.push("Command ownership remains unresolved");
-        else {
-          command.ownerReleased = true;
-          if (command.snapshot === undefined) {
-            command.failure?.resolveCleanup();
-            this.commands.delete(owner);
-          }
-        }
-      } catch (cause) {
-        failures.push(cause);
-      }
-    }
-    for (const snapshot of this.snapshots) {
-      const failure = await this.discard(snapshot);
-      if (failure !== undefined) failures.push(failure);
-      else
-        for (const [owner, command] of this.commands)
-          if (command.snapshot === snapshot) this.commands.delete(owner);
-    }
-    if (failures.length > 0)
-      throw new ProviderCleanupError(
-        "duckdb",
-        [...this.snapshots]
-          .map((snapshot) => snapshot.path)
-          .concat([...this.commands.values()].flatMap((c) => c.resources)),
-        { reason: "Owned process or snapshot cleanup failed" },
-        { operation: "duckdb.close", cause: new AggregateError(failures) },
-      );
+  close(): Promise<void> {
+    return this.#commands.close();
   }
 
   async execute(
@@ -423,9 +309,8 @@ export class DuckdbProvider {
         );
       else {
         await this.prepareBound();
-        const owned = await DuckdbSnapshot.create();
+        const owned = this.#commands.adopt(await DuckdbSnapshot.create());
         snapshot = owned;
-        this.snapshots.add(owned);
         const input = request.input;
         const identity = await owned.capture(input.path, signal);
         const query = (sql: string) =>
@@ -565,52 +450,11 @@ export class DuckdbProvider {
                 ),
       );
     }
-    if (signal?.aborted && result.ok)
-      result = err(
-        new AnalysisCancelledError(request.operation, { cause: signal.reason }),
-      );
-    const pending =
-      snapshot === undefined
-        ? undefined
-        : [...this.commands.values()].find((c) => c.snapshot === snapshot);
-    if (snapshot !== undefined && pending === undefined) {
-      const cleanup = await this.discard(snapshot);
-      if (cleanup !== undefined)
-        result = err(
-          result.ok
-            ? cleanup
-            : analysisErrorWithCleanupFailure(
-                result.error,
-                cleanup,
-                request.operation,
-              ),
-        );
-    }
-    if (
-      snapshot !== undefined &&
-      pending !== undefined &&
-      (result.ok || !(result.error instanceof ProviderCleanupError))
-    )
-      result = err(
-        new ProviderCleanupError(
-          "duckdb",
-          [...new Set([snapshot.path, ...pending.resources])],
-          {
-            reason: pending.reason,
-            previous_error: result.ok
-              ? null
-              : projectAnalysisError(result.error),
-          },
-          { operation: request.operation },
-        ),
-      );
-    if (
-      snapshot !== undefined &&
-      this.snapshots.has(snapshot) &&
-      !result.ok &&
-      result.error.cleanupIncomplete
-    )
-      this.snapshotFailures.set(snapshot, result.error);
-    return result;
+    return this.#commands.settle({
+      operation: request.operation,
+      result,
+      workspace: snapshot,
+      signal,
+    });
   }
 }

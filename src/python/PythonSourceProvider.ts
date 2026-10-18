@@ -36,20 +36,16 @@ import {
   AnalysisResourceConstraintError,
 } from "../domain/analysisErrorCore.js";
 import { AnalysisError } from "../domain/analysisErrorBase.js";
-import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
-import { analysisErrorWithCleanupFailure } from "../domain/analysisErrorCleanup.js";
 import { err, ok, type Result } from "../domain/result.js";
 import { ProviderCleanupError } from "../domain/providerCleanupError.js";
-import type { ProviderProcessSupervisor } from "../process/ProviderProcess.js";
-import {
-  runBoundedToolCommand,
-  type BoundedToolCommandCleanup,
-  type BoundedToolCommandLauncher,
-  type BoundedToolFailures,
-  type BoundedToolNativeBound,
+import type {
+  BoundedToolCommandLauncher,
+  BoundedToolFailures,
+  BoundedToolNativeBound,
 } from "../process/BoundedToolCommand.js";
 import { prepareNativeToolBound } from "../process/NativeToolBound.js";
 import { ArtifactAnalysisResources } from "../process/ArtifactAnalysisResources.js";
+import { OwnedToolCommands } from "../process/OwnedToolCommands.js";
 import { readLinuxResourceLimits } from "../process/LinuxResourceLimits.js";
 import { readStableArtifact } from "../artifacts/readStableArtifact.js";
 import { PrivateRuntimeRoot } from "../process/PrivateRuntimeRoot.js";
@@ -136,14 +132,6 @@ const coverage = (
     : []),
 ];
 
-interface RetainedPythonCommand {
-  readonly root: PrivateRuntimeRoot | undefined;
-  readonly resources: readonly string[];
-  readonly reason: string;
-  ownerReleased: boolean;
-  failure: ProviderCleanupError | undefined;
-}
-
 export interface PythonSourceProviderOptions {
   readonly environment?: Readonly<Record<string, string | undefined>>;
   readonly launcher?: BoundedToolCommandLauncher;
@@ -205,13 +193,14 @@ export class PythonSourceProvider {
       details: { max_concurrent_inspections: 1 },
     },
   );
+  readonly #commands = new OwnedToolCommands<PrivateRuntimeRoot>(
+    "python",
+    OPERATION,
+    this.#resources,
+    "request workspace",
+  );
   private readonly environment: Readonly<Record<string, string | undefined>>;
   private readonly launcher: BoundedToolCommandLauncher | undefined;
-  private readonly roots = new Set<PrivateRuntimeRoot>();
-  private readonly commands = new Map<
-    ProviderProcessSupervisor,
-    RetainedPythonCommand
-  >();
   private nativeBound: BoundedToolNativeBound | undefined;
   private nativeLimitations: readonly string[] = [];
 
@@ -220,7 +209,7 @@ export class PythonSourceProvider {
     this.launcher = options.launcher;
   }
 
-  private async run(
+  private run(
     operation: PythonOperation,
     command: string,
     args: readonly string[],
@@ -229,57 +218,23 @@ export class PythonSourceProvider {
     owned?: PrivateRuntimeRoot,
     inputPath?: string,
   ) {
-    let cleanup: BoundedToolCommandCleanup | undefined;
-    let retained: RetainedPythonCommand | undefined;
-    const output = await runBoundedToolCommand({
-      operation,
-      command,
-      arguments: args,
-      limits,
-      signal,
-      failures: PYTHON_FAILURES,
-      environment: this.environment,
-      ...(inputPath === undefined ? {} : { inputPath }),
-      ...(inputPath === undefined || this.nativeBound === undefined
-        ? {}
-        : { nativeBound: this.nativeBound }),
-      ...(this.launcher === undefined ? {} : { launcher: this.launcher }),
-      retain: (owner, resources, reason, capturedOutput) => {
-        retained = {
-          root: owned,
-          resources,
-          reason,
-          ownerReleased: false,
-          failure: undefined,
-        };
-        this.commands.set(owner, retained);
-        cleanup = { reason, resources, capturedOutput };
+    return this.#commands.runClean(
+      {
+        operation,
+        command,
+        arguments: args,
+        limits,
+        signal,
+        failures: PYTHON_FAILURES,
+        environment: this.environment,
+        ...(inputPath === undefined ? {} : { inputPath }),
+        ...(inputPath === undefined || this.nativeBound === undefined
+          ? {}
+          : { nativeBound: this.nativeBound }),
+        ...(this.launcher === undefined ? {} : { launcher: this.launcher }),
       },
-    });
-    if (cleanup !== undefined) {
-      const failure = new ProviderCleanupError(
-        "python",
-        [
-          ...new Set([
-            ...(owned === undefined ? [] : [owned.path]),
-            ...cleanup.resources,
-          ]),
-        ],
-        {
-          reason: cleanup.reason,
-          previous_error: null,
-          captured_output: {
-            stdout: output.stdout,
-            stderr: output.stderr,
-            truncated: cleanup.capturedOutput.truncated,
-          },
-        },
-        { operation },
-      );
-      if (retained !== undefined) retained.failure = failure;
-      throw failure;
-    }
-    return output;
+      owned,
+    );
   }
 
   private async client(operation: PythonOperation, signal?: AbortSignal) {
@@ -350,70 +305,8 @@ export class PythonSourceProvider {
     this.nativeLimitations = prepared.limitations;
   }
 
-  private async discard(
-    root: PrivateRuntimeRoot,
-  ): Promise<AnalysisError | undefined> {
-    try {
-      if (
-        [...this.commands.values()].some(
-          (c) => c.root === root && !c.ownerReleased,
-        )
-      )
-        throw new Error(
-          "An unreleased command still owns the request workspace",
-        );
-      await root.close();
-      this.roots.delete(root);
-      return undefined;
-    } catch (cause) {
-      return new ProviderCleanupError(
-        "python",
-        [root.path],
-        { reason: String(cause) },
-        { operation: OPERATION, cause },
-      );
-    }
-  }
-
-  async close(): Promise<void> {
-    const failures: unknown[] = [];
-    try {
-      await this.#resources.close();
-    } catch (cause) {
-      failures.push(cause);
-    }
-    for (const [owner, command] of this.commands) {
-      if (command.ownerReleased) continue;
-      try {
-        const result = await owner.stop();
-        if (result.status === "incomplete") failures.push(result.reason);
-        else if (result.status === "not-owned")
-          failures.push("Command ownership remains unresolved");
-        else {
-          command.ownerReleased = true;
-          command.failure?.resolveCleanup();
-          if (command.root === undefined) this.commands.delete(owner);
-        }
-      } catch (cause) {
-        failures.push(cause);
-      }
-    }
-    for (const root of this.roots) {
-      const failure = await this.discard(root);
-      if (failure !== undefined) failures.push(failure);
-      else
-        for (const [owner, command] of this.commands)
-          if (command.root === root) this.commands.delete(owner);
-    }
-    if (failures.length > 0)
-      throw new ProviderCleanupError(
-        "python",
-        [...this.roots]
-          .map((root) => root.path)
-          .concat([...this.commands.values()].flatMap((c) => c.resources)),
-        { reason: "Owned process or workspace cleanup failed" },
-        { operation: "python.close", cause: new AggregateError(failures) },
-      );
+  close(): Promise<void> {
+    return this.#commands.close();
   }
 
   async execute(
@@ -451,9 +344,9 @@ export class PythonSourceProvider {
     operation: SourceOperation,
   ): Promise<PrivateRuntimeRoot> {
     try {
-      const root = await PrivateRuntimeRoot.create({ prefix: "rea-python-" });
-      this.roots.add(root);
-      return root;
+      return this.#commands.adopt(
+        await PrivateRuntimeRoot.create({ prefix: "rea-python-" }),
+      );
     } catch (cause) {
       if (cause instanceof PrivateRuntimeRootUnavailableError)
         throw new AnalysisCapabilityUnavailableError(
@@ -645,39 +538,11 @@ export class PythonSourceProvider {
                 ),
       );
     }
-    if (signal?.aborted && result.ok)
-      result = err(
-        new AnalysisCancelledError(request.operation, { cause: signal.reason }),
-      );
-    if (owned !== undefined) {
-      const pending = [...this.commands.values()].find((c) => c.root === owned);
-      if (pending === undefined) {
-        const cleanup = await this.discard(owned);
-        if (cleanup !== undefined)
-          result = err(
-            result.ok
-              ? cleanup
-              : analysisErrorWithCleanupFailure(
-                  result.error,
-                  cleanup,
-                  request.operation,
-                ),
-          );
-      } else if (result.ok || !(result.error instanceof ProviderCleanupError))
-        result = err(
-          new ProviderCleanupError(
-            "python",
-            [...new Set([owned.path, ...pending.resources])],
-            {
-              reason: pending.reason,
-              previous_error: result.ok
-                ? null
-                : projectAnalysisError(result.error),
-            },
-            { operation: request.operation },
-          ),
-        );
-    }
-    return result;
+    return this.#commands.settle({
+      operation: request.operation,
+      result,
+      workspace: owned,
+      signal,
+    });
   }
 }
