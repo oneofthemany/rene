@@ -350,3 +350,21 @@ function jsonWidget(shape, schema, id) {
     },
   };
 }
+
+/**
+ * Picks the values whose names are exactly this schema's string-valued
+ * properties. Names are never translated between tools and workflows.
+ */
+export function matchingArgs(schema, values) {
+  const properties = schema?.properties ?? {};
+  return Object.fromEntries(
+    Object.entries(values).filter(([name, value]) => {
+      if (!Object.hasOwn(properties, name)) return false;
+      const shape = classify(properties[name]);
+      return (
+        shape.kind === "string" ||
+        (shape.kind === "enum" && shape.values.includes(value))
+      );
+    }),
+  );
+}

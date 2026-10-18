@@ -37,8 +37,10 @@ const MODULES = [
   "app.js",
   "catalog.js",
   "form.js",
+  "markdown.js",
   "render.js",
   "results.js",
+  "workflows.js",
 ];
 const STATIC_FILES = new Map([
   ["/", { file: "index.html", type: "text/html; charset=utf-8" }],
@@ -218,6 +220,8 @@ async function routeApi(request, response, url) {
     return sendJson(response, 200, { prompts: mcp.prompts });
   }
   if (route === "POST /api/call") return callTool(request, response);
+  if (route === "POST /api/prompts/get") return getPrompt(request, response);
+  if (route === "POST /api/complete") return complete(request, response);
   const cancel = /^\/api\/calls\/(\d+)\/cancel$/.exec(url.pathname);
   if (request.method === "POST" && cancel) {
     const call = calls.get(Number(cancel[1]));
@@ -289,12 +293,87 @@ async function callTool(request, response) {
   }
 }
 
+/** prompts/get: REA renders the workflow brief from caller-selected arguments. */
+async function getPrompt(request, response) {
+  const body = await readJsonBody(request);
+  if (
+    typeof body?.name !== "string" ||
+    (body.arguments !== undefined && !isStringRecord(body.arguments))
+  ) {
+    return sendJson(response, 400, {
+      error: "Expected { name: string, arguments?: Record<string, string> }.",
+    });
+  }
+  return forward(response, (client) =>
+    client.getPrompt(
+      { name: body.name, arguments: body.arguments ?? {} },
+      { timeout: 60_000 },
+    ),
+  );
+}
+
+/** completion/complete for one prompt argument, with the other filled arguments as context. */
+async function complete(request, response) {
+  const body = await readJsonBody(request);
+  if (
+    typeof body?.prompt !== "string" ||
+    typeof body.argument?.name !== "string" ||
+    typeof body.argument?.value !== "string" ||
+    (body.context !== undefined && !isStringRecord(body.context))
+  ) {
+    return sendJson(response, 400, {
+      error:
+        "Expected { prompt: string, argument: { name, value }, context?: Record<string, string> }.",
+    });
+  }
+  if (!mcp.client?.getServerCapabilities()?.completions) {
+    return sendJson(response, 200, { completion: { values: [] } });
+  }
+  return forward(response, (client) =>
+    client.complete(
+      {
+        ref: { type: "ref/prompt", name: body.prompt },
+        argument: { name: body.argument.name, value: body.argument.value },
+        ...(body.context ? { context: { arguments: body.context } } : {}),
+      },
+      { timeout: 15_000 },
+    ),
+  );
+}
+
+/** Runs one short MCP request and returns its result or a 502 with the reason. */
+async function forward(response, request) {
+  if (mcp.state !== "ready" || !mcp.client) {
+    return sendJson(response, 503, {
+      error: mcp.failure ?? "The REA MCP server is not ready.",
+    });
+  }
+  try {
+    return sendJson(response, 200, await request(mcp.client));
+  } catch (cause) {
+    return sendJson(response, 502, {
+      error: describeError(cause),
+      code: cause instanceof ProtocolError ? cause.code : undefined,
+    });
+  }
+}
+
+function isStringRecord(value) {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.values(value).every((entry) => typeof entry === "string")
+  );
+}
+
 function status() {
   return {
     state: mcp.state,
     failure: mcp.failure,
     serverVersion: mcp.serverVersion,
     toolCount: mcp.tools.length,
+    promptCount: mcp.prompts.length,
     startedAt: mcp.startedAt,
     activeCalls: [...calls.entries()].map(([id, call]) => ({
       id,

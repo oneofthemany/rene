@@ -30,19 +30,30 @@
           <input
             id="tool-filter"
             type="search"
-            placeholder="Filter 0 tools"
+            placeholder="Filter tools and workflows"
             autocomplete="off"
           />
         </label>
         <div id="tool-groups" class="groups"></div>
       </nav>
 
-      <section class="workspace" aria-live="polite">
-        <div id="tool-view" class="tool-view">
+      <section class="workspace">
+        <section
+          id="workflow-panel"
+          class="workflow-panel"
+          aria-label="Active workflow"
+          hidden
+        ></section>
+        <div id="tool-view" class="tool-view" aria-live="polite">
           <div class="empty">
-            <h2>Pick a tool to start</h2>
+            <h2>Pick a tool or a guided workflow</h2>
             <p>
-              Most binary workflows begin with
+              Guided workflows turn a question, such as how a feature works or
+              why something crashes, into a brief with suggested tools. The
+              brief stays pinned above the tool you're using.
+            </p>
+            <p>
+              To work directly, start with
               <button type="button" class="link" data-open-tool="open_binary">
                 open_binary</button
               >. The session stays open across calls until you run

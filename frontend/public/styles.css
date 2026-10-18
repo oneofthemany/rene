@@ -850,3 +850,130 @@ progress {
   padding: 0 6px;
   font-size: 12px;
 }
+
+/* ---- Guided workflows -------------------------------------------------- */
+
+.workflow-item .name {
+  font-family: var(--sans);
+  font-size: 13.5px;
+}
+
+.effect.workflow {
+  color: var(--observed);
+}
+
+.workflow-panel {
+  margin: 0 0 24px;
+  max-width: 980px;
+}
+
+.workflow {
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-left: 4px solid var(--observed);
+  border-radius: var(--radius-m);
+}
+
+.workflow > summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  padding: 10px 16px;
+  cursor: pointer;
+}
+
+.wf-title {
+  font-weight: 700;
+}
+
+.wf-args {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+.wf-body {
+  padding: 0 16px;
+  max-height: 46vh;
+  overflow: auto;
+  border-top: 1px solid var(--rule);
+}
+
+.wf-body h3 {
+  font-size: 17px;
+  margin: 14px 0 6px;
+}
+
+.wf-body h4 {
+  font-size: 14px;
+  margin: 16px 0 6px;
+}
+
+.wf-body p,
+.wf-body li {
+  max-width: 78ch;
+}
+
+.wf-body li {
+  margin-bottom: 8px;
+}
+
+.wf-body .continuation {
+  margin-top: 4px;
+  color: var(--muted);
+}
+
+.wf-body code {
+  background: var(--code-bg);
+  border-radius: var(--radius-s);
+  padding: 0 4px;
+}
+
+.wf-role {
+  color: var(--muted);
+  font-size: 13px;
+  margin-top: 12px;
+}
+
+.tool-chip {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  border: 1px solid var(--observed);
+  color: var(--observed);
+  background: transparent;
+  border-radius: var(--radius-s);
+  padding: 0 6px;
+  margin: 1px 0;
+  cursor: pointer;
+}
+
+.tool-chip:hover {
+  background: var(--code-bg);
+}
+
+.tool-chip[data-outcome="ok"] {
+  border-color: var(--derived);
+  color: var(--derived);
+}
+
+.tool-chip[data-outcome="ok"]::before {
+  content: "✓ ";
+}
+
+.tool-chip[data-outcome="error"] {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.tool-chip[data-outcome="error"]::before {
+  content: "✕ ";
+}
+
+.wf-actions {
+  display: flex;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--rule);
+}

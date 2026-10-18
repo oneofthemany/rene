@@ -23,6 +23,17 @@ its environment, so start the bridge from a shell where those are set.
 
 ## What it does
 
+- **Guided workflows.** REA's MCP prompts are listed first in the catalog.
+  Each argument field fills its suggestions from REA's `completion/complete`,
+  using the other filled arguments as context. **Start workflow** asks REA to
+  render the brief (`prompts/get`) and pins it above the tool view, where it
+  stays while you open and run tools. Tool names in the brief become buttons
+  that open the tool. Arguments are prefilled only where the tool has a string
+  property with exactly the same name, and the tool view lists what was
+  filled. Names are never translated, so `target_path` doesn't fill
+  `open_binary`'s `path`. Buttons show a check or a cross once that tool has
+  run since the workflow started. **Copy as agent prompt** copies the brief
+  REA produced, unchanged.
 - **Catalog.** Lists every advertised tool, grouped by family, with effect
   badges taken from MCP annotations (`changes`, `read`, `live`).
 - **Forms built from each tool's input schema.** Empty fields are left out of
@@ -59,8 +70,10 @@ its environment, so start the bridge from a shell where those are set.
 server.mjs          bridge: MCP child owner + HTTP boundary
 public/index.html   shell
 public/api.js       token + bridge client + NDJSON reader
-public/catalog.js   tool families and effect badges
-public/form.js      JSON Schema → form widgets
+public/catalog.js   sidebar: workflows, tool families, effect badges
+public/form.js      JSON Schema → form widgets, exact-name workflow prefill
+public/markdown.js  workflow brief Markdown → DOM (no innerHTML)
+public/workflows.js workflow argument form, completions, pinned brief
 public/render.js    Evidence/provenance, errors, lazy JSON tree
 public/results.js   result view and history
 public/app.js       state, tool view, run/cancel

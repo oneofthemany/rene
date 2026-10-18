@@ -7,17 +7,22 @@ import {
   readToken,
   setToken,
 } from "./api.js";
-import { effectBadge, GROUPS, groupTools } from "./catalog.js";
-import { createForm } from "./form.js";
+import { effectBadge, renderCatalog as drawCatalog } from "./catalog.js";
+import { createForm, matchingArgs } from "./form.js";
 import { h, renderError } from "./render.js";
 import {
   renderHistory as drawHistory,
   showEntry as drawEntry,
 } from "./results.js";
+import { renderWorkflowPanel, showWorkflowForm } from "./workflows.js";
 
 const state = {
   tools: [],
+  prompts: [],
+  /** { kind: "tool" | "prompt", name } */
   selected: undefined,
+  /** Active guided workflow: { prompt, args, result, startedAt } */
+  workflow: undefined,
   /** Active view of the current tool: { tool, form, mode, raw } */
   view: undefined,
   running: undefined,
@@ -55,7 +60,7 @@ async function refreshStatus() {
     dot.dataset.state = status.state;
     text.textContent =
       status.state === "ready"
-        ? `${status.serverVersion?.name ?? "rea"} ${status.serverVersion?.version ?? ""}, ${status.toolCount} tools`
+        ? `${status.serverVersion?.name ?? "rea"} ${status.serverVersion?.version ?? ""}, ${status.toolCount} tools, ${status.promptCount} workflows`
         : status.state === "failed"
           ? `Server stopped: ${status.failure ?? "unknown failure"}`
           : "Starting REA…";
@@ -96,60 +101,27 @@ document.getElementById("restart").addEventListener("click", async (event) => {
 // Catalog
 
 async function loadTools() {
-  const { tools } = await apiJson("/api/tools");
+  const [{ tools }, { prompts }] = await Promise.all([
+    apiJson("/api/tools"),
+    apiJson("/api/prompts"),
+  ]);
   state.tools = tools;
+  state.prompts = prompts;
   document.getElementById("tool-filter").placeholder =
-    `Filter ${tools.length} tools`;
+    "Filter tools and workflows";
   renderCatalog();
+  renderWorkflow();
 }
 
 function renderCatalog() {
-  const filter = document
-    .getElementById("tool-filter")
-    .value.trim()
-    .toLowerCase();
-  const groups = groupTools(state.tools, filter);
-  const container = document.getElementById("tool-groups");
-  container.replaceChildren(
-    ...groups.map(([label, tools]) =>
-      h(
-        "details",
-        {
-          open:
-            Boolean(filter) ||
-            tools.some((tool) => tool.name === state.selected) ||
-            label === GROUPS[0][0],
-        },
-        h("summary", {}, label, h("span", { class: "count" }, tools.length)),
-        h(
-          "ul",
-          {},
-          tools.map((tool) =>
-            h(
-              "li",
-              {},
-              h(
-                "button",
-                {
-                  type: "button",
-                  class: "tool-item",
-                  "aria-current": String(tool.name === state.selected),
-                  title: tool.title ?? tool.name,
-                  onclick: () => selectTool(tool.name),
-                },
-                h("span", { class: "name" }, tool.name),
-                effectBadge(tool.annotations),
-              ),
-            ),
-          ),
-        ),
-      ),
-    ),
-  );
-  if (groups.length === 0)
-    container.replaceChildren(
-      h("p", { class: "hint catalog-empty" }, `No tools match “${filter}”.`),
-    );
+  drawCatalog({
+    tools: state.tools,
+    prompts: state.prompts,
+    filter: document.getElementById("tool-filter").value.trim().toLowerCase(),
+    selected: state.selected,
+    onTool: (name) => void selectTool(name),
+    onPrompt: (name) => void selectPrompt(name),
+  });
 }
 
 document.getElementById("tool-filter").addEventListener("input", renderCatalog);
@@ -206,8 +178,29 @@ function descriptionBlock(text) {
   return [description, expand];
 }
 
-async function selectTool(name, presetArgs) {
-  state.selected = name;
+/** Starting arguments: an explicit preset, else last-used values plus workflow matches. */
+function initialArgs(tool, presetArgs, prefill) {
+  if (presetArgs) return { initial: presetArgs, prefillNote: null };
+  const prefilled = prefill ? matchingArgs(tool.inputSchema, prefill) : {};
+  const names = Object.keys(prefilled);
+  return {
+    initial: { ...loadLastArgs(tool.name), ...prefilled },
+    prefillNote: names.length
+      ? h(
+          "p",
+          { class: "hint" },
+          `Filled from the workflow: ${names.join(", ")}.`,
+        )
+      : null,
+  };
+}
+
+/**
+ * Opens a tool. presetArgs replaces the form; prefill (workflow arguments)
+ * fills only properties with exactly the same name.
+ */
+async function selectTool(name, presetArgs, prefill) {
+  state.selected = { kind: "tool", name };
   renderCatalog();
   const view = document.getElementById("tool-view");
   view.replaceChildren(h("p", { class: "hint" }, `Loading ${name}…`));
@@ -218,7 +211,7 @@ async function selectTool(name, presetArgs) {
     view.replaceChildren(renderError(undefined, cause.message));
     return;
   }
-  if (state.selected !== name) return;
+  if (state.selected?.kind !== "tool" || state.selected.name !== name) return;
 
   const form = createForm(tool.inputSchema);
   const raw = h("textarea", {
@@ -244,7 +237,7 @@ async function selectTool(name, presetArgs) {
     confirming: false,
   };
 
-  const initial = presetArgs ?? loadLastArgs(name) ?? {};
+  const { initial, prefillNote } = initialArgs(tool, presetArgs, prefill);
   form.write(initial);
   raw.value = JSON.stringify(initial, null, 2);
 
@@ -264,7 +257,8 @@ async function selectTool(name, presetArgs) {
 
   const [description, expand] = descriptionBlock(tool.description ?? "");
 
-  view.replaceChildren(
+  // Optional parts are null; DOM replaceChildren would print them as "null".
+  const parts = [
     h(
       "div",
       { class: "tool-head" },
@@ -274,6 +268,7 @@ async function selectTool(name, presetArgs) {
     ),
     description,
     expand,
+    prefillNote,
     h(
       "form",
       { onsubmit: (event) => (event.preventDefault(), void run()) },
@@ -289,7 +284,8 @@ async function selectTool(name, presetArgs) {
       rawHost,
       h("div", { class: "actions" }, runButton, cancelButton, formError),
     ),
-  );
+  ];
+  view.replaceChildren(...parts.filter(Boolean));
 
   function setMode(mode) {
     if (mode === state.view.mode) return;
@@ -385,7 +381,7 @@ async function run() {
     outcome: "running",
   };
   state.history.unshift(entry);
-  state.running = { entry, callId: undefined };
+  state.running = { entry, view, callId: undefined };
   renderHistory();
   view.runButton.disabled = true;
   view.cancelButton.hidden = false;
@@ -447,18 +443,59 @@ async function run() {
       view.cancelButton.hidden = true;
     }
     renderHistory();
+    renderWorkflow();
     showEntry(entry);
   }
 }
 
 async function cancelRun() {
-  const callId = state.running?.callId;
+  const { callId, view } = state.running ?? {};
   if (callId === undefined) return;
-  state.view.cancelButton.textContent = "Cancelling…";
+  view.cancelButton.textContent = "Cancelling…";
   await apiJson(`/api/calls/${callId}/cancel`, { method: "POST" }).catch(
     () => {},
   );
-  state.view.cancelButton.textContent = "Cancel";
+  view.cancelButton.textContent = "Cancel";
+}
+
+// ---------------------------------------------------------------------------
+// Guided workflows
+
+function selectPrompt(name) {
+  const prompt = state.prompts.find((candidate) => candidate.name === name);
+  if (!prompt) return;
+  state.selected = { kind: "prompt", name };
+  renderCatalog();
+  showWorkflowForm(prompt, {
+    onStart: (workflow) => {
+      state.workflow = workflow;
+      renderWorkflow();
+      document
+        .getElementById("workflow-panel")
+        .scrollIntoView({ block: "start" });
+    },
+  });
+}
+
+function renderWorkflow() {
+  const workflow = state.workflow;
+  // Latest outcome per tool since the workflow started; history is newest first.
+  const outcomes = new Map();
+  for (const entry of state.history) {
+    if (!workflow || entry.startedAt < workflow.startedAt) break;
+    if (entry.outcome !== "running" && !outcomes.has(entry.name)) {
+      outcomes.set(entry.name, entry.outcome);
+    }
+  }
+  renderWorkflowPanel(workflow, {
+    toolNames: new Set(state.tools.map((tool) => tool.name)),
+    outcomes,
+    onTool: (name) => void selectTool(name, undefined, workflow?.args),
+    onClose: () => {
+      state.workflow = undefined;
+      renderWorkflow();
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------
