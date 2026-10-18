@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>REA Workbench</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <header class="bar">
+      <h1 class="brand">REA <span>workbench</span></h1>
+      <div class="server" id="server-status" role="status" aria-live="polite">
+        <span class="dot" data-state="starting"></span>
+        <span class="server-text">Connecting…</span>
+      </div>
+      <button type="button" class="quiet" id="restart">Restart server</button>
+      <button type="button" class="quiet" id="toggle-log" aria-expanded="false">
+        Server log
+      </button>
+    </header>
+
+    <pre class="log" id="server-log" hidden></pre>
+
+    <main class="layout">
+      <nav class="catalog" aria-label="Tools">
+        <label class="search">
+          <span class="visually-hidden">Filter tools</span>
+          <input
+            id="tool-filter"
+            type="search"
+            placeholder="Filter 0 tools"
+            autocomplete="off"
+          />
+        </label>
+        <div id="tool-groups" class="groups"></div>
+      </nav>
+
+      <section class="workspace" aria-live="polite">
+        <div id="tool-view" class="tool-view">
+          <div class="empty">
+            <h2>Pick a tool to start</h2>
+            <p>
+              Most binary workflows begin with
+              <button type="button" class="link" data-open-tool="open_binary">
+                open_binary</button
+              >. The session stays open across calls until you run
+              <button type="button" class="link" data-open-tool="close_binary">
+                close_binary
+              </button>
+              or restart the server.
+            </p>
+          </div>
+        </div>
+        <div id="result-view" class="result-view"></div>
+      </section>
+
+      <aside class="history" aria-label="Call history">
+        <h2>History</h2>
+        <ol id="history-list"></ol>
+        <p class="hint" id="history-empty">Calls you run appear here.</p>
+      </aside>
+    </main>
+
+    <div class="token-gate" id="token-gate" hidden>
+      <form id="token-form">
+        <h2>Paste your access token</h2>
+        <p>
+          Open the full URL that <code>node frontend/server.mjs</code> printed,
+          or paste the token from it.
+        </p>
+        <input id="token-input" autocomplete="off" spellcheck="false" />
+        <button type="submit">Connect</button>
+      </form>
+    </div>
+  </body>
+</html>
