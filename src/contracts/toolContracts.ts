@@ -14,6 +14,8 @@ import { FIRMWARE_TOOL_CONTRACTS } from "./firmware/firmwareToolContracts.js";
 import { ANDROID_TOOL_CONTRACTS } from "./android/androidToolContracts.js";
 import { APKTOOL_TOOL_CONTRACTS } from "./apktool/apktoolToolContracts.js";
 import { PCAP_TOOL_CONTRACTS } from "./pcap/pcapToolContracts.js";
+import { DUCKDB_TOOL_CONTRACTS } from "./duckdb/duckdbToolContracts.js";
+import { PYTHON_TOOL_CONTRACTS } from "./python/pythonToolContracts.js";
 import { FLUTTER_TOOL_CONTRACTS } from "./flutter/flutterToolContracts.js";
 import { JEB_TOOL_CONTRACTS } from "./jeb/jebToolContracts.js";
 import { ADB_TOOL_CONTRACTS } from "./adb/adbToolContracts.js";
@@ -54,6 +56,8 @@ export const TOOL_CONTRACTS = [
   ...ANDROID_TOOL_CONTRACTS,
   ...APKTOOL_TOOL_CONTRACTS,
   ...PCAP_TOOL_CONTRACTS,
+  ...DUCKDB_TOOL_CONTRACTS,
+  ...PYTHON_TOOL_CONTRACTS,
   ...FLUTTER_TOOL_CONTRACTS,
   ...JEB_TOOL_CONTRACTS,
   ...ADB_TOOL_CONTRACTS,

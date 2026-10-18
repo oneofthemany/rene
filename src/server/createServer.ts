@@ -94,6 +94,14 @@ import { createFirmwareAnalysisProvider } from "../composition/firmware.js";
 import { registerAndroidTools } from "./registerAndroidTools.js";
 import { registerApktoolTools } from "./registerApktoolTools.js";
 import { registerPcapTools } from "./registerPcapTools.js";
+import { registerDuckdbTools } from "./registerDuckdbTools.js";
+import { registerPythonTools } from "./registerPythonTools.js";
+import type { PythonAnalysisPort } from "../application/python/PythonAnalysisPort.js";
+import { PythonAnalysisService } from "../application/python/PythonAnalysisService.js";
+import { createPythonAnalysisProvider } from "../composition/python.js";
+import type { DuckdbAnalysisPort } from "../application/duckdb/DuckdbAnalysisPort.js";
+import { DuckdbAnalysisService } from "../application/duckdb/DuckdbAnalysisService.js";
+import { createDuckdbAnalysisProvider } from "../composition/duckdb.js";
 import { registerFlutterTools } from "./registerFlutterTools.js";
 import { registerJebTools } from "./registerJebTools.js";
 import { registerAdbTools } from "./registerAdbTools.js";
@@ -170,6 +178,8 @@ export interface CreateServerOptions {
   readonly androidAnalysis?: AndroidAnalysisPort;
   readonly apktoolAnalysis?: ApktoolResourceAnalysisPort;
   readonly pcapAnalysis?: PcapAnalysisPort;
+  readonly duckdbAnalysis?: DuckdbAnalysisPort;
+  readonly pythonAnalysis?: PythonAnalysisPort;
   readonly flutterAnalysis?: FlutterBuildAnalysisPort;
   readonly jebAnalysis?: JebAnalysisPort;
   readonly adbDeviceAnalysis?: AdbDeviceAnalysisPort;
@@ -350,6 +360,10 @@ export const createServer = (
   const android =
     options.androidAnalysis ?? createAndroidAnalysisProvider(environment);
   const pcap = options.pcapAnalysis ?? createPcapAnalysisProvider(environment);
+  const duckdb =
+    options.duckdbAnalysis ?? createDuckdbAnalysisProvider(environment);
+  const python =
+    options.pythonAnalysis ?? createPythonAnalysisProvider(environment);
   const flutter =
     options.flutterAnalysis ?? createFlutterBuildAnalysisProvider();
   const fridaInstrumentation =
@@ -386,6 +400,8 @@ export const createServer = (
       adbDevice.close(),
       flutter.close(),
       pcap.close(),
+      duckdb.close(),
+      python.close(),
       evmInterface.close(),
       sqliteDatabase.close(),
       binaryLayout.close(),
@@ -573,6 +589,20 @@ export const createServer = (
     recordEvidence,
     analysisAdmission,
     evidenceById,
+  );
+  registerDuckdbTools(
+    server,
+    new DuckdbAnalysisService(duckdb),
+    toolLogger,
+    recordEvidence,
+    analysisAdmission,
+  );
+  registerPythonTools(
+    server,
+    new PythonAnalysisService(python),
+    toolLogger,
+    recordEvidence,
+    analysisAdmission,
   );
   registerFlutterTools(
     server,

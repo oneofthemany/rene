@@ -64,6 +64,16 @@ export const toolFamilyCatalog = (sources) => {
       contracts: sources.pcapContracts.PCAP_TOOL_CONTRACTS,
     },
     {
+      id: "duckdb",
+      surface: "duckdb-provider",
+      contracts: sources.duckdbContracts.DUCKDB_TOOL_CONTRACTS,
+    },
+    {
+      id: "python",
+      surface: "python-provider",
+      contracts: sources.pythonContracts.PYTHON_TOOL_CONTRACTS,
+    },
+    {
       id: "flutter",
       surface: "flutter-provider",
       contracts: sources.flutterContracts.FLUTTER_TOOL_CONTRACTS,
@@ -309,6 +319,14 @@ export const providerCatalog = (sources) => {
     {
       identity: sources.pcapProvider.PCAP_PROVIDER_IDENTITY,
       contracts: sources.pcapContracts.PCAP_TOOL_CONTRACTS,
+    },
+    {
+      identity: sources.duckdbProvider.DUCKDB_PROVIDER_IDENTITY,
+      contracts: sources.duckdbContracts.DUCKDB_TOOL_CONTRACTS,
+    },
+    {
+      identity: sources.pythonProvider.PYTHON_PROVIDER_IDENTITY,
+      contracts: sources.pythonContracts.PYTHON_TOOL_CONTRACTS,
     },
     {
       identity: sources.flutterProvider.FLUTTER_PROVIDER_IDENTITY,

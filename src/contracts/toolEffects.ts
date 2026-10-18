@@ -265,6 +265,26 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
     launchesProcess: true,
     writesFilesystem: true,
   }),
+  inspect_python_client: effects({
+    mutatesSession: true,
+    launchesProcess: true,
+    writesFilesystem: true,
+  }),
+  inspect_python_blocking_calls: effects({
+    mutatesSession: true,
+    launchesProcess: true,
+    writesFilesystem: true,
+  }),
+  inspect_duckdb_client: effects({
+    mutatesSession: true,
+    launchesProcess: true,
+    writesFilesystem: true,
+  }),
+  inspect_duckdb_database: effects({
+    mutatesSession: true,
+    launchesProcess: true,
+    writesFilesystem: true,
+  }),
   inspect_pcap_client: effects({
     mutatesSession: true,
     launchesProcess: true,

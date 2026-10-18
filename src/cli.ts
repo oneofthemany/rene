@@ -27,6 +27,8 @@ import { registerFirmwareCommands } from "./cli/firmwareCommands.js";
 import { registerAndroidCommands } from "./cli/androidCommands.js";
 import { registerApktoolCommands } from "./cli/apktoolCommands.js";
 import { registerPcapCommands } from "./cli/pcapCommands.js";
+import { registerDuckdbCommands } from "./cli/duckdbCommands.js";
+import { registerPythonCommands } from "./cli/pythonCommands.js";
 import { registerFlutterCommands } from "./cli/flutterCommands.js";
 import { registerJebCommands } from "./cli/jebCommands.js";
 import { registerAdbCommands } from "./cli/adbCommands.js";
@@ -123,6 +125,8 @@ export const createCli = (
   registerAndroidCommands(cli, logger, environment);
   registerApktoolCommands(cli, logger, environment);
   registerPcapCommands(cli, logger, environment);
+  registerDuckdbCommands(cli, logger, environment);
+  registerPythonCommands(cli, logger, environment);
   registerFlutterCommands(cli, logger);
   registerJebCommands(cli, logger, environment);
   registerAdbCommands(cli, logger, environment);

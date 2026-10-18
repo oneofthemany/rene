@@ -70,6 +70,21 @@ table. This command does not require a native analysis provider. See
 [SQLite database snapshots](sqlite-databases.md) for database/WAL identity,
 source-file handling and row-value semantics.
 
+## DuckDB snapshots
+
+For a DuckDB database, use `rea inspect-duckdb-database PATH --json` with a
+caller-supplied DuckDB 1.x CLI on `PATH` or in `REA_DUCKDB_COMMAND`. Add
+`--table NAME --summarize` for a row sample and per-column statistics. See
+[DuckDB database snapshots](duckdb-databases.md) for WAL handling and isolation.
+
+## Python event-loop blocking
+
+`rea inspect-python-blocking-calls ROOT --json` finds blocking calls reachable
+from an asyncio event loop, using a caller-supplied Python 3.8+ (`python3` on
+`PATH`, or `REA_PYTHON_COMMAND`). `--seeds FILE` adds project seeds, accepted
+paths and loop-listener names. See
+[Python event-loop blocking](python-blocking-calls.md).
+
 ## Native analysis
 
 Inspect embedded Go build metadata without installing Go or configuring a

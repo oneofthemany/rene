@@ -34,6 +34,8 @@ export const TOOL_KINDS = [
   "electron-provider",
   "runtime-provider",
   "pcap-provider",
+  "duckdb-provider",
+  "python-provider",
   "application",
   "session",
 ] as const;

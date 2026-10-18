@@ -510,7 +510,12 @@ const workflowAvailabilityFor = ({
       remediation: "Run process capture on a supported Linux or macOS host.",
     };
   if (kind === "application") return { reason: "available", remediation: null };
-  if (kind === "pcap-provider" || kind === "flutter-provider")
+  if (
+    kind === "pcap-provider" ||
+    kind === "duckdb-provider" ||
+    kind === "python-provider" ||
+    kind === "flutter-provider"
+  )
     return { reason: "available", remediation: null };
   const electron = electronProviderAvailability(name, kind, policy);
   if (electron !== null) return electron;
