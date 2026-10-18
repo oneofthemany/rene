@@ -1,18 +1,18 @@
 import {
-  api,
   apiJson,
   getToken,
-  ndjson,
   onTokenRejected,
   readToken,
   setToken,
 } from "./api.js";
+import { cancelCall, isLive, startCall } from "./calls.js";
 import { effectBadge, renderCatalog as drawCatalog } from "./catalog.js";
 import { createForm, matchingArgs } from "./form.js";
 import { h, renderError } from "./render.js";
 import {
   renderHistory as drawHistory,
   showEntry as drawEntry,
+  showLive,
 } from "./results.js";
 import { renderWorkflowPanel, showWorkflowForm } from "./workflows.js";
 
@@ -25,7 +25,8 @@ const state = {
   workflow: undefined,
   /** Active view of the current tool: { tool, form, mode, raw } */
   view: undefined,
-  running: undefined,
+  /** The call whose live status or result is shown below the form. */
+  shown: undefined,
   history: [],
 };
 
@@ -221,18 +222,12 @@ async function selectTool(name, presetArgs, prefill) {
   });
   const formError = h("span", { class: "form-error", role: "alert" });
   const runButton = h("button", { type: "submit", class: "primary" }, "Run");
-  const cancelButton = h(
-    "button",
-    { type: "button", class: "quiet", hidden: true, onclick: cancelRun },
-    "Cancel",
-  );
   state.view = {
     tool,
     form,
     raw,
     mode: "form",
     runButton,
-    cancelButton,
     formError,
     confirming: false,
   };
@@ -282,7 +277,7 @@ async function selectTool(name, presetArgs, prefill) {
       ),
       formHost,
       rawHost,
-      h("div", { class: "actions" }, runButton, cancelButton, formError),
+      h("div", { class: "actions" }, runButton, formError),
     ),
   ];
   view.replaceChildren(...parts.filter(Boolean));
@@ -357,8 +352,8 @@ function saveLastArgs(name, args) {
 // ---------------------------------------------------------------------------
 // Running tools
 
-async function run() {
-  if (state.running) return;
+/** Starts a call for the current tool. Calls run concurrently. */
+function run() {
   const view = state.view;
   const args = currentArgs();
   if (!args) return;
@@ -374,88 +369,37 @@ async function run() {
   view.runButton.textContent = "Run";
   saveLastArgs(view.tool.name, args);
 
-  const entry = {
-    name: view.tool.name,
-    args,
-    startedAt: Date.now(),
-    outcome: "running",
-  };
+  const entry = startCall(view.tool.name, args, scheduleRender);
   state.history.unshift(entry);
-  state.running = { entry, view, callId: undefined };
-  renderHistory();
-  view.runButton.disabled = true;
-  view.cancelButton.hidden = false;
-
-  const resultView = document.getElementById("result-view");
-  const progress = h("progress", { "aria-label": "Progress" });
-  const progressText = h("span", {}, "Running…");
-  resultView.replaceChildren(
-    h(
-      "div",
-      { class: "run-line" },
-      h("strong", {}, entry.name),
-      progress,
-      progressText,
-    ),
-  );
-
-  try {
-    const response = await api("/api/call", {
-      method: "POST",
-      body: JSON.stringify({ name: entry.name, arguments: args }),
-    });
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      throw new Error(body.error ?? `Request failed with ${response.status}.`);
-    }
-    for await (const event of ndjson(response.body)) {
-      if (event.type === "started") state.running.callId = event.id;
-      else if (event.type === "progress") {
-        if (typeof event.total === "number") {
-          progress.max = event.total;
-          progress.value = event.progress;
-        }
-        progressText.textContent =
-          event.message ??
-          `Progress ${event.progress}${event.total ? ` of ${event.total}` : ""}`;
-      } else if (event.type === "result") {
-        entry.result = event.result;
-        entry.elapsedMs = event.elapsedMs;
-        entry.outcome = event.result.isError ? "error" : "ok";
-      } else if (event.type === "error") {
-        entry.failure = event.message;
-        entry.cancelled = event.cancelled;
-        entry.elapsedMs = event.elapsedMs;
-        entry.outcome = "error";
-      }
-    }
-    if (entry.outcome === "running") {
-      entry.outcome = "error";
-      entry.failure = "The bridge closed the call without a result.";
-    }
-  } catch (cause) {
-    entry.outcome = "error";
-    entry.failure = cause.message;
-  } finally {
-    state.running = undefined;
-    if (state.view === view) {
-      view.runButton.disabled = false;
-      view.cancelButton.hidden = true;
-    }
-    renderHistory();
-    renderWorkflow();
-    showEntry(entry);
-  }
+  state.shown = entry;
+  scheduleRender();
 }
 
-async function cancelRun() {
-  const { callId, view } = state.running ?? {};
-  if (callId === undefined) return;
-  view.cancelButton.textContent = "Cancelling…";
-  await apiJson(`/api/calls/${callId}/cancel`, { method: "POST" }).catch(
-    () => {},
-  );
-  view.cancelButton.textContent = "Cancel";
+let renderPending = false;
+/** Coalesces call updates into one render per frame. */
+function scheduleRender() {
+  if (renderPending) return;
+  renderPending = true;
+  requestAnimationFrame(() => {
+    renderPending = false;
+    renderHistory();
+    renderWorkflow();
+    renderShown();
+  });
+}
+
+let renderedFinal;
+/** Shows the selected call; a settled result renders once so tabs and scroll persist. */
+function renderShown(force = false) {
+  const entry = state.shown;
+  if (!entry) return;
+  if (isLive(entry)) {
+    renderedFinal = undefined;
+    showLive(entry, cancelCall);
+  } else if (force || renderedFinal !== entry) {
+    renderedFinal = entry;
+    drawEntry(entry, openEvidence);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -483,7 +427,7 @@ function renderWorkflow() {
   const outcomes = new Map();
   for (const entry of state.history) {
     if (!workflow || entry.startedAt < workflow.startedAt) break;
-    if (entry.outcome !== "running" && !outcomes.has(entry.name)) {
+    if (!isLive(entry) && !outcomes.has(entry.name)) {
       outcomes.set(entry.name, entry.outcome);
     }
   }
@@ -502,6 +446,7 @@ function renderWorkflow() {
 // Results
 
 function openEvidence(evidenceId) {
+  state.shown = undefined;
   void selectTool("inspect_analysis_view", {
     source: { kind: "retained-evidence", evidence_id: evidenceId },
     view: { kind: "summary" },
@@ -509,12 +454,16 @@ function openEvidence(evidenceId) {
   document.getElementById("result-view").replaceChildren();
 }
 
-const showEntry = (entry) => drawEntry(entry, openEvidence);
-
 const renderHistory = () =>
-  drawHistory(state.history, async (entry) => {
-    await selectTool(entry.name, entry.args);
-    showEntry(entry);
+  drawHistory(state.history, {
+    shown: state.shown,
+    onCancel: cancelCall,
+    onSelect: async (entry) => {
+      state.shown = entry;
+      await selectTool(entry.name, entry.args);
+      renderShown(true);
+      renderHistory();
+    },
   });
 
 // ---------------------------------------------------------------------------

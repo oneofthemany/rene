@@ -726,31 +726,39 @@ progress {
   padding: 0;
 }
 
-.history li button {
+.history li {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+
+.history li .h-open {
   width: 100%;
   text-align: left;
   border: 0;
   border-left: 3px solid var(--rule);
   background: none;
   padding: 4px 8px;
-  margin-bottom: 4px;
   cursor: pointer;
   display: grid;
 }
 
-.history li button:hover {
+.history li .h-open:hover,
+.history li[aria-current="true"] .h-open {
   background: var(--ground);
 }
 
-.history li[data-outcome="ok"] button {
+.history li[data-outcome="ok"] .h-open {
   border-left-color: var(--derived);
 }
 
-.history li[data-outcome="error"] button {
+.history li[data-outcome="error"] .h-open {
   border-left-color: var(--danger);
 }
 
-.history li[data-outcome="running"] button {
+.history li[data-outcome="running"] .h-open,
+.history li[data-outcome="queued"] .h-open {
   border-left-color: var(--accent);
 }
 
@@ -976,4 +984,29 @@ progress {
   gap: 8px;
   padding: 10px 16px;
   border-top: 1px solid var(--rule);
+}
+
+.history .h-open {
+  flex: 1;
+  min-width: 0;
+}
+
+.history .h-cancel {
+  flex: none;
+  align-self: center;
+  border: 1px solid var(--rule);
+  background: transparent;
+  border-radius: var(--radius-s);
+  padding: 1px 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.history .h-cancel:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.history li[data-outcome="queued"] .h-meta {
+  font-style: italic;
 }

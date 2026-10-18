@@ -22,11 +22,16 @@ const { values: options } = parseArgs({
     port: { type: "string", default: "4417" },
     rea: { type: "string", default: resolve(here, "../scripts/rea.mjs") },
     "timeout-ms": { type: "string", default: String(10 * 60_000) },
+    "max-concurrent": { type: "string", default: "4" },
   },
 });
 
 const port = Number.parseInt(options.port, 10);
 const requestTimeoutMs = Number.parseInt(options["timeout-ms"], 10);
+const maxConcurrent = Number.parseInt(options["max-concurrent"], 10);
+if (!Number.isInteger(maxConcurrent) || maxConcurrent < 1) {
+  throw new Error("--max-concurrent must be a positive integer.");
+}
 const token = randomBytes(24).toString("base64url");
 const tokenBytes = Buffer.from(token);
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
@@ -35,6 +40,7 @@ const STDERR_TAIL_BYTES = 16 * 1024;
 const MODULES = [
   "api.js",
   "app.js",
+  "calls.js",
   "catalog.js",
   "form.js",
   "markdown.js",
@@ -59,6 +65,50 @@ let mcp = { state: "stopped", tools: [], prompts: [], stderr: Buffer.alloc(0) };
 /** In-flight tool calls keyed by bridge call id. */
 const calls = new Map();
 let nextCallId = 1;
+
+// Bounds concurrent tools/call requests to REA; later calls wait in order.
+let runningCalls = 0;
+/** @type {{ id: number, resolve(): void, onQueued(position: number): void }[]} */
+const waiting = [];
+
+/** Waits for a call slot. Rejects if the call is cancelled while queued. */
+function acquireSlot(id, signal, onQueued) {
+  if (runningCalls < maxConcurrent) {
+    runningCalls++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve, reject) => {
+    const waiter = { id, resolve, onQueued };
+    waiting.push(waiter);
+    onQueued(waiting.length);
+    signal.addEventListener(
+      "abort",
+      () => {
+        const index = waiting.indexOf(waiter);
+        if (index === -1) return;
+        waiting.splice(index, 1);
+        announcePositions();
+        reject(new Error("Cancelled while queued."));
+      },
+      { once: true },
+    );
+  });
+}
+
+/** Hands the slot to the next waiter, or frees it. */
+function releaseSlot() {
+  const next = waiting.shift();
+  if (next) {
+    next.resolve();
+    announcePositions();
+  } else {
+    runningCalls--;
+  }
+}
+
+function announcePositions() {
+  waiting.forEach((waiter, index) => waiter.onQueued(index + 1));
+}
 let starting;
 
 async function startMcp() {
@@ -255,7 +305,13 @@ async function callTool(request, response) {
 
   const id = nextCallId++;
   const controller = new AbortController();
-  calls.set(id, { controller, name: body.name, startedAt: Date.now() });
+  const call = {
+    controller,
+    name: body.name,
+    acceptedAt: Date.now(),
+    state: "queued",
+  };
+  calls.set(id, call);
   response.writeHead(200, {
     "content-type": "application/x-ndjson; charset=utf-8",
     "cache-control": "no-store",
@@ -266,9 +322,17 @@ async function callTool(request, response) {
     if (!response.writableFinished) controller.abort();
   });
 
-  const startedAt = Date.now();
-  write({ type: "started", id });
+  write({ type: "accepted", id });
+  let acquired = false;
+  let startedAt = Date.now();
   try {
+    await acquireSlot(id, controller.signal, (position) =>
+      write({ type: "queued", position }),
+    );
+    acquired = true;
+    call.state = "running";
+    startedAt = Date.now();
+    write({ type: "started" });
     const result = await mcp.client.callTool(
       { name: body.name, arguments: body.arguments ?? {} },
       {
@@ -288,6 +352,7 @@ async function callTool(request, response) {
       elapsedMs: Date.now() - startedAt,
     });
   } finally {
+    if (acquired) releaseSlot();
     calls.delete(id);
     response.end();
   }
@@ -375,10 +440,12 @@ function status() {
     toolCount: mcp.tools.length,
     promptCount: mcp.prompts.length,
     startedAt: mcp.startedAt,
+    maxConcurrent,
     activeCalls: [...calls.entries()].map(([id, call]) => ({
       id,
       name: call.name,
-      startedAt: call.startedAt,
+      state: call.state,
+      acceptedAt: call.acceptedAt,
     })),
     stderrTail: mcp.stderr.toString("utf8"),
   };

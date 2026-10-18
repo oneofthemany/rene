@@ -7,6 +7,7 @@ import {
   renderProvenance,
   renderTree,
 } from "./render.js";
+import { isLive, liveStatus } from "./calls.js";
 
 /** Outcome line: tool name, outcome, elapsed time, and target-content marker. */
 function runLine(entry, actions) {
@@ -93,7 +94,16 @@ export function showEntry(entry, onEvidenceLink) {
   const line = runLine(entry, actions);
 
   if (!entry.result) {
-    resultView.replaceChildren(line, renderError(undefined, entry.failure));
+    resultView.replaceChildren(
+      line,
+      entry.cancelled
+        ? h(
+            "p",
+            { class: "hint" },
+            "You cancelled this call before it returned a result.",
+          )
+        : renderError(undefined, entry.failure),
+    );
     return;
   }
 
@@ -171,34 +181,84 @@ function download(entry, value) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-/** Renders call history; onSelect restores a finished entry. */
-export function renderHistory(history, onSelect) {
-  const list = document.getElementById("history-list");
+/** Renders an in-flight call: status, progress, and its own Cancel. */
+export function showLive(entry, onCancel) {
+  const progress = h("progress", { "aria-label": "Progress" });
+  if (typeof entry.progress?.total === "number") {
+    progress.max = entry.progress.total;
+    progress.value = entry.progress.value;
+  }
+  document.getElementById("result-view").replaceChildren(
+    h(
+      "div",
+      { class: "run-line" },
+      h("strong", {}, entry.name),
+      entry.outcome === "running" ? progress : null,
+      h("span", {}, liveStatus(entry)),
+      h(
+        "button",
+        {
+          type: "button",
+          class: "quiet",
+          disabled: entry.cancelRequested,
+          onclick: () => onCancel(entry),
+        },
+        "Cancel",
+      ),
+    ),
+  );
+}
+
+/** Renders call history; onSelect shows an entry, onCancel stops a live one. */
+export function renderHistory(history, { onSelect, onCancel, shown }) {
+  const live = history.filter(isLive).length;
+  document.getElementById("history-title").textContent = live
+    ? `History, ${live} in progress`
+    : "History";
   document.getElementById("history-empty").hidden = history.length > 0;
-  list.replaceChildren(
+  document.getElementById("history-list").replaceChildren(
     ...history.slice(0, 50).map((entry) =>
       h(
         "li",
-        { "data-outcome": entry.outcome },
+        {
+          "data-outcome": entry.outcome,
+          "aria-current": String(entry === shown),
+        },
         h(
           "button",
           {
             type: "button",
-            title: "Show this result and restore its arguments",
-            onclick: () => {
-              if (entry.outcome !== "running") void onSelect(entry);
-            },
+            class: "h-open",
+            title: "Show this call and restore its arguments",
+            onclick: () => void onSelect(entry),
           },
           h("span", { class: "h-name" }, entry.name),
           h(
             "span",
             { class: "h-meta" },
-            new Date(entry.startedAt).toLocaleTimeString(),
-            entry.elapsedMs === undefined
-              ? ""
-              : `, ${(entry.elapsedMs / 1000).toFixed(1)} s`,
+            isLive(entry)
+              ? liveStatus(entry)
+              : [
+                  new Date(entry.startedAt).toLocaleTimeString(),
+                  entry.elapsedMs === undefined
+                    ? ""
+                    : `, ${(entry.elapsedMs / 1000).toFixed(1)} s`,
+                ],
           ),
         ),
+        isLive(entry)
+          ? h(
+              "button",
+              {
+                type: "button",
+                class: "h-cancel",
+                disabled: entry.cancelRequested,
+                "aria-label": `Cancel ${entry.name}`,
+                onclick: () => void onCancel(entry),
+              },
+              "Cancel",
+            )
+          : null,
       ),
     ),
   );
