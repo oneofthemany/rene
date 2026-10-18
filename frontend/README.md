@@ -6,17 +6,35 @@ ownership of input validation, sessions, Evidence and cleanup. The bridge passes
 MCP requests through unchanged.
 
 ```sh
-npm run build:cached           # the bridge runs the compiled REA runtime
+frontend/start.sh              # install if needed, build, start, open browser
+```
+
+`start.sh` checks Node.js against `package.json#engines` and npm against
+`packageManager`. It runs `npm ci` only when `scripts/check-dependency-install.mjs`
+reports that installed dependencies don't match `package-lock.json`, then runs
+`npm run build:cached` and starts the bridge with `--open`. It never installs
+Node.js, npm, Java or analysis providers. A mismatch stops the script with
+instructions. Use `--dry-run` to see the plan first, and `--no-install`,
+`--no-build` or `--no-open` to skip steps. Anything after `--` is passed to the
+bridge:
+
+```sh
+frontend/start.sh --dry-run -- --port 0 --max-concurrent 2
+```
+
+To start the bridge directly:
+
+```sh
 node frontend/server.mjs       # prints http://127.0.0.1:4417/#token=...
 ```
 
-Open the printed URL. Options:
-
-| Flag           | Default              | Purpose                                   |
-| -------------- | -------------------- | ----------------------------------------- |
-| `--port`       | `4417`               | Loopback port (`0` picks a free one)      |
-| `--rea`        | `../scripts/rea.mjs` | REA dispatcher to run as `<rea> mcp`      |
-| `--timeout-ms` | `600000`             | Per-call timeout; resets on each progress |
+| Flag               | Default              | Purpose                                   |
+| ------------------ | -------------------- | ----------------------------------------- |
+| `--port`           | `4417`               | Loopback port (`0` picks a free one)      |
+| `--rea`            | `../scripts/rea.mjs` | REA dispatcher to run as `<rea> mcp`      |
+| `--timeout-ms`     | `600000`             | Per-call timeout; resets on each progress |
+| `--max-concurrent` | `4`                  | Calls sent to REA at once; the rest queue |
+| `--open`           | off                  | Open the UI in the default browser        |
 
 REA reads provider configuration (`REA_*`, Ghidra/IDA paths and similar) from
 its environment, so start the bridge from a shell where those are set.
@@ -40,9 +58,18 @@ its environment, so start the bridge from a shell where those are set.
   the call so REA applies its own defaults. Booleans have three states:
   omit/true/false. Shapes the form can't represent faithfully fall back to a
   JSON editor. A JSON mode and the schema's `examples` are also available.
-- **Runs.** Results stream back as NDJSON with progress. Cancel, or closing the
-  request, sends MCP `notifications/cancelled`. Tools annotated as destructive
-  need a second click before they run.
+- **Runs.** Calls run concurrently. Each run starts a new call without
+  waiting for earlier ones. The bridge sends at most `--max-concurrent` calls to
+  REA at a time and queues the rest in order, with live queue positions. REA
+  admits analysis calls concurrently and waits for in-flight calls before
+  switching targets. Each call streams its own progress and has its own
+  Cancel, in the result view and in History. Cancelling a queued call removes it
+  before it reaches REA. Cancelling a running call, or closing its request,
+  sends MCP `notifications/cancelled`. Tools annotated as destructive need a
+  second click before they run.
+- **History.** Shows calls in progress and settled calls. Selecting one shows
+  its live status or result and restores its arguments. A call that finishes
+  in the background doesn't take over the view you're reading.
 - **Results.** Evidence records get a provenance panel: the
   observed/derived/inferred scale, subject digest, provider, authority,
   locations, limitations and linked Evidence. Clicking an Evidence ID opens
@@ -67,7 +94,8 @@ its environment, so start the bridge from a shell where those are set.
 ## Layout
 
 ```
-server.mjs          bridge: MCP child owner + HTTP boundary
+server.mjs          bridge: MCP child owner, call queue, HTTP boundary
+start.sh            toolchain check, install/build when needed, launch
 public/index.html   shell
 public/api.js       token + bridge client + NDJSON reader
 public/catalog.js   sidebar: workflows, tool families, effect badges
@@ -75,8 +103,9 @@ public/form.js      JSON Schema → form widgets, exact-name workflow prefill
 public/markdown.js  workflow brief Markdown → DOM (no innerHTML)
 public/workflows.js workflow argument form, completions, pinned brief
 public/render.js    Evidence/provenance, errors, lazy JSON tree
-public/results.js   result view and history
-public/app.js       state, tool view, run/cancel
+public/results.js   result view, live call view, history
+public/calls.js     call lifecycle: start, queue/progress events, cancel
+public/app.js       state, tool view, render scheduling
 ```
 
 There's no build step and no dependencies beyond REA's own

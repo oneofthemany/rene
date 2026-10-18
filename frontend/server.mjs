@@ -5,6 +5,7 @@
 // HTTP API to the browser UI in ./public. It forwards MCP requests unchanged:
 // REA keeps ownership of validation, sessions, Evidence, and cleanup.
 
+import { spawn } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -23,6 +24,7 @@ const { values: options } = parseArgs({
     rea: { type: "string", default: resolve(here, "../scripts/rea.mjs") },
     "timeout-ms": { type: "string", default: String(10 * 60_000) },
     "max-concurrent": { type: "string", default: "4" },
+    open: { type: "boolean", default: false },
   },
 });
 
@@ -489,6 +491,21 @@ function describeError(cause) {
 // ---------------------------------------------------------------------------
 // Process lifetime
 
+/** Opens the UI in the default browser; the printed URL remains the fallback. */
+function openBrowser(url) {
+  const [command, args] =
+    process.platform === "darwin"
+      ? ["open", [url]]
+      : process.platform === "win32"
+        ? ["cmd", ["/c", "start", "", url]]
+        : ["xdg-open", [url]];
+  const child = spawn(command, args, { detached: true, stdio: "ignore" });
+  child.on("error", () =>
+    process.stdout.write("Could not open a browser; open the URL above.\n"),
+  );
+  child.unref();
+}
+
 let shuttingDown = false;
 async function shutdown() {
   if (shuttingDown) return;
@@ -504,9 +521,9 @@ server.listen(port, "127.0.0.1", () => {
   const address = server.address();
   const boundPort =
     typeof address === "object" && address ? address.port : port;
-  process.stdout.write(
-    `REA frontend: http://127.0.0.1:${boundPort}/#token=${token}\n`,
-  );
+  const url = `http://127.0.0.1:${boundPort}/#token=${token}`;
+  process.stdout.write(`REA frontend: ${url}\n`);
+  if (options.open) openBrowser(url);
   void ensureMcp().then(() => {
     process.stdout.write(
       mcp.state === "ready"
