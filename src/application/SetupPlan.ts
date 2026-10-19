@@ -1,6 +1,7 @@
 import { classifyClientRegistrationCommand } from "./ClientRegistrationIdentity.js";
 import {
   linuxHopperInstallDisclosure,
+  linuxImageBased,
   type LinuxPackageFamily,
 } from "./LinuxHopper.js";
 import type { SkillDestination } from "./SetupSkill.js";
@@ -356,6 +357,7 @@ const linuxDisclosure = (family: LinuxPackageFamily) => {
   const disclosure = linuxHopperInstallDisclosure(
     family,
     process.getuid?.() === 0,
+    linuxImageBased(),
   );
   return {
     networkOrigins: disclosure.networkOrigins,

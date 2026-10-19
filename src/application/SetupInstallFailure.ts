@@ -10,6 +10,7 @@ export type SetupFailureCode =
   | "launcher_missing"
   | "runtime_dependency_unavailable"
   | "unsupported_hopper_build"
+  | "reboot_required"
   | "setup_cancelled"
   | "destination_exists"
   | "mount_failed"
@@ -46,6 +47,7 @@ export type HopperInstallFailureReason =
   | "launcher_missing"
   | "runtime_dependencies"
   | "unsupported_hopper_build"
+  | "reboot_required"
   | "cancelled"
   | "destination_exists"
   | "mount"
@@ -144,6 +146,13 @@ export const setupInstallFailure = (
         code: "unsupported_hopper_build",
         remediation:
           "The installed Hopper launcher does not match the authenticated vendor package. Check HOPPER_LAUNCHER_PATH and reinstall the official Hopper demo through rea setup.",
+      };
+    case "reboot_required":
+      return {
+        status: "failed",
+        code: "reboot_required",
+        remediation:
+          "Hopper and its runtime packages were layered into a new rpm-ostree deployment, and the verified package is retained for offline checks. Reboot into that deployment, then run rea doctor --provider hopper.",
       };
     case "cancelled":
       return {

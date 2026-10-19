@@ -1,12 +1,16 @@
 #!/bin/bash
 # Stops a workbench this script started earlier, installs REA's locked
-# dependencies when needed, rebuilds the runtime, and starts the workbench UI. It never installs Node.js, npm, Java, or analysis
-# providers; those are checked and reported with remediation instead.
+# dependencies when needed, rebuilds the runtime, offers to download the
+# analysis providers REA is missing (Java, Ghidra, JADX, Kuna; pinned and
+# checksum-verified, into a user-owned folder), and starts the workbench UI.
+# It never installs Node.js or npm, and never uses administrator access.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 install=true
 build=true
+providers=ask
+hopper=true
 open_browser=true
 dry_run=false
 stop_only=false
@@ -20,12 +24,17 @@ Usage: frontend/start.sh [options] [-- bridge options]
 
 Stops the workbench this script started earlier (if it is still running),
 checks the Node.js toolchain, runs `npm ci` when installed dependencies do not
-match package-lock.json, runs `npm run build:cached`, then starts the REA
-workbench and opens it in your browser.
+match package-lock.json, runs `npm run build:cached`, offers to download the
+analysis providers REA is missing (frontend/install-providers.mjs), then
+starts the REA workbench and opens it in your browser.
 
 Options:
   --no-install   Never run npm ci; fail if dependencies are stale.
   --no-build     Skip npm run build:cached.
+  --install-providers
+                 Download missing providers without asking.
+  --no-providers Don't offer to download providers or Hopper.
+  --no-hopper    Don't offer to install Hopper.
   --no-open      Print the URL instead of opening a browser.
   --dry-run      Show the planned steps without running them.
   --stop         Stop the running workbench and exit.
@@ -45,6 +54,9 @@ while (($# > 0)); do
   case "$1" in
     --no-install) install=false ;;
     --no-build) build=false ;;
+    --install-providers) providers=yes ;;
+    --no-providers) providers=skip ;;
+    --no-hopper) hopper=false ;;
     --no-open) open_browser=false ;;
     --dry-run) dry_run=true ;;
     --stop) stop_only=true ;;
@@ -183,8 +195,19 @@ printf 'Node.js %s, npm %s\n' "$(node -v)" "$(npm -v)"
 printf 'Plan:\n'
 [ -n "$previous_pid" ] && printf '  stop the running workbench (pid %s)\n' "$previous_pid"
 for step in ${steps[@]+"${steps[@]}"}; do printf '  %s\n' "$step"; done
+provider_install=(node frontend/install-providers.mjs)
+[ "$providers" = yes ] && provider_install+=(--yes)
+case "$providers" in
+  ask) printf '  %s (asks before downloading)\n' "${provider_install[*]}" ;;
+  yes) printf '  %s\n' "${provider_install[*]}" ;;
+esac
+[ "$providers" = skip ] || [ "$hopper" = false ] || printf '  node frontend/install-hopper.mjs (asks before running rea setup --install-hopper)\n'
 printf '  %s\n' "${launch[*]}"
-[ "$dry_run" = true ] && exit 0
+if [ "$dry_run" = true ]; then
+  [ "$providers" = skip ] || { printf '\n'; node frontend/install-providers.mjs --dry-run; }
+  [ "$providers" = skip ] || [ "$hopper" = false ] || node frontend/install-hopper.mjs --dry-run
+  exit 0
+fi
 
 # --- Run -----------------------------------------------------------------
 # Stop first: the build rewrites dist/, which a running bridge loads from.
@@ -196,8 +219,16 @@ for step in ${steps[@]+"${steps[@]}"}; do
   $step
 done
 
+if [ "$providers" != skip ]; then
+  printf '\n==> Analysis providers\n'
+  # A failed or declined download leaves REA usable; the Providers page can retry.
+  "${provider_install[@]}" || printf 'Some providers were not installed; the workbench starts anyway. Retry from its Providers page.\n'
+  if [ "$hopper" = true ]; then
+    node frontend/install-hopper.mjs || printf 'Hopper was not installed; the workbench starts anyway. Retry from its Providers page.\n'
+  fi
+fi
+
 printf '\n==> Starting the workbench (Ctrl+C to stop)\n'
-printf 'Analysis providers (Ghidra, IDA, Hopper, ...) are bring-your-own; see README.md for setup.\n'
 # exec keeps this pid and start time, so the record identifies the bridge.
 printf '%s\n%s\n' "$$" "$(process_start $$)" >"$pid_file.tmp"
 mv "$pid_file.tmp" "$pid_file"

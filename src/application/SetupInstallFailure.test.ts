@@ -22,6 +22,17 @@ describe("macOS Hopper setup failure projection", () => {
   });
 });
 
+describe("rpm-ostree reboot projection", () => {
+  it("tells the operator to reboot into the layered deployment", () => {
+    expect(setupInstallFailure("reboot_required", undefined, "linux")).toEqual({
+      status: "failed",
+      code: "reboot_required",
+      remediation:
+        "Hopper and its runtime packages were layered into a new rpm-ostree deployment, and the verified package is retained for offline checks. Reboot into that deployment, then run rea doctor --provider hopper.",
+    });
+  });
+});
+
 describe("Linux package-manager setup failure projection", () => {
   it("quotes the failing command and a sanitized bounded diagnostic", () => {
     const result = setupInstallFailure("authorization_or_package_manager", {

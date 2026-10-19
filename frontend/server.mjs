@@ -7,6 +7,7 @@
 
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { existsSync } from "node:fs";
 import { readdir, readFile, realpath, stat, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { createServer } from "node:http";
@@ -16,6 +17,9 @@ import { parseArgs } from "node:util";
 import { Client, ProtocolError } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { createHistory } from "./history.mjs";
+import { hopperRoutes } from "./hopperSetup.mjs";
+import { createInstaller, defaultProvidersDir } from "./providerInstall.mjs";
+import { createSettings, SettingsError } from "./settings.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const publicRoot = join(here, "public");
@@ -33,6 +37,11 @@ const { values: options } = parseArgs({
       type: "string",
       default: join(here, ".workbench-history"),
     },
+    settings: {
+      type: "string",
+      default: join(here, ".workbench-settings.json"),
+    },
+    "providers-dir": { type: "string", default: defaultProvidersDir() },
   },
 });
 
@@ -46,6 +55,12 @@ const token = randomBytes(24).toString("base64url");
 const tokenBytes = Buffer.from(token);
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
 const STDERR_TAIL_BYTES = 16 * 1024;
+const settings = createSettings(options.settings);
+await settings.load();
+const installer = createInstaller({
+  root: options["providers-dir"],
+  settings,
+});
 const history = createHistory(options["history-dir"], {
   maxEntries: 500,
   maxEntryBytes: 8 * 1024 * 1024,
@@ -60,7 +75,10 @@ const MODULES = [
   "catalog.js",
   "doctor.js",
   "form.js",
+  "hopperPanel.js",
   "markdown.js",
+  "installProviders.js",
+  "providerPaths.js",
   "render.js",
   "results.js",
   "setup.js",
@@ -134,10 +152,8 @@ async function startMcp() {
     command: process.execPath,
     args: [options.rea, "mcp"],
     // REA reads provider configuration (REA_*, GHIDRA_*, PATH, ...) from its
-    // environment, so the child gets the bridge's environment as launched.
-    env: Object.fromEntries(
-      Object.entries(process.env).filter(([, value]) => value !== undefined),
-    ),
+    // environment: the bridge's environment as launched, plus saved paths.
+    env: settings.environment(process.env),
     stderr: "pipe",
   });
   // REA advertises listChanged; the SDK refetches every page and hands back
@@ -252,8 +268,8 @@ const CLIENT_ID = /^[a-z][a-z0-9_]{0,40}$/;
 let setupBusy = false;
 
 /** Runs `rea setup` with JSON output; resolves to its parsed report. */
-const runSetup = (args) =>
-  runReaJson(["setup", "--format", "json", ...args], SETUP_TIMEOUT_MS);
+const runSetup = (args, timeout = SETUP_TIMEOUT_MS) =>
+  runReaJson(["setup", "--format", "json", ...args], timeout);
 
 /**
  * Runs one short-lived rea command whose stdout is a JSON report. A failing
@@ -269,8 +285,8 @@ function runReaJson(args, timeout) {
       {
         timeout,
         maxBuffer: 16 * 1024 * 1024,
-        // The registered server inherits provider settings setup reads from here.
-        env: process.env,
+        // Setup registers, and doctor checks, the same settings REA runs with.
+        env: settings.environment(process.env),
       },
       (error, stdout, stderr) => {
         let report;
@@ -399,6 +415,136 @@ async function doctor(response) {
   } catch (cause) {
     return sendJson(response, 502, { error: describeError(cause) });
   }
+}
+
+// Readiness and provider paths work while the MCP child is down.
+const PROVIDER_ROUTES = {
+  "GET /api/doctor": (_request, response) => doctor(response),
+  "GET /api/settings": (_request, response) =>
+    sendJson(response, 200, settings.describe(process.env)),
+  "POST /api/settings": saveSettings,
+  "GET /api/install": async (_request, response) =>
+    sendJson(response, 200, {
+      ...(await installer.plan()),
+      // Package installs on rpm-ostree systems need a layer and a reboot.
+      imageBased: existsSync("/run/ostree-booted"),
+    }),
+  "POST /api/install": installProviders,
+  "GET /api/install/updates": async (_request, response) =>
+    sendJson(response, 200, await availableUpdates()),
+  "POST /api/install/update": updateProviders,
+  "POST /api/install/cancel": (_request, response) =>
+    sendJson(response, 200, { cancelled: installer.cancel() }),
+  ...hopperRoutes({
+    runSetup,
+    planFingerprint,
+    exclusiveSetup,
+    readJsonBody,
+    sendJson,
+  }),
+};
+
+/**
+ * Downloads the chosen providers, saves their paths and restarts REA, as
+ * NDJSON progress. Closing the page doesn't stop the install; cancel does.
+ */
+async function installProviders(request, response) {
+  const ids = await readIds(request, response);
+  if (ids)
+    await streamInstall(response, (onEvent) =>
+      installer.install(ids, { onEvent }),
+    );
+}
+
+/** Updates for providers this workbench installed and REA uses. */
+async function availableUpdates() {
+  const { components } = await installer.plan();
+  const ours = new Set(
+    components.filter((c) => c.state === "ready").map((c) => c.id),
+  );
+  const { updates, unchecked } = await installer.checkUpdates();
+  return {
+    updates: updates.filter((update) => ours.has(update.id)),
+    unchecked,
+  };
+}
+
+/**
+ * Installs chosen updates. The release details come from a fresh check here,
+ * never from the request, so the page can only pick which updates to take.
+ */
+async function updateProviders(request, response) {
+  const ids = await readIds(request, response);
+  if (!ids) return;
+  const { updates } = await availableUpdates();
+  const chosen = updates.filter((update) => ids.includes(update.id));
+  if (chosen.length === 0)
+    return sendJson(response, 409, {
+      error: "Those updates are no longer available. Check again.",
+    });
+  await streamInstall(response, (onEvent) =>
+    installer.applyUpdates(chosen, { onEvent }),
+  );
+}
+
+async function readIds(request, response) {
+  const ids = (await readJsonBody(request))?.ids;
+  if (
+    !Array.isArray(ids) ||
+    ids.length === 0 ||
+    !ids.every((id) => typeof id === "string")
+  ) {
+    sendJson(response, 400, { error: "Expected { ids: string[] }." });
+    return undefined;
+  }
+  if (installer.running) {
+    sendJson(response, 409, { error: "An install is already running." });
+    return undefined;
+  }
+  return ids;
+}
+
+/** Streams an install as NDJSON, then restarts REA if any path changed. */
+async function streamInstall(response, start) {
+  response.writeHead(200, {
+    "content-type": "application/x-ndjson; charset=utf-8",
+    "cache-control": "no-store",
+  });
+  const write = (event) => {
+    if (!response.destroyed) response.write(`${JSON.stringify(event)}\n`);
+  };
+  try {
+    const result = await start(write);
+    if (result.changed) {
+      write({ type: "restarting" });
+      await stopMcp();
+      await ensureMcp();
+    }
+  } catch (cause) {
+    write({ type: "error", error: describeError(cause) });
+  }
+  response.end();
+}
+
+/** Saves provider paths, then restarts REA so it runs with them. */
+async function saveSettings(request, response) {
+  const body = await readJsonBody(request);
+  let changed;
+  try {
+    changed = await settings.save(body?.values);
+  } catch (cause) {
+    if (cause instanceof SettingsError)
+      return sendJson(response, 400, { error: cause.message });
+    throw cause;
+  }
+  if (changed) {
+    await stopMcp();
+    await ensureMcp();
+  }
+  return sendJson(response, 200, {
+    changed,
+    ...settings.describe(process.env),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -548,7 +694,8 @@ async function routeApi(request, response, url) {
   if (route === "POST /api/setup/plan") return setupPlan(request, response);
   if (route === "POST /api/setup/apply") return setupApply(request, response);
   if (route === "POST /api/fs/list") return listDirectory(request, response);
-  if (route === "GET /api/doctor") return doctor(response);
+  if (Object.hasOwn(PROVIDER_ROUTES, route))
+    return PROVIDER_ROUTES[route](request, response);
   if (route === "GET /api/events") return events(request, response);
   if (url.pathname.startsWith("/api/history"))
     return routeHistory(request, response, url);

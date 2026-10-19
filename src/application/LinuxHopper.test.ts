@@ -53,6 +53,7 @@ class RecordingLinuxHost implements LinuxHopperInstallHost {
   archive = new Uint8Array([1, 2, 3]);
   archiveOk = true;
   installSucceeds = true;
+  pendingDeployment = false;
   cleanupFails = false;
   signatureValid = true;
   cacheWritable = true;
@@ -127,9 +128,11 @@ class RecordingLinuxHost implements LinuxHopperInstallHost {
     if (!this.verifiedBeforeInstall)
       throw new Error("Package manager ran before publisher verification");
     this.installed.push({ family, archive });
-    const outcome: LinuxPackageInstallOutcome = this.installSucceeds
-      ? { status: "installed" }
-      : { status: "failed", failure: this.packageFailure };
+    const outcome: LinuxPackageInstallOutcome = !this.installSucceeds
+      ? { status: "failed", failure: this.packageFailure }
+      : this.pendingDeployment
+        ? { status: "installed", pendingDeployment: true }
+        : { status: "installed" };
     return Promise.resolve(outcome);
   };
   launcherStatus = (): Promise<LinuxHopperLauncherStatus> =>
@@ -257,6 +260,89 @@ describe("Linux Hopper installation", () => {
       );
     },
   );
+});
+
+describe("Linux Hopper on image-based rpm hosts", () => {
+  const dependencies = [
+    "xorg-x11-server-Xvfb",
+    "xorg-x11-xauth",
+    "python3",
+    "libX11",
+    "libXtst",
+  ];
+
+  it("layers with rpm-ostree, then applies live as a best-effort step", () => {
+    expect(
+      linuxPackageManagerCommands("rpm", "/tmp/Hopper package", false, true),
+    ).toEqual([
+      {
+        executable: "pkexec",
+        args: [
+          "rpm-ostree",
+          "install",
+          "--idempotent",
+          "--allow-inactive",
+          "-y",
+          "/tmp/Hopper package",
+          ...dependencies,
+        ],
+      },
+      {
+        executable: "pkexec",
+        args: ["rpm-ostree", "apply-live"],
+        optional: true,
+      },
+    ]);
+    expect(
+      linuxPackageManagerCommands("rpm", "/tmp/Hopper package", true, true),
+    ).toEqual([
+      expect.objectContaining({
+        executable: "rpm-ostree",
+        args: expect.arrayContaining(["install", "/tmp/Hopper package"]),
+      }),
+      { executable: "rpm-ostree", args: ["apply-live"], optional: true },
+    ]);
+  });
+
+  it("keeps dnf on mutable rpm hosts", () => {
+    expect(
+      linuxPackageManagerCommands("rpm", "/tmp/Hopper package", false),
+    ).toEqual([
+      {
+        executable: "pkexec",
+        args: ["dnf", "install", "-y", "/tmp/Hopper package", ...dependencies],
+      },
+    ]);
+  });
+
+  it("reports a reboot when the layered launcher is not visible yet", async () => {
+    const host = new RecordingLinuxHost();
+    host.pendingDeployment = true;
+    host.launcherStatusValue = "missing";
+    expect(await installFixture(host)).toEqual({
+      status: "failed",
+      reason: "reboot_required",
+    });
+    expect(host.cleaned).toEqual(["/tmp/rea test"]);
+  });
+
+  it("accepts a layered launcher that was applied live", async () => {
+    const host = new RecordingLinuxHost();
+    host.pendingDeployment = true;
+    expect(await installFixture(host)).toEqual({
+      status: "installed",
+      launcherPath: "/opt/hopper/bin/Hopper",
+    });
+  });
+
+  it("still reports a missing launcher after an ordinary install", async () => {
+    const host = new RecordingLinuxHost();
+    host.launcherStatusValue = "missing";
+    expect(await installFixture(host)).toEqual({
+      status: "failed",
+      reason: "launcher_missing",
+    });
+  });
 });
 
 describe("Linux Hopper package installation", () => {

@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -40,6 +41,7 @@ export interface LinuxHopperInstallDisclosure {
 export const linuxHopperInstallDisclosure = (
   family: LinuxPackageFamily,
   isRoot: boolean,
+  imageBased = false,
 ): LinuxHopperInstallDisclosure => {
   return {
     networkOrigins: [
@@ -52,6 +54,7 @@ export const linuxHopperInstallDisclosure = (
       family,
       `<verified-hopper.${family}>`,
       isRoot,
+      imageBased,
     ).map(({ executable, args }) => formatCommandForDisplay(executable, args)),
   };
 };
@@ -107,9 +110,13 @@ export interface LinuxPackageInstallFailure {
   readonly outputTruncated: boolean;
 }
 
-/** Whether the package-manager step installed the verified package. */
+/**
+ * Whether the package-manager step installed the verified package. On an
+ * image-based host the packages land in a new deployment; `pendingDeployment`
+ * records that they may only become visible after a reboot.
+ */
 export type LinuxPackageInstallOutcome =
-  | { readonly status: "installed" }
+  | { readonly status: "installed"; readonly pendingDeployment?: true }
   | {
       readonly status: "failed";
       readonly failure: LinuxPackageInstallFailure;
@@ -170,6 +177,7 @@ export type LinuxHopperInstallResult =
         | "publisher_verification_failed"
         | "verification_unavailable"
         | "cleanup_failed"
+        | "reboot_required"
         | "cancelled";
       /**
        * The failing package-manager command and its output. Present only when
@@ -356,6 +364,10 @@ export const installLinuxHopper = async (
         launcherPath,
         release.main_exe_hash,
       );
+      // A layered package that could not be applied live appears after a
+      // reboot; the verified archive is already retained for that check.
+      if (launcherStatus === "missing" && install.pendingDeployment === true)
+        return { status: "failed", reason: "reboot_required" };
       if (launcherStatus !== "ready")
         return {
           status: "failed",
@@ -495,6 +507,13 @@ export const inspectLinuxHopperLauncher = async (
   }
 };
 
+/**
+ * Whether this is an image-based rpm-ostree host (Fedora Silverblue, Kinoite
+ * and similar), where /usr is read-only and packages are layered into a new
+ * deployment instead of installed with dnf.
+ */
+export const linuxImageBased = (): boolean => existsSync("/run/ostree-booted");
+
 /** Interpret ldd output conservatively so a present but broken launcher is unhealthy. */
 export const linuxSharedLibrariesAvailable = (output: string): boolean =>
   !/(?:=>\s+not found|error while loading shared libraries)/iu.test(output);
@@ -504,10 +523,12 @@ const installSystemPackage = async (
   archive: string,
   environment: Readonly<NodeJS.ProcessEnv>,
 ): Promise<LinuxPackageInstallOutcome> => {
+  const imageBased = linuxImageBased();
   for (const command of linuxPackageManagerCommands(
     family,
     archive,
     process.getuid?.() === 0,
+    imageBased,
   )) {
     const output = await execFileBoundedOutput(
       command.executable,
@@ -518,6 +539,8 @@ const installSystemPackage = async (
       },
     );
     if (output.exitCode !== 0) {
+      // A best-effort step's failure leaves the required work done.
+      if (command.optional === true) continue;
       return {
         status: "failed",
         failure: {
@@ -532,7 +555,9 @@ const installSystemPackage = async (
       };
     }
   }
-  return { status: "installed" };
+  return imageBased && family === "rpm"
+    ? { status: "installed", pendingDeployment: true }
+    : { status: "installed" };
 };
 
 /** Preserve argument boundaries in a command shown to the user. */
@@ -546,14 +571,22 @@ export const formatCommandForDisplay = (
     )
     .join(" ");
 
-/** Select the native package manager and authorization boundary without shell evaluation. */
+/**
+ * Select the native package manager and authorization boundary without shell
+ * evaluation. An image-based rpm host layers the packages with rpm-ostree
+ * (`--allow-inactive` because most dependencies are already in the base
+ * image), then tries to apply them to the running system; `optional`
+ * commands may fail without failing the install.
+ */
 export const linuxPackageManagerCommands = (
   family: LinuxPackageFamily,
   archive: string,
   isRoot: boolean,
+  imageBased = false,
 ): readonly {
   readonly executable: string;
   readonly args: readonly string[];
+  readonly optional?: true;
 }[] => {
   const runtimeDependencies =
     family === "deb"
@@ -567,11 +600,24 @@ export const linuxPackageManagerCommands = (
             "libXtst",
           ]
         : ["xorg-server-xvfb", "xorg-xauth", "python", "libx11", "libxtst"];
-  const commands =
+  const commands: readonly (readonly string[])[] =
     family === "deb"
       ? [["apt-get", "install", "-y", archive, ...runtimeDependencies]]
       : family === "rpm"
-        ? [["dnf", "install", "-y", archive, ...runtimeDependencies]]
+        ? imageBased
+          ? [
+              [
+                "rpm-ostree",
+                "install",
+                "--idempotent",
+                "--allow-inactive",
+                "-y",
+                archive,
+                ...runtimeDependencies,
+              ],
+              ["rpm-ostree", "apply-live"],
+            ]
+          : [["dnf", "install", "-y", archive, ...runtimeDependencies]]
         : [
             ["pacman", "-S", "--needed", "--noconfirm", ...runtimeDependencies],
             ["pacman", "-U", "--noconfirm", archive],
@@ -579,7 +625,11 @@ export const linuxPackageManagerCommands = (
   return commands.map((command) => {
     const executable = isRoot ? command[0] : "pkexec";
     if (executable === undefined) throw new Error("package command is empty");
-    return { executable, args: isRoot ? command.slice(1) : command };
+    return {
+      executable,
+      args: isRoot ? command.slice(1) : command,
+      ...(command[1] === "apply-live" ? { optional: true as const } : {}),
+    };
   });
 };
 

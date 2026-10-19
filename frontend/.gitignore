@@ -1,3 +1,6 @@
 .workbench.pid
 .workbench.pid.tmp
 .workbench-history/
+.workbench-settings.json
+.workbench-settings.json.bak
+.workbench-settings.json.tmp

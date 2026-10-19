@@ -2,6 +2,8 @@
 // as ready and how to fix it; this view lays out its report.
 
 import { apiJson } from "./api.js";
+import { renderInstallProviders } from "./installProviders.js";
+import { renderProviderPaths } from "./providerPaths.js";
 import { h, renderError } from "./render.js";
 
 let latest;
@@ -40,7 +42,7 @@ export async function showProviders(container, { recheck = false } = {}) {
       return;
     }
   }
-  render(container, latest);
+  await render(container, latest);
 }
 
 // Plain labels for doctor's classifications; others are shown as REA names them.
@@ -89,7 +91,7 @@ function table(headings, rows) {
   );
 }
 
-function render(container, { report, checkedAt }) {
+async function render(container, { report, checkedAt }) {
   const checks = report.checks ?? [];
   const failing = checks.filter((check) => !check.ok).length;
   const providers = (report.providerInspections ?? []).filter(
@@ -104,6 +106,15 @@ function render(container, { report, checkedAt }) {
     },
     "Check again",
   );
+  const recheckAll = () => showProviders(container, { recheck: true });
+  const [installs, paths] = await Promise.all([
+    renderInstallProviders({
+      onInstalled: recheckAll,
+      hopperReady:
+        report.checks?.find((check) => check.name === "hopper")?.ok === true,
+    }),
+    renderProviderPaths({ report, onSaved: recheckAll }),
+  ]);
 
   container.replaceChildren(
     h(
@@ -113,7 +124,7 @@ function render(container, { report, checkedAt }) {
       h(
         "p",
         { class: "hint" },
-        `rea doctor checked the environment this workbench was started from, at ${new Date(checkedAt).toLocaleTimeString()}. REA's tools see the same settings. To change a provider setting, set it in your shell and run frontend/start.sh again.`,
+        `rea doctor checked the settings REA runs with at ${new Date(checkedAt).toLocaleTimeString()}: your shell's environment plus any paths saved below.`,
       ),
       h(
         "p",
@@ -122,6 +133,8 @@ function render(container, { report, checkedAt }) {
           ? `${failing} of ${checks.length} checks need attention. Tools that need a missing provider fail until it is set up.`
           : `All ${checks.length} checks passed.`,
       ),
+      // Installing comes first: it fixes most failing checks in one step.
+      installs,
       table(["Check", "State", "Detail", "How to fix"], checks.map(checkRow)),
       providers.length
         ? table(
@@ -148,6 +161,7 @@ function render(container, { report, checkedAt }) {
           )
         : null,
       h("div", { class: "actions setup-actions" }, recheck),
+      paths,
     ),
   );
 }

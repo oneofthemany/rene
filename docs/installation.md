@@ -599,6 +599,16 @@ host mount and the rest of `/tmp` remain unchanged; this fallback never invokes
 `sudo`. `rea doctor --provider hopper --json` reports the selected
 strategy and both host and effective mount facts.
 
+On image-based rpm-ostree hosts (`/run/ostree-booted` exists, for example
+Fedora Silverblue or Kinoite), setup layers the verified package and the same
+runtime dependencies with `pkexec rpm-ostree install --idempotent
+--allow-inactive -y`, then runs `pkexec rpm-ostree apply-live` as a
+best-effort step. The plan shows both commands. If the launcher is not visible
+afterward, for example because an OS update is already staged, setup reports
+`reboot_required`: the verified package evidence is already retained, so after
+rebooting into the new deployment `rea doctor --provider hopper` can
+authenticate `/opt/hopper/bin/Hopper` without another install.
+
 When the package-manager step fails, setup reports the failing command and its
 captured output, so a package conflict is distinguishable from an authorization
 failure. On CachyOS, an unversioned compatibility package such as
