@@ -16,7 +16,13 @@ const sourceNote = (setting) =>
         : "Not set.";
 
 /** Whether rea doctor found the provider behind a setting usable. */
-function readiness(setting, report) {
+/**
+ * Whether rea doctor found the provider behind a setting usable, or "unused"
+ * when the user turned that provider off.
+ */
+function readiness(setting, report, unusedChoices) {
+  if (unusedChoices.includes(setting.inspection ?? setting.check))
+    return "unused";
   if (setting.inspection) {
     const inspection = report.providerInspections?.find(
       (candidate) => candidate.id === setting.inspection,
@@ -67,8 +73,15 @@ function pathRow(setting, ready) {
           ? null
           : h(
               "span",
-              { class: ready ? "doctor-state-ready" : "doctor-state-problem" },
-              ready ? "Ready" : "Not ready",
+              {
+                class:
+                  ready === "unused"
+                    ? "doctor-state-unused"
+                    : ready
+                      ? "doctor-state-ready"
+                      : "doctor-state-problem",
+              },
+              ready === "unused" ? "Not used" : ready ? "Ready" : "Not ready",
             ),
       ),
       h("div", { class: "path-control" }, input, browse),
@@ -81,7 +94,11 @@ function pathRow(setting, ready) {
  * Renders the form. `report` is the latest rea doctor report; onSaved
  * runs after REA has restarted with the new paths.
  */
-export async function renderProviderPaths({ report, onSaved }) {
+export async function renderProviderPaths({
+  report,
+  onSaved,
+  unusedChoices = [],
+}) {
   const area = h("section", { class: "provider-paths" });
   let described;
   try {
@@ -95,7 +112,7 @@ export async function renderProviderPaths({ report, onSaved }) {
     .filter((setting) => setting.kind !== "choice")
     .map((setting) => ({
       setting,
-      ...pathRow(setting, readiness(setting, report)),
+      ...pathRow(setting, readiness(setting, report, unusedChoices)),
     }));
   const formError = h("span", { class: "form-error", role: "alert" });
   const save = h(

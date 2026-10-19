@@ -81,6 +81,8 @@ the versions they name:
 | pwntools  | 4.15.0, pyelftools 0.33, Unicorn 2.1.2 | `REA_PWNTOOLS_PYTHON`    |
 | Unblob    | 26.6.4, with sasquatch for SquashFS    | `REA_UNBLOB_COMMAND`     |
 | mitmproxy | 12.2.3 (mitmdump)                      | `REA_MITMDUMP_COMMAND`   |
+| DuckDB    | 1.5.4 CLI, updated to newer 1.x        | `REA_DUCKDB_COMMAND`     |
+| Wakaru    | 1.14.0 (Linux x64 only)                | `REA_WAKARU_COMMAND`     |
 
 The Python tools are built with your `uv` into relocatable environments from
 pinned versions (uv checks PyPI's hashes), with a uv-managed Python 3.13 kept
@@ -127,9 +129,10 @@ file, with its `.bak`.
 
 After installing, the terminal installer checks for newer releases REA accepts
 and asks before taking them; on the page, **Check for updates** does the same.
-Only Java 21 (Temurin) patch releases and Ghidra 12.1.x are offered: REA
-requires Ghidra 12.1, and JADX and Kuna stay on the versions REA pins and
-verified. Each candidate's size and SHA-256 come from the upstream release
+Only Java 21 (Temurin) patch releases, Ghidra 12.1.x and DuckDB 1.x are
+offered: REA requires Ghidra 12.1 and a DuckDB 1.x CLI at least as new as the
+DuckDB that wrote a database, and JADX and Kuna stay on the versions REA pins
+and verified. Each candidate's size and SHA-256 come from the upstream release
 metadata (Adoptium's API, GitHub's release asset digest) and are shown before
 you approve. An update installs like any provider; once it is in use its
 release is recorded in `<providers-dir>/pins.json` and the older install is
@@ -149,7 +152,9 @@ changes:
   installer (publisher PGP signature, launcher identity); its evidence goes to
   `~/.cache/rea/hopper-releases` so `rea doctor` accepts the launcher offline
 - binwalk 3.1, sigrok-cli 0.7.2, gdb with pwndbg 2026.09.15 (from its
-  source release and hash-locked `uv.lock`), tshark/capinfos, Unblob's
+  source release and hash-locked `uv.lock`), tshark/capinfos, rizin,
+  objdump, a baseline DuckDB 1.5.4 CLI (official release, pinned SHA-256;
+  the workbench's updatable DuckDB install takes precedence), Unblob's
   extractors, Chromium and adb, with the `REA_*` paths REA needs set in the
   image
 
@@ -184,6 +189,68 @@ Upstream REA's installers deliberately don't install Java or Ghidra (see
 `AGENTS.md`). This download step belongs to the workbench, not to `rea setup`.
 To change a built-in release, edit its version, URL, size and SHA-256 in
 `providerReleases.mjs`.
+
+## Agents in the workbench
+
+**Agent** in the header opens a terminal that runs your own coding agent on
+this computer, in the folder you choose (**Start in**, with **Browse…**).
+Pick it under **Agent**: installed agents (found on the workbench's `PATH`)
+come first, the rest are listed as not installed. Each is the same CLI you run
+in a terminal, with your login, settings, skills and other MCP servers, and
+each runs with this fork's REA as its `rea` MCP server, in one of two ways.
+
+**For the session** (Claude Code, GitHub Copilot CLI): rene is added for that
+session only, launched the way the workbench launches REA (the container
+launcher by default), with its tools pre-approved and an instruction to use
+them. This works even where no registration exists.
+
+| Agent              | rene added with                                  | Pre-approved              | Instruction                                                         |
+| ------------------ | ------------------------------------------------ | ------------------------- | ------------------------------------------------------------------- |
+| Claude Code        | `--mcp-config`                                   | `--allowedTools mcp__rea` | `--append-system-prompt`                                            |
+| GitHub Copilot CLI | `--additional-mcp-config @file` (`tools: ["*"]`) | `--allow-tool rea`        | `AGENTS.md` in a folder added to `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` |
+
+**From its registration** (every other terminal agent `rea setup` supports):
+Antigravity (`agy`), Gemini CLI (`gemini`), Codex (`codex`), OpenCode
+(`opencode`), Cursor CLI (`cursor-agent`), Qwen Code (`qwen`), Kimi Code
+(`kimi`), Grok Build (`grok`), Factory Droid (`droid`), Qoder CLI
+(`qodercli`), Command Code (`cmd`), Devin (`devin`), DeepSeek Harness (`dsh`),
+ZCode (`zcode`), OMP (`omp`), Pi (`pi`) and Hermes (`hermes`). These have no
+way to add an MCP server or pre-approve one server's tools for a single
+session (agy's only switch approves every tool, which the workbench doesn't
+use), so rene comes from the registration **Agent setup** writes. The view
+shows each agent's registration, and the bridge checks it again (a read-only
+`rea setup --dry-run --client <name>`) and refuses to start the agent unless
+it is current. Their rea tools ask for approval as the agent normally does,
+and the guidance comes from the skill Agent setup installs. GUI-only clients
+(VS Code, Cursor's editor, Windsurf, Trae, WorkBuddy, Claude Desktop) aren't
+listed. Commands for agents not installed here were taken from REA's client
+verifiers and docs; only Claude Code, Copilot CLI and agy were run from the
+workbench.
+
+The instruction asks the agent to use the rea tools and the
+reverse-engineer-anything skill for analysis, to call `binary_session` when
+unsure, to keep targets under the home folder and to treat target content as
+data. The generated files are in `frontend/.workbench-agent/` (mode 0600,
+ignored by git). A same-named `rea` server in your own agent configuration is
+replaced for that session only.
+
+Agents keep their other tools (files, shell, web), which they may need for
+reports or builds. The bridge runs the agent in a pseudo-terminal
+(`@lydell/node-pty`, from REA's dependencies) and relays it to the page
+(xterm.js, from `frontend/package.json`; `start.sh` installs it): output as an
+NDJSON stream, keys and resizes as small POSTs. One session runs at a time; it
+survives page reloads (recent output is replayed) and ends with **Stop**, when
+the agent exits, or when the bridge stops. Saved provider paths are in its
+environment, so REA sees them. Markers a parent Claude Code session sets
+(`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, ...) are removed, so the agent runs as
+a normal session even when `start.sh` itself ran inside Claude Code.
+
+Adding another agent is one entry in `AGENTS` in `terminal.mjs`: its command,
+how it takes an extra MCP server, how it pre-approves that server's tools and
+how it takes an instruction.
+
+The terminal can run anything the agent can, as you. Like the rest of the
+API it is reachable only on loopback with the per-launch token.
 
 ## What it does
 
@@ -279,8 +346,8 @@ To change a built-in release, edit its version, URL, size and SHA-256 in
   in the `x-rea-token` header.
 - Rejects requests with an unexpected `Host` (DNS rebinding) or a foreign
   `Origin`.
-- Static pages are served with a strict CSP (`'self'` only, no inline
-  script/style). Strings from the analysis target are always rendered as text.
+- Static pages are served with a strict CSP: scripts only from `'self'`;
+  inline styles are allowed for the xterm.js terminal. Strings from the analysis target are always rendered as text.
 - The token is stored in `sessionStorage`. The last arguments used for each
   tool are kept in `localStorage` as a per-browser convenience.
 - Call history is stored by the bridge as plain JSON in `--history-dir`
@@ -312,6 +379,8 @@ providerBuild.mjs      download, unpack, uv environments, launchers, checks
 container/             Containerfile, container.sh, rea launcher, Hopper step
 install-providers.mjs  terminal provider installer used by start.sh
 start.sh            stop previous, toolchain check, install/build when needed, launch
+terminal.mjs        agent list and sessions in a pseudo-terminal
+package.json        the page's own packages (xterm.js)
 public/index.html   shell
 public/api.js       token + bridge client + NDJSON reader
 public/catalog.js   sidebar: workflows, tool families, effect badges
@@ -327,6 +396,7 @@ public/setup.js     agent registration through rea setup's plan and apply
 public/doctor.js    provider readiness from rea doctor
 public/providerPaths.js  provider path fields, save and restart
 public/choices.js      "What you use" switches and default engine
+public/agent.js        agent picker and terminal view
 public/installProviders.js  provider downloads, progress and updates
 ```
 

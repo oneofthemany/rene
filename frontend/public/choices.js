@@ -19,6 +19,8 @@ function switchRow(choice, used) {
     type: "checkbox",
     id: `use-${choice.id}`,
     checked: used,
+    // The label names the switch; the purpose is read as its description.
+    "aria-describedby": `use-${choice.id}-purpose`,
   });
   return {
     box,
@@ -27,10 +29,14 @@ function switchRow(choice, used) {
       { class: "choice" },
       box,
       h(
-        "label",
-        { for: box.id },
-        h("strong", {}, choice.label),
-        h("span", { class: "help" }, choice.purpose),
+        "div",
+        { class: "choice-text" },
+        h("label", { for: box.id }, choice.label),
+        h(
+          "span",
+          { class: "help", id: `use-${choice.id}-purpose` },
+          choice.purpose,
+        ),
       ),
     ),
   };

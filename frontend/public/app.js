@@ -15,6 +15,7 @@ import {
   startCall,
 } from "./calls.js";
 import { effectBadge, renderCatalog as drawCatalog } from "./catalog.js";
+import { showAgent } from "./agent.js";
 import { refreshDoctor, showProviders } from "./doctor.js";
 import { createForm, matchingArgs } from "./form.js";
 import { h, renderError } from "./render.js";
@@ -94,20 +95,20 @@ document
     if (!log.hidden) await refreshStatus();
   });
 
-document.getElementById("open-providers").addEventListener("click", () => {
-  state.selected = { kind: "providers" };
-  state.view = undefined;
-  renderCatalog();
-  document.getElementById("result-view").replaceChildren();
-  void showProviders(document.getElementById("tool-view"));
-});
-
-document.getElementById("open-setup").addEventListener("click", () => {
-  state.selected = { kind: "setup" };
-  state.view = undefined;
-  renderCatalog();
-  void showSetup(document.getElementById("tool-view"));
-});
+// Header views that replace both the tool and result panes.
+for (const [kind, show] of [
+  ["agent", showAgent],
+  ["providers", showProviders],
+  ["setup", showSetup],
+]) {
+  document.getElementById(`open-${kind}`).addEventListener("click", () => {
+    state.selected = { kind };
+    state.view = undefined;
+    renderCatalog();
+    document.getElementById("result-view").replaceChildren();
+    void show(document.getElementById("tool-view"));
+  });
+}
 
 document.getElementById("restart").addEventListener("click", async (event) => {
   const button = event.currentTarget;

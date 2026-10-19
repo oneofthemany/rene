@@ -109,7 +109,10 @@ function table(headings, rows) {
   );
 }
 
-async function render(container, { report, checkedAt, unused = [] }) {
+async function render(
+  container,
+  { report, checkedAt, unused = [], unusedChoices = [] },
+) {
   const checks = report.checks ?? [];
   const failing = toFix({ report, unused }).length;
   const providers = (report.providerInspections ?? []).filter(
@@ -128,7 +131,7 @@ async function render(container, { report, checkedAt, unused = [] }) {
   const [choices, installs, paths] = await Promise.all([
     renderChoices({ report, onSaved: recheckAll }),
     renderInstallProviders({ onInstalled: recheckAll }),
-    renderProviderPaths({ report, onSaved: recheckAll }),
+    renderProviderPaths({ report, onSaved: recheckAll, unusedChoices }),
   ]);
 
   container.replaceChildren(

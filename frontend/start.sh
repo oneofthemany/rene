@@ -194,6 +194,20 @@ if ! node scripts/check-dependency-install.mjs 2>/dev/null; then
   [ "$install" = true ] || fail "installed dependencies do not match package-lock.json. Run npm ci, or rerun without --no-install."
   steps+=("npm ci")
 fi
+# The page's own packages (the xterm.js terminal) live in frontend/package.json.
+# npm records what it installed in node_modules/.package-lock.json.
+if ! node -e '
+  const { readFileSync } = require("node:fs");
+  const read = (path) => JSON.parse(readFileSync(path, "utf8")).packages ?? {};
+  const want = read("frontend/package-lock.json");
+  const have = read("frontend/node_modules/.package-lock.json");
+  const ok = Object.entries(want).every(([path, entry]) =>
+    path === "" || have[path]?.version === entry.version);
+  process.exit(ok ? 0 : 1);
+' 2>/dev/null; then
+  [ "$install" = true ] || fail "the workbench page's packages are missing or stale. Run npm ci --prefix frontend, or rerun without --no-install."
+  steps+=("npm ci --prefix frontend")
+fi
 [ "$build" = true ] && steps+=("npm run build:cached")
 
 launch=(node frontend/server.mjs)

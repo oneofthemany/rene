@@ -1371,11 +1371,24 @@ progress {
   margin-top: 4px;
 }
 
-.choice label {
+.choice-text {
   display: flex;
   flex-direction: column;
 }
 
+.choice-text label {
+  font-weight: 600;
+}
+
 .doctor-state-unused {
   color: var(--muted);
+}
+
+.agent .agent-screen {
+  height: min(70vh, 720px);
+  min-height: 320px;
+  margin-top: 8px;
+  padding: 6px;
+  border-radius: 6px;
+  background: #000;
 }

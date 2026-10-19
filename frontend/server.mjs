@@ -20,6 +20,7 @@ import { CHOICES, checkOwner, ENGINES } from "./choices.mjs";
 import { createHistory } from "./history.mjs";
 import { createInstaller, defaultProvidersDir } from "./providerInstall.mjs";
 import { createSettings, SettingsError } from "./settings.mjs";
+import { agentDirectory, createTerminal, TerminalError } from "./terminal.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const publicRoot = join(here, "public");
@@ -44,6 +45,11 @@ const { values: options } = parseArgs({
     "providers-dir": { type: "string", default: defaultProvidersDir() },
   },
 });
+
+// A launcher path is made absolute once, so every consumer (the MCP child,
+// rea commands, agents started in other folders) runs the same file. A bare
+// command name is left for PATH lookup.
+if (/[\\/]/.test(options.rea)) options.rea = resolve(options.rea);
 
 /**
  * How to run REA: a JavaScript entrypoint (the fork's scripts/rea.mjs) with
@@ -77,6 +83,7 @@ const history = createHistory(options["history-dir"], {
 });
 
 const MODULES = [
+  "agent.js",
   "api.js",
   "app.js",
   "browse.js",
@@ -93,6 +100,8 @@ const MODULES = [
   "setup.js",
   "workflows.js",
 ];
+// The page's terminal (xterm.js) comes from frontend/package.json.
+const vendor = (path) => join(here, "node_modules", path);
 const STATIC_FILES = new Map([
   ["/", { file: "index.html", type: "text/html; charset=utf-8" }],
   ["/styles.css", { file: "styles.css", type: "text/css; charset=utf-8" }],
@@ -100,6 +109,27 @@ const STATIC_FILES = new Map([
     `/${file}`,
     { file, type: "text/javascript; charset=utf-8" },
   ]),
+  [
+    "/vendor/xterm.mjs",
+    {
+      path: vendor("@xterm/xterm/lib/xterm.mjs"),
+      type: "text/javascript; charset=utf-8",
+    },
+  ],
+  [
+    "/vendor/addon-fit.mjs",
+    {
+      path: vendor("@xterm/addon-fit/lib/addon-fit.mjs"),
+      type: "text/javascript; charset=utf-8",
+    },
+  ],
+  [
+    "/vendor/xterm.css",
+    {
+      path: vendor("@xterm/xterm/css/xterm.css"),
+      type: "text/css; charset=utf-8",
+    },
+  ],
 ]);
 
 // ---------------------------------------------------------------------------
@@ -431,15 +461,105 @@ async function doctor(response) {
         return owner !== undefined && !use[owner.id];
       })
       .map((check) => check.name);
-    return sendJson(response, 200, { report, checkedAt, unused });
+    const unusedChoices = Object.keys(use).filter((id) => !use[id]);
+    return sendJson(response, 200, {
+      report,
+      checkedAt,
+      unused,
+      unusedChoices,
+    });
   } catch (cause) {
     return sendJson(response, 502, { error: describeError(cause) });
   }
 }
 
+// ---------------------------------------------------------------------------
+// Agent terminal (Claude Code, Copilot CLI, agy, Codex, ...)
+
+/** rea setup's registration state for each client it found registered. */
+function registrationStates(report) {
+  return Object.fromEntries(
+    (report.doctor?.identity?.registrations ?? []).map((entry) => [
+      entry.client,
+      entry.state,
+    ]),
+  );
+}
+
+/** One client's registration state, from a read-only setup plan. */
+async function registrationState(client) {
+  if (setupBusy)
+    throw new TerminalError(
+      "Agent setup is running; start the agent when it finishes.",
+    );
+  let report;
+  try {
+    report = await runSetup(["--dry-run", ...clientArgs([client])]);
+  } catch (cause) {
+    throw new TerminalError(
+      `Couldn't check rene's registration (${describeError(cause)}).`,
+    );
+  }
+  return registrationStates(report)[client] ?? "not registered";
+}
+
+const terminal = createTerminal({
+  server: reaCommand(["mcp"]),
+  directory: agentDirectory(here),
+  // Saved provider paths reach REA through the agent's environment.
+  environment: () => settings.environment(process.env),
+  registration: registrationState,
+});
+
+/** Runs a terminal action, mapping its expected refusals to 400. */
+async function terminalAction(response, work) {
+  try {
+    return sendJson(response, 200, (await work()) ?? terminal.describe());
+  } catch (cause) {
+    if (cause instanceof TerminalError)
+      return sendJson(response, 400, { error: cause.message });
+    throw cause;
+  }
+}
+
+const TERMINAL_ROUTES = {
+  "GET /api/terminal": (_request, response) =>
+    sendJson(response, 200, {
+      ...terminal.describe(),
+      agents: terminal.agents(),
+      home: homedir(),
+    }),
+  "GET /api/terminal/stream": (_request, response) => terminal.stream(response),
+  "GET /api/terminal/registrations": (_request, response) =>
+    exclusiveSetup(response, async () =>
+      sendJson(
+        response,
+        200,
+        registrationStates(await runSetup(["--dry-run", "--all-detected"])),
+      ),
+    ),
+  "POST /api/terminal/start": async (request, response) => {
+    const body = await readJsonBody(request);
+    return terminalAction(response, () => terminal.start(body ?? {}));
+  },
+  "POST /api/terminal/input": async (request, response) => {
+    const body = await readJsonBody(request);
+    return terminalAction(response, () => terminal.input(body?.data));
+  },
+  "POST /api/terminal/resize": async (request, response) => {
+    const body = await readJsonBody(request);
+    return terminalAction(response, () =>
+      terminal.resize(body?.cols, body?.rows),
+    );
+  },
+  "POST /api/terminal/stop": (_request, response) =>
+    terminalAction(response, () => ({ stopped: terminal.stop() })),
+};
+
 // Readiness and provider paths work while the MCP child is down.
 const PROVIDER_ROUTES = {
   "GET /api/doctor": (_request, response) => doctor(response),
+  ...TERMINAL_ROUTES,
   "GET /api/choices": (_request, response) =>
     sendJson(response, 200, describeChoices()),
   "POST /api/choices": saveChoices,
@@ -732,12 +852,21 @@ async function handle(request, response) {
 
   const staticFile = STATIC_FILES.get(url.pathname);
   if (request.method === "GET" && staticFile) {
-    const body = await readFile(join(publicRoot, staticFile.file));
+    const body = await readFile(
+      staticFile.path ?? join(publicRoot, staticFile.file),
+    ).catch(() => undefined);
+    if (body === undefined)
+      return sendJson(response, 404, {
+        error:
+          "Not found. Run npm install in frontend/ (start.sh does) for the terminal's files.",
+      });
     response.writeHead(200, {
       "content-type": staticFile.type,
       "cache-control": "no-store",
       "content-security-policy":
-        "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'",
+        // Inline styles are allowed for the xterm.js terminal, which sets
+        // them on its own elements; scripts stay limited to this origin.
+        "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'",
       "x-content-type-options": "nosniff",
     });
     return response.end(body);
@@ -1099,6 +1228,7 @@ async function shutdown(exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
   for (const listener of listeners) listener.end();
+  terminal.close();
   server.close();
   await stopMcp();
   await releasePidFile();
