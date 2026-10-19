@@ -9,32 +9,42 @@ import { finished } from "node:stream/promises";
 import type {
   OwnedProviderProcessSpawnOptions,
   SpawnedOwnedProviderProcess,
-} from "../process/ProviderProcess.js";
+} from "./ProviderProcess.js";
 import type { AnalysisCapturedOutput } from "../domain/analysisErrorBase.js";
 import {
   ProviderProcessSupervisor,
   spawnOwnedProviderProcess,
-} from "../process/ProviderProcess.js";
-import { cleanupOwnedProcessGroup } from "../process/ProcessOwnership.js";
+} from "./ProviderProcess.js";
+import { cleanupOwnedProcessGroup } from "./ProcessOwnership.js";
 import { ProviderCleanupError } from "../domain/providerCleanupError.js";
 
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 const MAX_OPERATION_BYTES = 32 * 1024 * 1024;
 
 /** Injectable acquisition seam; production owns a POSIX group or Windows job. */
-export type JadxLauncher = (
+export type OwnedMcpLauncher = (
   options: OwnedProviderProcessSpawnOptions,
 ) => Promise<SpawnedOwnedProviderProcess>;
 
 /** The first observed failure, recorded before notifying the SDK or beginning cleanup. */
-export type JadxTransportFailure =
+export type OwnedMcpTransportFailure =
   | { readonly kind: "process"; readonly cause: unknown }
   | { readonly kind: "exit" }
   | { readonly kind: "protocol"; readonly cause: Error }
   | { readonly kind: "interrupted"; readonly reason: unknown };
 
-/** SDK-framed stdio with REA-owned process cleanup rather than an unowned child. */
-export class JadxMcpTransport implements Transport {
+/** The provider a transport serves: its id for errors and its name for messages. */
+export interface OwnedMcpProvider {
+  readonly id: string;
+  readonly label: string;
+}
+
+/**
+ * An MCP server run as a REA-owned child: SDK-framed stdio with REA-owned
+ * process cleanup rather than an unowned child, and bounded frames and
+ * per-operation output.
+ */
+export class OwnedMcpTransport implements Transport {
   onclose: Transport["onclose"];
   onerror: Transport["onerror"];
   onmessage: Transport["onmessage"];
@@ -48,17 +58,18 @@ export class JadxMcpTransport implements Transport {
   #closed = false;
   #closePromise: Promise<void> | undefined;
   #starting: Promise<void> | undefined;
-  #failure: JadxTransportFailure | undefined;
+  #failure: OwnedMcpTransportFailure | undefined;
 
   constructor(
+    readonly provider: OwnedMcpProvider,
     readonly options: Omit<OwnedProviderProcessSpawnOptions, "runId" | "stdin">,
-    readonly launcher: JadxLauncher = spawnOwnedProviderProcess,
+    readonly launcher: OwnedMcpLauncher = spawnOwnedProviderProcess,
   ) {}
 
   /** Acquires exactly one protocol process after the SDK installs callbacks. */
   start(): Promise<void> {
     if (this.#started || this.#closed)
-      throw new Error("JADX transport cannot be restarted");
+      throw new Error(`${this.provider.label} transport cannot be restarted`);
     this.#started = true;
     this.#starting = this.#acquire().catch((cause: unknown) => {
       this.#failure ??= { kind: "process", cause };
@@ -89,21 +100,26 @@ export class JadxMcpTransport implements Transport {
       spawned.process.stdin === null ||
       spawned.process.stdout === null
     )
-      throw new Error("JADX launcher did not supply protocol stdin/stdout");
+      throw new Error(
+        `${this.provider.label} launcher did not supply protocol stdin/stdout`,
+      );
     spawned.process.stdout.on("data", this.#read);
     spawned.process.stdout.on("error", this.#error);
     spawned.process.stderr?.on("data", this.#countStderr);
     spawned.process.on("error", this.#error);
     spawned.process.once("exit", this.#exit);
     spawned.process.stdin.on("error", this.#error);
-    if (this.#closed) throw new Error("JADX transport closed during startup");
+    if (this.#closed)
+      throw new Error(`${this.provider.label} transport closed during startup`);
   }
 
   /** Writes SDK-serialized messages and observes stream backpressure. */
   async send(message: JSONRPCMessage): Promise<void> {
     const input = this.#spawned?.process.stdin;
     if (this.#closed || input === undefined || input === null)
-      throw new Error("JADX protocol process is not writable");
+      throw new Error(
+        `${this.provider.label} protocol process is not writable`,
+      );
     await new Promise<void>((resolve, reject) => {
       try {
         input.write(serializeMessage(message), (cause) => {
@@ -154,7 +170,7 @@ export class JadxMcpTransport implements Transport {
   }
 
   /** Preserve the failed protocol/resource constraint after the SDK closes requests. */
-  observedFailure(): JadxTransportFailure | undefined {
+  observedFailure(): OwnedMcpTransportFailure | undefined {
     return this.#failure;
   }
 
@@ -191,7 +207,7 @@ export class JadxMcpTransport implements Transport {
     input?.off("error", this.#error);
     this.onclose?.();
     if (stopped?.status === "incomplete")
-      throw new ProviderCleanupError("jadx", [this.runId], {
+      throw new ProviderCleanupError(this.provider.id, [this.runId], {
         reason: stopped.reason,
         stderr: this.diagnostics()?.stderr ?? "",
       });
@@ -214,7 +230,7 @@ export class JadxMcpTransport implements Transport {
     if (this.#bytes > MAX_OPERATION_BYTES)
       this.#fail(
         new Error(
-          `JADX operation output exceeds ${MAX_OPERATION_BYTES} bytes; no complete result is available`,
+          `${this.provider.label} operation output exceeds ${MAX_OPERATION_BYTES} bytes; no complete result is available`,
         ),
       );
   };
@@ -225,7 +241,7 @@ export class JadxMcpTransport implements Transport {
     if (this.#bytes > MAX_OPERATION_BYTES) {
       this.#fail(
         new Error(
-          `JADX operation output exceeds ${MAX_OPERATION_BYTES} bytes; no complete result is available`,
+          `${this.provider.label} operation output exceeds ${MAX_OPERATION_BYTES} bytes; no complete result is available`,
         ),
       );
       return;
@@ -238,7 +254,9 @@ export class JadxMcpTransport implements Transport {
         const fragment = bytes.subarray(offset, end);
         const frameBytes = this.#frameLength + fragment.length;
         if (frameBytes > MAX_FRAME_BYTES)
-          throw new Error(`JADX MCP frame exceeds ${MAX_FRAME_BYTES} bytes`);
+          throw new Error(
+            `${this.provider.label} MCP frame exceeds ${MAX_FRAME_BYTES} bytes`,
+          );
         this.#appendFrame(fragment, frameBytes);
         if (newline === -1) return;
         const line = new TextDecoder("utf-8", {

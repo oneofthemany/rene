@@ -3,6 +3,14 @@ import { h } from "./render.js";
 // Tool families for the catalog. First match wins; order is significant.
 const GROUPS = [
   [
+    "Toolbox",
+    /^(read_file|write_file|edit_file|find_files|search_text|run_command|record_topic|survey_project_directory)$/,
+  ],
+  [
+    "Source code (CodeGraph)",
+    /^(explore_source_graph|search_source_symbols|read_source_node|find_source_callers|find_source_callees|analyze_source_impact|list_source_files|source_graph_status|index_source_graph)$/,
+  ],
+  [
     "Sessions & Evidence",
     /^(open_binary|close_binary|binary_session|inspect_analysis_view|get_navigation_context|inspect_address_context)$|evidence|unknown/,
   ],

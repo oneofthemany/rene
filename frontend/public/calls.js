@@ -6,15 +6,18 @@ import { api, apiJson, ndjson } from "./api.js";
 let nextKey = 0;
 
 /**
- * Starts one tool call. onUpdate(entry) fires on every state change, and
- * entry.done resolves once the call has settled.
+ * Starts one tool call, recorded in `project`'s history (undefined: none).
+ * onUpdate(entry) fires on every state change, and entry.done resolves once
+ * the call has settled.
  * outcome: "queued" | "running" | "ok" | "error"
  */
-export function startCall(name, args, onUpdate) {
+export function startCall(name, args, project, onUpdate) {
   const entry = {
     key: ++nextKey,
     name,
     args,
+    project,
+    source: "workbench",
     startedAt: Date.now(),
     outcome: "queued",
     callId: undefined,
@@ -44,7 +47,11 @@ async function follow(entry, onUpdate) {
   try {
     const response = await api("/api/call", {
       method: "POST",
-      body: JSON.stringify({ name: entry.name, arguments: entry.args }),
+      body: JSON.stringify({
+        name: entry.name,
+        arguments: entry.args,
+        project: entry.project,
+      }),
     });
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
@@ -117,18 +124,76 @@ export function liveStatus(entry) {
   );
 }
 
-/** Calls the bridge stored before this page loaded, newest first. */
-export async function loadStoredHistory() {
-  const { entries } = await apiJson("/api/history").catch(() => ({
-    entries: [],
-  }));
-  return entries.map((stored) => ({
-    ...stored,
+const historyPath = (project, id = "") =>
+  `/api/history${id ? `/${encodeURIComponent(id)}` : ""}${project ? `?project=${project}` : ""}`;
+
+/**
+ * A call the bridge reports (stored, or an agent's call in progress) as a
+ * page entry. Its result is loaded when it is opened.
+ */
+export const fromBridge = (summary, project) => ({
+  ...summary,
+  key: ++nextKey,
+  historyId: summary.id,
+  project,
+  stored: true,
+});
+
+/** The project's stored calls and agent calls in progress, newest first. */
+export async function loadStoredHistory(project) {
+  const [{ entries, live = [] }, turns] = await Promise.all([
+    apiJson(historyPath(project)).catch(() => ({ entries: [] })),
+    loadTurns(project),
+  ]);
+  return [
+    ...[...live, ...entries].map((summary) => fromBridge(summary, project)),
+    ...turns,
+  ].sort((a, b) => b.startedAt - a.startedAt);
+}
+
+/**
+ * The project's agent conversation turns as History entries: what was asked,
+ * the rene calls that followed and what the agent concluded.
+ */
+export async function loadTurns(project) {
+  if (!project) return [];
+  const { turns = [] } = await apiJson(
+    `/api/projects/${project}/conversations`,
+  ).catch(() => ({}));
+  return turns.map((turn) => ({
+    kind: "turn",
     key: ++nextKey,
-    historyId: stored.id,
+    historyId: `turn:${turn.session}:${turn.index}`,
+    name: "conversation",
+    startedAt: Date.parse(turn.at) || 0,
+    outcome: "ok",
+    source: "agent",
+    agent: turn.agent,
+    project,
     stored: true,
+    turn,
   }));
 }
+
+/** The project's threads, topics and the turns and calls under them. */
+export const loadTopics = (project) =>
+  apiJson(`/api/projects/${project}/topics`);
+
+/** One whole turn: every prompt, reasoning, reply, tool use and result. */
+export const loadTurn = (entry) =>
+  apiJson(
+    `/api/projects/${entry.project}/conversations/${encodeURIComponent(entry.turn.session)}/${entry.turn.index}`,
+  ).then(({ turn }) => turn);
+
+/** Why an agent's call was made, what it produced, and what followed. */
+export const loadAudit = (entry) =>
+  apiJson(
+    `/api/history/${encodeURIComponent(entry.historyId)}/audit?project=${entry.project}`,
+  ).then(({ audit }) => audit);
+
+/** Removes the project's stored calls for good. */
+export const clearStoredHistory = (project) =>
+  apiJson(historyPath(project), { method: "DELETE" });
 
 /** Restored entries carry only a summary until one is opened. */
 export async function loadStoredResult(entry) {
@@ -136,7 +201,7 @@ export async function loadStoredResult(entry) {
   if (entry.resultBytes === undefined) return;
   try {
     ({ result: entry.result } = await apiJson(
-      `/api/history/${encodeURIComponent(entry.historyId)}`,
+      historyPath(entry.project, entry.historyId),
     ));
   } catch (cause) {
     entry.failure = `The stored result could not be read: ${cause.message}`;

@@ -53,6 +53,7 @@ node frontend/server.mjs       # prints http://127.0.0.1:4417/#token=...
 | `--history-dir`    | `./.workbench-history`       | Where settled calls are stored             |
 | `--settings`       | `./.workbench-settings.json` | Provider paths saved from the page         |
 | `--providers-dir`  | see below                    | Where provider downloads are unpacked      |
+| `--projects-dir`   | see [Projects](#projects)    | Where each project's history is stored     |
 
 REA reads provider configuration (`REA_*`, Ghidra/IDA paths and similar) from
 its environment. Set them in the shell you start the bridge from, or choose
@@ -148,6 +149,9 @@ go in a home folder on a read-only (rpm-ostree) host, so the host itself never
 changes:
 
 - Node.js 24 (`.nvmrc`), and `ps` for REA's process supervision
+- a build toolchain for the agent toolbox's `run_command`: npm, Rust
+  (`cargo`, `rustc`) and gcc-c++/make, from Fedora's repositories; Cargo's
+  cache stays in the mounted `~/.cargo`
 - Hopper's official demo with Xvfb, installed by this fork's own Linux
   installer (publisher PGP signature, launcher identity); its evidence goes to
   `~/.cache/rea/hopper-releases` so `rea doctor` accepts the launcher offline
@@ -190,19 +194,191 @@ Upstream REA's installers deliberately don't install Java or Ghidra (see
 To change a built-in release, edit its version, URL, size and SHA-256 in
 `providerReleases.mjs`.
 
+## Projects
+
+The bar at the top of the middle column picks the **Project**: the folder
+your agent works in. Calls you run from the page and every rea tool call the
+agent makes are recorded in that project's history, so each folder keeps a
+record of who ran what, with which arguments and with what result. With no
+project open, calls go to the unassigned history (`--history-dir`, as before).
+The right-hand column has two tabs: **History** (the active project's calls,
+filtered by **All**, **Agent** or **You**) and **Project** (the active
+folder's assessment, and the other known projects to switch to).
+
+The bridge keeps one folder per project under `--projects-dir`, by default
+`${XDG_DATA_HOME:-~/.local/share}/rea-workbench/projects/<id>/`: a
+`project.json` with the folder's real path, device and inode, and `history/`
+(the same store and limits as the unassigned history). A project is the
+folder: the same real path and inode is the same project, so its history
+survives restarts and reboots. The device number isn't part of that test,
+because btrfs and composefs (Fedora Atomic) can renumber devices at each
+boot. A folder moved within one boot keeps its project (device and inode find
+it and the path is updated), while a different folder at the same path
+(deleted and recreated, so another inode) becomes a new project, so histories
+never mix. If several stored projects match, the oldest is used. A listed
+project whose folder is gone or replaced says so and can't be opened from the
+list.
+
+### Agent calls
+
+Claude Code and Copilot CLI don't run `rea mcp` directly. They run
+`relay.mjs`, which starts REA and passes every byte between them unchanged.
+Alongside, it reads the JSON-RPC messages and reports each `tools/call` to the
+bridge when it starts (shown as running in History) and when it settles, with
+the result. Reports authenticate with a token issued for that agent session
+only, written to `frontend/.workbench-agent/relay-report.json` (mode 0600); the
+page's token is never given to the agent. A report never changes or delays the
+agent's traffic: if the bridge is down, the relay prints one line on stderr and
+the agent carries on. Calls REA never answers settle as failed when it exits.
+Results over 8 MiB are recorded by size only, as for page calls. Agents that
+get rene from their registration talk to REA directly, so their calls aren't
+recorded; the agent picker says so. The agent's chat and reasoning aren't
+recorded yet.
+
+### Conversations and audit trail
+
+Claude Code writes every conversation run in a folder to
+`${CLAUDE_CONFIG_DIR:-~/.claude}/projects/<folder>/<id>.jsonl`; a resumed
+conversation keeps its own file and `/clear` starts a new one. The bridge
+follows the project folder's transcripts and keeps, per project, the prompts,
+the agent's reasoning (as Claude Code records it) and replies, its tool uses
+and the results it saw, with a cursor so a restart neither loses nor repeats
+anything; transcripts written while the bridge was down are caught up when
+the project is opened. Copilot CLI and agents that use their registration
+aren't captured yet.
+
+Each rene call in a transcript is tied to the call the relay recorded by
+timestamp and identity: the same tool with identical arguments, recorded just
+after the tool use (the closest such call, within a short window). That gives
+every recorded agent call an **audit trail**, shown under its result: what was
+asked, why the call was made (the reasoning and replies just before it), what
+the agent saw, and what came of it (what it said and did next, up to its next
+rene call).
+
+Conversation turns appear in History as the quoted request, and the agent
+calls tied to a turn are listed under it, folded behind "▸ N calls" so the
+list stays short; calls no turn links (yours, or an agent call whose turn
+hasn't been read yet) stay at the top level. **Expand all** opens every turn's
+calls at once, in the list and in the Topics view. Opening a turn shows the
+whole turn in order. The assessment's **Conversations** section quotes the
+most recent turns: the request, the rene calls with their entry ids, and the
+agent's conclusion.
+
+Actions the agent takes with its own built-in tools (shell, file edits) show
+in a turn only by tool name; they aren't rene calls, so they have no recorded
+result or audit trail of their own.
+
+### Topics
+
+Work is grouped by its relationship: a **thread** (the chat relationship, the
+top of the hierarchy), the topics under it (feature, question, bug,
+investigation, refactor, docs, decision, other), then the conversation turns
+and their calls. Topics are declared with rene's `record_topic` tool, by an
+agent or from the **Topics** view in History; a declaration is a recorded call,
+so the tree and every change to it are in the history, and the latest
+declaration of a topic is its current state (title, status, summary,
+relations such as `fixes` or `depends_on`).
+
+A turn belongs to the topic declared in it and to no other: nothing carries
+over from an earlier turn, so a turn without a declaration is listed as not
+in any topic rather than filed under one it may not be about. Claude Code
+sessions started from the workbench are held to a declaration in every turn
+by hooks the bridge adds for the session (`topicGate.mjs`, through
+`--settings`; the user's own settings are untouched): each prompt reminds the
+agent, every other tool is refused until `record_topic` has been called in the
+turn (calls sent in the same message as it pass), and a turn that would end
+without a successful declaration is sent back once. The gate follows the
+turn from the hook events themselves, keeping one small state file per
+session in `.workbench-agent/topic-gate/`, rather than from the transcript,
+which Claude Code writes a little after the fact. While rene is disconnected the agent can't use tools until it is
+reconnected. Copilot CLI and registration agents only get the instruction.
+
+Besides declared relations, topics are linked by fact: two topics whose calls
+read or changed the same file, or named or returned the same Evidence, show
+what they share. The assessment's **Topics** section lists the threads and
+topics with their ids, so an agent can continue an existing topic.
+
+### Evidence links
+
+Links between calls are recorded only when they are confirmed, never guessed.
+REA identifies each Evidence record by a SHA-256 digest of its content
+(`ev_<64 hex>`). When a call settles, the bridge records the Evidence IDs it
+issued: its result's own Evidence, plus the parent Evidence REA says it
+retained (a summary receipt's `normalized_result.parent_evidence_id`) when the
+call wasn't given that ID. It also looks for argument values that are exactly
+an Evidence ID. Each one is linked to every earlier call in the project that
+issued that ID, whichever session made it. Because the
+identifier is a content digest, the call really did name that call's result.
+An ID that no recorded call returned (imported, from another project, or
+from a result too large to keep) is recorded as an unresolved reference and
+linked to nothing. Calls that pass values by other means (an address, a path,
+a session) aren't linked: those relationships can't be confirmed from the
+traffic. History shows `← tool` under a call with confirmed links, and the
+result view links **Uses Evidence from** to those calls.
+
+### Project survey
+
+The bridge runs rene's `survey_project_directory` on the project folder
+through its own MCP connection, and records the call in the project's history
+(source "You", from the workbench) like any other call:
+
+- when a folder is opened, if it has no survey yet or the last one is more
+  than 10 minutes old;
+- when you press **Run assessment now** on the Project tab;
+- in the background after calls are recorded: a minute after the last one, and
+  at most every 5 minutes, because tools such as `extract_artifact` change what
+  the folder holds.
+
+The survey walks the folder (not following symbolic links, skipping `.git` and
+`node_modules`, reading at most 4 KiB of each file) and reports its structure
+to depth 2, the file types in use, and the rene tools that accept those types.
+Types come from content signatures where a format has one (ELF and core
+dumps, PE, Mach-O, ZIP and the APK/IPA/JAR/HAP packages, ASAR, plist, WASM,
+SQLite, DuckDB, pcap, DEX, squashfs, ...), and from names only otherwise; each
+type says which. Agents can call the same tool from the left-hand list.
+
+### Project assessment
+
+Each project can keep `.rene/assessment.md` in its folder: markdown project
+memory for you and your agent. The workbench asks once per project (Project →
+**Create it** or **Not for this project**) and writes nothing into the folder
+unless you agree. The file starts with sections for Target, Rules, Findings
+and Open questions, which belong to you and your agent, and one generated
+section between `<!-- rene:generated -->` and `<!-- /rene:generated -->`.
+The bridge rewrites only that section, 1.5 s after a project's calls stop
+settling, with:
+
+- **Folder structure, File types, Applicable tools, Coverage:** from the
+  latest survey in the project's history, with its entry id.
+- **Pathways:** chains of calls joined by confirmed Evidence links (up to 6
+  steps), counted by tool sequence, with how many ended successfully and
+  example entry ids.
+- **Evidence links:** which tool's Evidence was named by which tool's
+  argument, how often, and how many references stayed unresolved.
+- **Tools used:** runs, failures and agent runs per tool.
+
+If you remove the markers, the section isn't put back. An edit saved while the
+bridge is rewriting wins; the bridge's version is dropped until the next call.
+A Claude Code or Copilot CLI session started in a project with an assessment
+is told to read it first, follow its Rules, keep the other sections current
+(citing history entry ids) and leave the generated section alone. Your own
+`CLAUDE.md` and `AGENTS.md` aren't touched.
+
 ## Agents in the workbench
 
-**Agent** in the header opens a terminal that runs your own coding agent on
-this computer, in the folder you choose (**Start in**, with **Browse…**).
-Pick it under **Agent**: installed agents (found on the workbench's `PATH`)
+The project bar also picks the **Agent** and starts or stops it; it always
+starts in the active project's folder, and while it runs the project can't be
+changed. **Agent terminal** in the header shows its terminal. Pick it under
+**Agent**: installed agents (found on the workbench's `PATH`)
 come first, the rest are listed as not installed. Each is the same CLI you run
 in a terminal, with your login, settings, skills and other MCP servers, and
 each runs with this fork's REA as its `rea` MCP server, in one of two ways.
 
 **For the session** (Claude Code, GitHub Copilot CLI): rene is added for that
-session only, launched the way the workbench launches REA (the container
-launcher by default), with its tools pre-approved and an instruction to use
-them. This works even where no registration exists.
+session only, through the relay (see [Agent calls](#agent-calls)) and launched
+the way the workbench launches REA (the container launcher by default), with
+its tools pre-approved and an instruction to use them. This works even where
+no registration exists.
 
 | Agent              | rene added with                                  | Pre-approved              | Instruction                                                         |
 | ------------------ | ------------------------------------------------ | ------------------------- | ------------------------------------------------------------------- |
@@ -356,6 +532,11 @@ API it is reachable only on loopback with the per-launch token.
   marked values in its results; the workbench doesn't redact anything else.
   Clear history, or delete the directory, after working with anything you
   don't want kept on disk. The directory is ignored by git.
+- Project histories are stored the same way under `--projects-dir`. The
+  bridge writes into a project folder only `.rene/assessment.md`, and only
+  after you agree for that project.
+- Agent relays report calls to `/api/relay` with a token issued for their
+  session, not the page's token; reports with any other token are refused.
 - Provider paths are stored as JSON in `--settings` (mode `0600`), with the
   previous version kept as `<file>.bak`. Only the six provider variables are
   accepted, each must be an absolute path to an existing folder or file, and
@@ -370,6 +551,10 @@ API it is reachable only on loopback with the per-launch token.
 ```
 server.mjs          bridge: MCP child owner, call queue, HTTP boundary
 history.mjs         stored call history: summaries, results, pruning
+projects.mjs        projects: folder identity and per-project history
+assessment.mjs      Evidence links, pathways, .rene/assessment.md
+relay.mjs           MCP relay agents run; reports their tool calls
+conversations.mjs   agent transcripts: following, turns, audit trails
 settings.mjs        saved provider paths added to REA's environment
 choices.mjs            what the user uses, and the default analysis engine
 providerReleases.mjs   built-in provider releases, pinned per host
@@ -396,7 +581,8 @@ public/setup.js     agent registration through rea setup's plan and apply
 public/doctor.js    provider readiness from rea doctor
 public/providerPaths.js  provider path fields, save and restart
 public/choices.js      "What you use" switches and default engine
-public/agent.js        agent picker and terminal view
+public/agent.js        agent picker, Start/Stop and terminal view
+public/projects.js     project bar and Project tab
 public/installProviders.js  provider downloads, progress and updates
 ```
 

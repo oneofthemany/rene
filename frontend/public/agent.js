@@ -1,12 +1,11 @@
-// Agent view: a terminal attached to the bridge's agent session (Claude Code
-// or GitHub Copilot CLI). The panel is built once and kept, so switching to
-// another view and back leaves the session and its screen as they were.
+// Agent: the picker and Start/Stop in the project bar, and a terminal view
+// attached to the bridge's agent session. The agent always starts in the
+// active project's folder. The terminal is built once and kept, so switching
+// to another view and back leaves the session and its screen as they were.
 
 import { api, apiJson, ndjson } from "./api.js";
-import { openPicker } from "./browse.js";
 import { h } from "./render.js";
 
-const FOLDER_KEY = "rea-agent-folder";
 const AGENT_KEY = "rea-agent";
 let panel;
 
@@ -95,7 +94,7 @@ function connection(agent, registrations) {
   if (agent.rene === "session")
     return {
       ready: true,
-      text: "rene is added for this session, with its tools pre-approved.",
+      text: "rene is added for this session through the workbench, with its tools pre-approved. Every rea tool call it makes is recorded in the project's history.",
     };
   if (!registrations)
     return { ready: true, text: "Checking rene's registration…" };
@@ -109,7 +108,7 @@ function connection(agent, registrations) {
   if (state === "aligned")
     return {
       ready: true,
-      text: `rene comes from its Agent setup registration (current). ${agent.label} asks before using its tools, as it normally does.`,
+      text: `rene comes from its Agent setup registration (current). ${agent.label} asks before using its tools, as it normally does. Its tool calls go straight to REA, so they aren't recorded in the project's history.`,
     };
   return {
     ready: false,
@@ -117,79 +116,65 @@ function connection(agent, registrations) {
   };
 }
 
-/** Agent and folder fields, Start/Stop and status, reflecting the session. */
-function controls(agents) {
+/** Agent picker, Start/Stop and status, reflecting the session and project. */
+function controls(agents, getProject) {
   let registrations;
-  const folder = h("input", {
-    id: "agent-folder",
-    spellcheck: "false",
-    autocomplete: "off",
-  });
-  const browse = h(
-    "button",
-    {
-      type: "button",
-      class: "quiet",
-      "aria-label": "Browse for the folder the agent starts in",
-      onclick: () =>
-        openPicker({
-          start: folder.value || undefined,
-          folder: true,
-          onPick: (path) => (folder.value = path),
-        }),
-    },
-    "Browse…",
-  );
   const picker = agentSelect(agents);
   const label = (id) =>
     agents.find((agent) => agent.id === id)?.label ?? "The agent";
   const parts = {
-    folder,
-    browse,
     picker,
     start: h("button", { type: "button", class: "primary" }, "Start"),
     stop: h("button", { type: "button", class: "quiet" }, "Stop"),
-    status: h("p", { class: "hint", role: "status" }),
+    status: h("p", { class: "hint agent-status", role: "status" }),
     message: h("span", { class: "form-error", role: "alert" }),
     running: false,
+    last: { running: false },
   };
   parts.registrations = (value) => {
     registrations = value;
-    parts.show({ running: parts.running });
+    parts.show(parts.last);
   };
   parts.show = (state) => {
+    parts.last = state;
     parts.running = state.running;
     if (state.agent) picker.select.value = state.agent;
     const chosen = agents.find((agent) => agent.id === picker.select.value);
     const link = chosen && connection(chosen, registrations);
     picker.help.replaceChildren(...[link?.text ?? ""].flat().filter(Boolean));
-    parts.start.disabled = state.running || !link?.ready;
+    const project = getProject();
+    parts.start.disabled = state.running || !link?.ready || !project;
+    parts.start.title = project ? "" : "Open a project folder first.";
     parts.stop.disabled = !state.running;
-    for (const input of [folder, browse, picker.select])
-      input.disabled = state.running;
+    picker.select.disabled = state.running;
     const name = label(state.agent ?? picker.select.value);
     parts.status.textContent = state.running
       ? `${name} is running in ${state.cwd}.`
       : state.exitCode !== undefined && state.exitCode !== null
         ? `${name} exited (code ${state.exitCode}). Start it again when you're ready.`
-        : "Not running.";
+        : project
+          ? `Not running. Start runs it in ${project.path}.`
+          : "Not running. Open a project folder to start an agent in it.";
   };
   return parts;
 }
 
 /** Follows the session's stream; reconnects if it drops. */
-async function follow(term, ui) {
+async function follow(term, ui, onState) {
   let agent;
   const handle = (event) => {
     if (event.type === "state" || event.type === "started") {
       if (event.type === "started") term.reset();
       agent = event.agent ?? agent;
       ui.show(event);
+      onState(event);
     } else if (event.type === "output") {
       if (event.replay) term.reset();
       term.write(event.data);
     } else if (event.type === "exit") {
-      ui.show({ running: false, agent, exitCode: event.exitCode });
+      const state = { running: false, agent, exitCode: event.exitCode };
+      ui.show(state);
+      onState(state);
     }
   };
   for (;;) {
@@ -228,42 +213,18 @@ function initialAgent(agents) {
     ?.id;
 }
 
-function layout(ui, screen) {
-  return h(
-    "section",
-    { class: "agent" },
-    h("h2", {}, "Agent"),
-    h(
-      "p",
-      { class: "hint" },
-      "Runs your own coding agent on this computer, in the folder you choose, with rene connected as its rea tools. How the chosen agent gets rene is shown under it. Your login, settings and other MCP servers still apply. REA can only see files in your home folder.",
-    ),
-    h(
-      "div",
-      { class: "field" },
-      h("label", { for: ui.picker.select.id }, "Agent"),
-      ui.picker.select,
-      ui.picker.help,
-    ),
-    h(
-      "div",
-      { class: "field" },
-      h("label", { for: ui.folder.id }, "Start in"),
-      h("div", { class: "path-control" }, ui.folder, ui.browse),
-    ),
-    h("div", { class: "actions" }, ui.start, ui.stop, ui.message),
-    ui.status,
-    screen,
-  );
-}
-
-async function buildPanel() {
+/**
+ * Builds the agent controls into `host` (the project bar) and follows the
+ * session. getProject() is the active project; onState(state) hears every
+ * session change; onStarted() runs after Start succeeds.
+ */
+export async function initAgent({ host, getProject, onState, onStarted }) {
   const [{ term, fit }, initial] = await Promise.all([
     createTerminal(),
     apiJson("/api/terminal"),
   ]);
   const screen = h("div", { class: "agent-screen" });
-  const ui = controls(initial.agents);
+  const ui = controls(initial.agents, getProject);
   const send = inputSender();
   term.onData((data) => {
     if (ui.running) send(data);
@@ -277,19 +238,23 @@ async function buildPanel() {
   });
   ui.start.onclick = async () => {
     ui.message.textContent = "";
+    const project = getProject();
+    if (!project) return;
+    onStarted();
+    if (!term.element) term.open(screen);
     fit.fit();
     try {
       const state = await apiJson("/api/terminal/start", {
         method: "POST",
         body: JSON.stringify({
           agent: ui.picker.select.value,
-          cwd: ui.folder.value.trim(),
+          cwd: project.path,
           cols: term.cols,
           rows: term.rows,
         }),
       });
-      remember(FOLDER_KEY, ui.folder.value.trim());
       ui.show(state);
+      onState(state);
       term.focus();
     } catch (cause) {
       ui.message.textContent = cause.message;
@@ -301,23 +266,51 @@ async function buildPanel() {
     });
 
   ui.picker.select.value = initial.agent ?? initialAgent(initial.agents);
-  ui.folder.value = initial.cwd ?? remember(FOLDER_KEY) ?? initial.home ?? "";
+  host.replaceChildren(
+    h(
+      "div",
+      { class: "agent-pick" },
+      h("label", { for: ui.picker.select.id }, "Agent"),
+      ui.picker.select,
+    ),
+    h("div", { class: "agent-actions" }, ui.start, ui.stop),
+    ui.message,
+  );
   ui.show(initial);
-  void follow(term, ui);
-  return { element: layout(ui, screen), term, screen, resize, ui };
-}
+  onState(initial);
+  void follow(term, ui, onState);
+  const loadRegistrations = () =>
+    apiJson("/api/terminal/registrations")
+      .then(ui.registrations)
+      .catch((cause) => ui.registrations({ error: cause.message }));
+  void loadRegistrations();
 
-/** Shows the agent view in `container`. */
-export async function showAgent(container) {
-  panel ??= await buildPanel();
-  container.replaceChildren(panel.element);
-  // Registrations can change in Agent setup while the panel is hidden.
-  void apiJson("/api/terminal/registrations")
-    .then(panel.ui.registrations)
-    .catch((cause) => panel.ui.registrations({ error: cause.message }));
-  if (!panel.term.element) panel.term.open(panel.screen);
-  requestAnimationFrame(() => {
-    panel.resize();
-    panel.term.focus();
-  });
+  const element = h(
+    "section",
+    { class: "agent" },
+    h("h2", {}, "Agent terminal"),
+    h(
+      "p",
+      { class: "hint" },
+      "Your own coding agent, running on this computer in the project folder with rene connected as its rea tools. Your login, settings and other MCP servers still apply. REA can only see files in your home folder.",
+    ),
+    ui.picker.help,
+    ui.status,
+    screen,
+  );
+  return {
+    /** Refreshes Start and the status after the active project changes. */
+    projectChanged: () => ui.show(ui.last),
+    /** Shows the terminal view in `container`. */
+    show(container) {
+      container.replaceChildren(element);
+      // Registrations can change in Agent setup while the view is hidden.
+      void loadRegistrations();
+      if (!term.element) term.open(screen);
+      requestAnimationFrame(() => {
+        resize();
+        term.focus();
+      });
+    },
+  };
 }

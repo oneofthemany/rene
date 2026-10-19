@@ -17,7 +17,10 @@ import { jsonValueSchema, type JsonValue } from "../domain/jsonValue.js";
 import { ProviderAdapterError } from "../domain/providerAdapterError.js";
 import type { OwnedProviderProcessSpawnOptions } from "../process/ProviderProcess.js";
 import { analyzeJadxRequest, type JadxToolPort } from "./JadxAnalysis.js";
-import { JadxMcpTransport, type JadxLauncher } from "./JadxMcpTransport.js";
+import {
+  OwnedMcpTransport,
+  type OwnedMcpLauncher,
+} from "../process/OwnedMcpTransport.js";
 import {
   jadxLoadSchema,
   parseJadxFailure,
@@ -34,7 +37,7 @@ import {
 
 /** One owned engine connection; its wire protocol stays inside the Android adapter. */
 export class JadxSession {
-  readonly transport: JadxMcpTransport;
+  readonly transport: OwnedMcpTransport;
   readonly #client = new Client({ name: "rea-android-adapter", version: "1" });
   #loaded: ReturnType<typeof jadxLoadSchema.parse> | undefined;
   #connected = false;
@@ -58,9 +61,13 @@ export class JadxSession {
 
   constructor(
     options: Omit<OwnedProviderProcessSpawnOptions, "runId" | "stdin">,
-    launcher?: JadxLauncher,
+    launcher?: OwnedMcpLauncher,
   ) {
-    this.transport = new JadxMcpTransport(options, launcher);
+    this.transport = new OwnedMcpTransport(
+      { id: "jadx", label: "JADX" },
+      options,
+      launcher,
+    );
   }
 
   /** Analyze one admitted immutable APK, checking producer identity and selectors. */

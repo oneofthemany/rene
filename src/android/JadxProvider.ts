@@ -40,7 +40,7 @@ import {
   resolveJadxOperationTimeout,
   validateJadxConfiguration,
 } from "./JadxConfiguration.js";
-import type { JadxLauncher } from "./JadxMcpTransport.js";
+import type { OwnedMcpLauncher } from "../process/OwnedMcpTransport.js";
 
 import { JadxSession } from "./JadxSession.js";
 import { captureJadxFailure } from "./JadxFailure.js";
@@ -262,7 +262,7 @@ export class JadxProvider implements AndroidAnalysisPort {
   #closePromise: Promise<void> | undefined;
   constructor(
     readonly environment: Readonly<Record<string, string | undefined>>,
-    readonly launcher?: JadxLauncher,
+    readonly launcher?: OwnedMcpLauncher,
   ) {}
 
   /** Report actual local prerequisites without starting JADX or opening a target. */

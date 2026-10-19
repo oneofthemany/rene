@@ -9,20 +9,32 @@ import {
 } from "./api.js";
 import {
   cancelCall,
+  clearStoredHistory,
+  fromBridge,
   isLive,
+  loadAudit,
   loadStoredHistory,
   loadStoredResult,
+  loadTurn,
+  loadTopics,
+  loadTurns,
   startCall,
 } from "./calls.js";
+import { renderTopics, setTopicsExpanded } from "./topics.js";
 import { effectBadge, renderCatalog as drawCatalog } from "./catalog.js";
-import { showAgent } from "./agent.js";
+import { initAgent } from "./agent.js";
+import { assessmentDocument, initProjects } from "./projects.js";
 import { refreshDoctor, showProviders } from "./doctor.js";
 import { createForm, matchingArgs } from "./form.js";
 import { h, renderError } from "./render.js";
 import {
   renderHistory as drawHistory,
   showEntry as drawEntry,
+  showAudit,
   showLive,
+  setTurnsExpanded,
+  showTurn,
+  updateLinks,
 } from "./results.js";
 import { showSetup } from "./setup.js";
 import { renderWorkflowPanel, showWorkflowForm } from "./workflows.js";
@@ -38,8 +50,100 @@ const state = {
   view: undefined,
   /** The call whose live status or result is shown below the form. */
   shown: undefined,
+  /** Calls of the active project (or the unassigned ones), newest first. */
   history: [],
+  /** History filter: "all", "agent" or "workbench". */
+  source: "all",
 };
+
+/** Active project, set once projects load. */
+let projects;
+/** Agent controls and terminal, set once the agent panel is built. */
+let agent;
+const activeProject = () => projects?.current();
+
+// ---------------------------------------------------------------------------
+// Where the page is, kept in this tab's session storage. A browser can reload
+// a tab at any time (a discarded background tab, a renderer crash, a reload
+// key); the page then returns to the same tool, result, brief and tabs.
+
+const VIEW_KEY = "rea-view";
+// Nothing is saved until the view from before the reload is restored, so the
+// page's own start-up rendering can't overwrite it.
+let restoringView = true;
+
+function saveView() {
+  if (restoringView) return;
+  const workflow = state.workflow;
+  try {
+    sessionStorage.setItem(
+      VIEW_KEY,
+      JSON.stringify({
+        selected: state.selected,
+        shown: state.shown?.historyId,
+        side:
+          document
+            .getElementById("tab-project")
+            .getAttribute("aria-selected") === "true"
+            ? "project"
+            : "history",
+        source: state.source,
+        workflow: workflow && {
+          prompt: workflow.prompt.name,
+          args: workflow.args,
+          result: workflow.result,
+          startedAt: workflow.startedAt,
+        },
+      }),
+    );
+  } catch {
+    // Storage full or blocked: the page works, it just won't come back here.
+  }
+}
+
+function savedView() {
+  try {
+    return JSON.parse(sessionStorage.getItem(VIEW_KEY) ?? "null") ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The active project's history load in progress, if any. */
+let historyLoading;
+let catalogLoaded;
+const catalogReady = new Promise((resolve) => (catalogLoaded = resolve));
+
+const viewAtLoad = savedView();
+
+/** Puts the page back where it was before a reload, once its data is in. */
+async function restoreView() {
+  const view = viewAtLoad;
+  try {
+    if (!view) return;
+    await Promise.all([catalogReady, historyLoading]);
+    if (view.source) setSource(view.source);
+    if (view.side) showSideTab(view.side);
+    const prompt = state.prompts.find(
+      (candidate) => candidate.name === view.workflow?.prompt,
+    );
+    if (prompt) {
+      state.workflow = { ...view.workflow, prompt };
+      renderWorkflow();
+    }
+    const selected = view.selected;
+    const shown = state.history.find((entry) => entry.historyId === view.shown);
+    if (selected?.kind === "tool" && shown?.name === selected.name)
+      await showCall(shown);
+    else if (selected?.kind === "tool") await selectTool(selected.name);
+    else if (selected?.kind === "prompt") selectPrompt(selected.name);
+    else if (selected?.kind)
+      document.getElementById(`open-${selected.kind}`)?.click();
+  } finally {
+    restoringView = false;
+    saveView();
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Token
@@ -95,9 +199,56 @@ document
     if (!log.hidden) await refreshStatus();
   });
 
+/** The active project's assessment, full width in place of the tool view. */
+function showAssessmentView(project, assessment) {
+  state.selected = { kind: "assessment" };
+  state.view = undefined;
+  state.shown = undefined;
+  renderCatalog();
+  document.getElementById("result-view").replaceChildren();
+  let raw = false;
+  const body = h("div");
+  const toggle = h("button", { type: "button", class: "quiet" }, "Markdown");
+  const draw = () => {
+    body.replaceChildren(assessmentDocument(assessment.text, raw));
+    toggle.textContent = raw ? "Formatted" : "Markdown";
+  };
+  toggle.onclick = () => {
+    raw = !raw;
+    draw();
+  };
+  draw();
+  document
+    .getElementById("tool-view")
+    .replaceChildren(
+      h(
+        "section",
+        { class: "assessment-page" },
+        h(
+          "div",
+          { class: "tool-head" },
+          h("h2", {}, `Assessment — ${project.name}`),
+          h("div", { class: "tool-name" }, assessment.file),
+          h("div", { class: "effects" }, toggle),
+        ),
+        body,
+      ),
+    );
+}
+
+/** Shows the agent terminal in place of the tool and result panes. */
+function showAgentView() {
+  state.selected = { kind: "agent" };
+  state.view = undefined;
+  renderCatalog();
+  document.getElementById("result-view").replaceChildren();
+  agent?.show(document.getElementById("tool-view"));
+}
+
+document.getElementById("open-agent").addEventListener("click", showAgentView);
+
 // Header views that replace both the tool and result panes.
 for (const [kind, show] of [
-  ["agent", showAgent],
   ["providers", showProviders],
   ["setup", showSetup],
 ]) {
@@ -137,6 +288,19 @@ async function followCatalog() {
     try {
       const response = await api("/api/events");
       for await (const event of ndjson(response.body)) {
+        if (event.type === "history") {
+          mergeBridgeEntry(event);
+          reloadTopics();
+          continue;
+        }
+        if (event.type === "assessment") {
+          projects?.assessmentChanged(event.project);
+          continue;
+        }
+        if (event.type === "conversation") {
+          conversationChanged(event);
+          continue;
+        }
         const stamp = `${event.startedAt}:${event.catalogVersion}`;
         if (event.type !== "catalog" || stamp === loadedCatalog) continue;
         loadedCatalog = stamp;
@@ -158,6 +322,7 @@ async function loadTools() {
   ]);
   state.tools = tools;
   state.prompts = prompts;
+  catalogLoaded();
   document.getElementById("tool-filter").placeholder =
     "Filter tools and workflows";
   renderCatalog();
@@ -173,6 +338,8 @@ function renderCatalog() {
     onTool: (name) => void selectTool(name),
     onPrompt: (name) => void selectPrompt(name),
   });
+  // Every selection change redraws the catalog, so it also records it.
+  saveView();
 }
 
 document.getElementById("tool-filter").addEventListener("input", renderCatalog);
@@ -419,7 +586,12 @@ function run() {
   view.runButton.textContent = "Run";
   saveLastArgs(view.tool.name, args);
 
-  const entry = startCall(view.tool.name, args, scheduleRender);
+  const entry = startCall(
+    view.tool.name,
+    args,
+    activeProject()?.id,
+    scheduleRender,
+  );
   state.history.unshift(entry);
   state.shown = entry;
   scheduleRender();
@@ -435,6 +607,7 @@ function scheduleRender() {
     renderHistory();
     renderWorkflow();
     renderShown();
+    saveView();
   });
 }
 
@@ -442,14 +615,75 @@ let renderedFinal;
 /** Shows the selected call; a settled result renders once so tabs and scroll persist. */
 function renderShown(force = false) {
   const entry = state.shown;
-  if (!entry) return;
+  // A conversation turn draws itself once, in showCall.
+  if (!entry || entry.kind === "turn") return;
   if (isLive(entry)) {
     renderedFinal = undefined;
     showLive(entry, cancelCall);
   } else if (force || renderedFinal !== entry) {
     renderedFinal = entry;
-    drawEntry(entry, openEvidence);
+    drawEntry(entry, openEvidence, openEarlier);
+    // The conversation around an agent's call, when one was recorded.
+    if (entry.source === "agent" && entry.project)
+      void loadAudit(entry)
+        .then((audit) => state.shown === entry && showAudit(entry, audit))
+        .catch(() => {});
   }
+}
+
+/** Shows the call whose result supplied a value, if it is still in history. */
+function openEarlier(historyId) {
+  const entry = state.history.find(
+    (candidate) => candidate.historyId === historyId,
+  );
+  if (entry) void showCall(entry);
+}
+
+async function showCall(entry) {
+  state.shown = entry;
+  if (entry.kind === "turn") {
+    state.selected = undefined;
+    renderCatalog();
+    document.getElementById("tool-view").replaceChildren();
+    try {
+      showTurn(await loadTurn(entry), openEarlier);
+    } catch (cause) {
+      document
+        .getElementById("result-view")
+        .replaceChildren(renderError(undefined, cause.message));
+    }
+    renderHistory();
+    return;
+  }
+  await Promise.all([
+    selectTool(entry.name, entry.args),
+    loadStoredResult(entry),
+  ]);
+  renderShown(true);
+  renderHistory();
+}
+
+let turnsReload;
+/** New transcript lines: refresh the active project's turns in History. */
+function conversationChanged({ project }) {
+  if (project !== activeProject()?.id) return;
+  clearTimeout(turnsReload);
+  turnsReload = setTimeout(async () => {
+    const turns = await loadTurns(project);
+    if (project !== activeProject()?.id) return;
+    const shownId = state.shown?.historyId;
+    state.history = [
+      ...state.history.filter((entry) => entry.kind !== "turn"),
+      ...turns,
+    ].sort((a, b) => b.startedAt - a.startedAt);
+    // A turn being read keeps its place; the newer copy replaces it.
+    if (state.shown?.kind === "turn")
+      state.shown =
+        state.history.find((entry) => entry.historyId === shownId) ??
+        state.shown;
+    scheduleRender();
+    reloadTopics();
+  }, 1500);
 }
 
 // ---------------------------------------------------------------------------
@@ -464,6 +698,7 @@ function selectPrompt(name) {
     onStart: (workflow) => {
       state.workflow = workflow;
       renderWorkflow();
+      saveView();
       document
         .getElementById("workflow-panel")
         .scrollIntoView({ block: "start" });
@@ -471,6 +706,12 @@ function selectPrompt(name) {
   });
 }
 
+let drawnWorkflow;
+/**
+ * Draws the pinned brief when the workflow, the catalog or a tool's outcome
+ * changes. Call progress and other history updates leave it alone, so its
+ * scroll position and open state hold while calls run.
+ */
 function renderWorkflow() {
   const workflow = state.workflow;
   // Latest outcome per tool since the workflow started; history is newest first.
@@ -481,6 +722,19 @@ function renderWorkflow() {
       outcomes.set(entry.name, entry.outcome);
     }
   }
+  const drawn = {
+    workflow,
+    tools: state.tools,
+    outcomes: [...outcomes].join(),
+  };
+  if (
+    drawnWorkflow !== undefined &&
+    drawnWorkflow.workflow === drawn.workflow &&
+    drawnWorkflow.tools === drawn.tools &&
+    drawnWorkflow.outcomes === drawn.outcomes
+  )
+    return;
+  drawnWorkflow = drawn;
   renderWorkflowPanel(workflow, {
     toolNames: new Set(state.tools.map((tool) => tool.name)),
     outcomes,
@@ -488,6 +742,7 @@ function renderWorkflow() {
     onClose: () => {
       state.workflow = undefined;
       renderWorkflow();
+      saveView();
     },
   });
 }
@@ -504,31 +759,175 @@ function openEvidence(evidenceId) {
   document.getElementById("result-view").replaceChildren();
 }
 
+let topicsTree;
+let topicsDrawn;
+let topicsLoading;
+/** Reloads the topic tree when the Topics view is showing. */
+function reloadTopics() {
+  const project = activeProject()?.id;
+  if (state.source !== "topics" || !project) return;
+  clearTimeout(topicsLoading);
+  topicsLoading = setTimeout(async () => {
+    try {
+      const tree = await loadTopics(project);
+      if (project !== activeProject()?.id) return;
+      topicsTree = tree;
+    } catch (cause) {
+      topicsTree = { threads: [], loose_turns: [], failure: cause.message };
+    }
+    renderHistory();
+  }, 300);
+}
+
+/** A topic edit is a record_topic call; it settles before the form closes. */
+async function declareTopic(args) {
+  const entry = startCall(
+    "record_topic",
+    args,
+    activeProject()?.id,
+    scheduleRender,
+  );
+  state.history.unshift(entry);
+  scheduleRender();
+  await entry.done;
+  if (entry.outcome !== "ok")
+    throw new Error(entry.failure ?? "The declaration failed.");
+  reloadTopics();
+}
+
+function renderTopicsView() {
+  const json = JSON.stringify(topicsTree ?? null);
+  if (json === topicsDrawn) return;
+  topicsDrawn = json;
+  renderTopics(document.getElementById("topics-view"), topicsTree, {
+    onOpen: openEarlier,
+    onDeclare: declareTopic,
+    callName: (historyId) =>
+      state.history.find((entry) => entry.historyId === historyId)?.name,
+  });
+}
+
 const renderHistory = () => {
+  const topics = state.source === "topics";
+  document.getElementById("topics-view").hidden = !topics;
+  document.getElementById("history-list").hidden = topics;
+  document.getElementById("history-empty").hidden =
+    topics || state.history.length > 0;
+  if (topics) {
+    renderTopicsView();
+    return;
+  }
   document.getElementById("clear-history").hidden = !state.history.some(
     (entry) => !isLive(entry),
   );
-  drawHistory(state.history, {
-    shown: state.shown,
-    onCancel: cancelCall,
-    onSelect: async (entry) => {
-      state.shown = entry;
-      await Promise.all([
-        selectTool(entry.name, entry.args),
-        loadStoredResult(entry),
-      ]);
-      renderShown(true);
-      renderHistory();
-    },
-  });
+  drawHistory(
+    state.history.filter(
+      (entry) =>
+        state.source === "all" ||
+        (entry.source ?? "workbench") === state.source,
+    ),
+    { shown: state.shown, onCancel: cancelCall, onSelect: showCall },
+  );
 };
 
-async function loadHistory() {
-  const known = new Set(state.history.map((entry) => entry.historyId));
-  const stored = await loadStoredHistory();
-  state.history.push(...stored.filter((entry) => !known.has(entry.historyId)));
+// Every turn's nested calls, opened or folded in one go, in either view.
+let callsExpanded = false;
+document.getElementById("fold-calls").addEventListener("click", (event) => {
+  callsExpanded = !callsExpanded;
+  event.currentTarget.textContent = callsExpanded ? "Fold all" : "Expand all";
+  setTurnsExpanded(callsExpanded, state.history);
+  setTopicsExpanded(callsExpanded, topicsTree);
+  topicsDrawn = undefined;
   renderHistory();
+});
+
+document.getElementById("history-filter").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-source]");
+  if (!button) return;
+  setSource(button.dataset.source);
+  saveView();
+});
+
+function setSource(source) {
+  state.source = source;
+  for (const button of document.querySelectorAll("#history-filter button"))
+    button.setAttribute(
+      "aria-pressed",
+      String(button.dataset.source === source),
+    );
+  renderHistory();
+  reloadTopics();
 }
+
+/** Loads the active project's history, keeping this page's calls in flight. */
+async function loadHistory() {
+  const project = activeProject()?.id;
+  const stored = await loadStoredHistory(project);
+  if (project !== activeProject()?.id) return;
+  const live = state.history.filter(
+    (entry) => !entry.stored && isLive(entry) && entry.project === project,
+  );
+  const known = new Set(live.map((entry) => entry.historyId));
+  state.history = [
+    ...live,
+    ...stored.filter((entry) => !known.has(entry.historyId)),
+  ].sort((a, b) => b.startedAt - a.startedAt);
+  if (state.shown && !state.history.includes(state.shown)) {
+    state.shown = undefined;
+    document.getElementById("result-view").replaceChildren();
+  }
+  renderHistory();
+  renderWorkflow();
+  reloadTopics();
+}
+
+/**
+ * A call the bridge recorded or an agent started. This page's own calls
+ * already have their result and only gain their confirmed Evidence links.
+ */
+function mergeBridgeEntry({ project, entry: summary }) {
+  const active = activeProject()?.id ?? null;
+  if (project !== active) return;
+  const index = state.history.findIndex(
+    (entry) => entry.historyId === summary.id,
+  );
+  const known = index === -1 ? undefined : state.history[index];
+  if (known && !known.stored) {
+    known.links = summary.links;
+    // Only the parts showing links change: the history list on the right and
+    // the result's link line. The result itself keeps its tab and scroll.
+    if (state.shown === known) updateLinks(known, openEarlier);
+    scheduleRender();
+    return;
+  }
+  const entry = fromBridge(summary, project ?? undefined);
+  if (known) state.history[index] = entry;
+  else {
+    state.history.unshift(entry);
+    state.history.sort((a, b) => b.startedAt - a.startedAt);
+  }
+  if (known && state.shown === known) {
+    state.shown = entry;
+    void loadStoredResult(entry).then(() => renderShown(true));
+  }
+  scheduleRender();
+}
+
+// Right-hand tabs: History and Project (the active folder).
+function showSideTab(name) {
+  for (const tab of ["history", "project"]) {
+    document
+      .getElementById(`tab-${tab}`)
+      .setAttribute("aria-selected", String(tab === name));
+    document.getElementById(`panel-${tab}`).hidden = tab !== name;
+  }
+  if (name === "project") void projects?.refresh();
+  saveView();
+}
+for (const tab of ["history", "project"])
+  document
+    .getElementById(`tab-${tab}`)
+    .addEventListener("click", () => showSideTab(tab));
 
 let confirmClear;
 document
@@ -547,7 +946,7 @@ document
     clearTimeout(confirmClear);
     confirmClear = undefined;
     button.textContent = "Clear";
-    await apiJson("/api/history", { method: "DELETE" });
+    await clearStoredHistory(activeProject()?.id);
     state.history = state.history.filter(isLive);
     if (state.shown && !isLive(state.shown)) {
       state.shown = undefined;
@@ -575,8 +974,30 @@ async function boot() {
   }
   // The first catalog event loads the catalog; later ones reload it.
   void followCatalog();
-  await loadHistory();
+  projects ??= initProjects({
+    onChange: () => {
+      agent?.projectChanged();
+      historyLoading = loadHistory();
+    },
+    onShowProjects: () => showSideTab("project"),
+    onOpenAssessment: showAssessmentView,
+  });
+  const terminal = await apiJson("/api/terminal").catch(() => ({}));
+  await projects.restore(terminal.running ? terminal.project : undefined);
+  agent ??= await initAgent({
+    host: document.getElementById("agent-controls"),
+    getProject: activeProject,
+    onState: (session) =>
+      void projects.lock(session.running ? session.project : undefined),
+    onStarted: showAgentView,
+  }).catch((cause) => {
+    document.getElementById("agent-controls").textContent =
+      `The agent controls couldn't load: ${cause.message}`;
+    return undefined;
+  });
+  await restoreView();
   void refreshDoctor().catch(() => {});
+  startPageLog();
 }
 
 onTokenRejected(showTokenGate);
@@ -585,3 +1006,70 @@ else showTokenGate();
 setInterval(() => {
   if (getToken() && !document.hidden) void refreshStatus();
 }, 15_000);
+
+// ---------------------------------------------------------------------------
+// Page lifecycle log (frontend/.workbench-page.log): why this page loaded,
+// how the one before it ended, and a heartbeat with memory every 30 s.
+
+const BEAT_KEY = "rea-heartbeat";
+const pageStartedAt = performance.now();
+
+function pageReport(event, extra = {}) {
+  if (!getToken()) return;
+  void api("/api/page-log", {
+    method: "POST",
+    body: JSON.stringify({ event, ...extra }),
+    keepalive: true,
+  }).catch(() => {});
+}
+
+function heartbeat() {
+  const memory = performance.memory;
+  const beat = {
+    heap: memory?.usedJSHeapSize,
+    heapLimit: memory?.jsHeapSizeLimit,
+    nodes: document.getElementsByTagName("*").length,
+    history: state.history.length,
+    visibility: document.visibilityState,
+    view: state.selected?.kind ?? null,
+    uptimeMs: Math.round(performance.now() - pageStartedAt),
+  };
+  try {
+    sessionStorage.setItem(
+      BEAT_KEY,
+      JSON.stringify({ at: Date.now(), ...beat }),
+    );
+  } catch {
+    // The log still gets the beat.
+  }
+  return beat;
+}
+
+function previousBeat() {
+  try {
+    return JSON.parse(sessionStorage.getItem(BEAT_KEY) ?? "null") ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const beforeThisPage = previousBeat();
+function startPageLog() {
+  pageReport("load", {
+    navigation: performance.getEntriesByType("navigation")[0]?.type,
+    wasDiscarded: document.wasDiscarded === true,
+    previous: beforeThisPage ?? null,
+    ...heartbeat(),
+  });
+  setInterval(() => pageReport("beat", heartbeat()), 30_000);
+  for (const event of ["freeze", "resume", "pagehide", "visibilitychange"])
+    document.addEventListener(event, () => pageReport(event, heartbeat()));
+  window.addEventListener("error", (event) =>
+    pageReport("error", { message: String(event.message).slice(0, 500) }),
+  );
+  window.addEventListener("unhandledrejection", (event) =>
+    pageReport("error", {
+      message: String(event.reason?.message ?? event.reason).slice(0, 500),
+    }),
+  );
+}

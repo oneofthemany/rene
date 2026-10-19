@@ -41,6 +41,27 @@ container_image() {
   podman container inspect --format '{{index .Config.Labels "rea.image"}}' "$name" 2>/dev/null || true
 }
 
+container_display() {
+  podman container inspect --format '{{index .Config.Labels "rea.display"}}' "$name" 2>/dev/null || true
+}
+
+# The host's Wayland socket, so tools in the container can open windows on
+# the user's screen. Only the socket is shared, on a private tmpfs at the same
+# path as on the host; the rest of the runtime folder (D-Bus, PipeWire,
+# keyrings) stays out. The identity (path and inode) changes when the session
+# restarts, and the container is recreated to follow it. Prints nothing when
+# there is no Wayland session.
+#
+# Off unless REA_CONTAINER_WAYLAND=1: a headed Chromium from the container
+# preceded a host hang on a GNOME + DisplayLink (evdi) machine, so tools only
+# get the user's screen when they ask for it.
+wayland_socket() {
+  [ "${REA_CONTAINER_WAYLAND:-0}" = 1 ] || return 0
+  local socket="${XDG_RUNTIME_DIR:-}/${WAYLAND_DISPLAY:-}"
+  [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -n "${WAYLAND_DISPLAY:-}" ] && [ -S "$socket" ] || return 0
+  printf '%s:%s' "$socket" "$(stat -c %i "$socket")"
+}
+
 container_state() {
   podman container inspect --format '{{.State.Status}}' "$name" 2>/dev/null || echo missing
 }
@@ -65,7 +86,8 @@ build() {
   cat <<EOF
 Build the REA container image ($image):
   - Fedora 44 with Node.js 24, Xvfb, binwalk, sigrok-cli, gdb, tshark,
-    Unblob's extractors, Chromium, adb and uv (Fedora's signed repositories)
+    Unblob's extractors, Chromium, adb and uv, and a build toolchain for the
+    agent toolbox: npm, Rust (cargo) and gcc-c++ (Fedora's signed repositories)
   - pwndbg 2026.09.15 from its source release (SHA-256 checked) and uv.lock
   - Hopper's official demo, verified by this fork's installer (publisher PGP
     signature, launcher identity); Hopper is separate commercial software
@@ -97,22 +119,40 @@ ensure() {
   local id state
   id="$(image_id)"
   state="$(container_state)"
+  local display
+  display="$(wayland_socket)"
   if [ "$state" != missing ] && [ "$(container_image)" != "$id" ]; then
     echo "Recreating the $name container from the rebuilt image."
     podman rm --force "$name" >/dev/null
     state=missing
+  elif [ "$state" != missing ] && [ "$(container_display)" != "$display" ]; then
+    echo "Recreating the $name container for the current display session."
+    podman rm --force "$name" >/dev/null
+    state=missing
+  fi
+  local display_args=()
+  if [ -n "$display" ]; then
+    local runtime="/run/user/$(id -u)"
+    display_args=(
+      --tmpfs "$runtime:rw,mode=0700,U"
+      --volume "${display%:*}:$runtime/$WAYLAND_DISPLAY"
+      --env "XDG_RUNTIME_DIR=$runtime"
+      --env "WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
+    )
   fi
   case "$state" in
     running) ;;
     missing)
       podman run --detach --init --name "$name" \
         --label "rea.image=$id" \
+        --label "rea.display=$display" \
         --network host \
         --userns keep-id \
         --security-opt label=disable \
         --volume "$HOME:$HOME:rslave" \
         --env "HOME=$HOME" \
         --workdir "$HOME" \
+        "${display_args[@]}" \
         "$image" sleep infinity >/dev/null
       ;;
     *) podman start "$name" >/dev/null ;;

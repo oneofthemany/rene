@@ -6,9 +6,24 @@
 // REA keeps ownership of validation, sessions, Evidence, and cleanup.
 
 import { execFile, spawn } from "node:child_process";
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync } from "node:fs";
-import { readdir, readFile, realpath, stat, unlink } from "node:fs/promises";
+import {
+  createHash,
+  randomBytes,
+  randomUUID,
+  timingSafeEqual,
+} from "node:crypto";
+import { existsSync, readdirSync } from "node:fs";
+import {
+  appendFile,
+  mkdir,
+  readdir,
+  readFile,
+  realpath,
+  rename,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import { createServer } from "node:http";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -17,10 +32,38 @@ import { parseArgs } from "node:util";
 import { Client, ProtocolError } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { CHOICES, checkOwner, ENGINES } from "./choices.mjs";
+import {
+  ASSESSMENT_FILE,
+  earlierCalls,
+  findLinks,
+  latestSurvey,
+  SURVEY_TOOL,
+  issuedEvidence,
+  readAssessment,
+  summarize,
+  writeAssessment,
+} from "./assessment.mjs";
+import {
+  auditFor,
+  conversationTurns,
+  claudeTranscriptFolder,
+  followTranscriptFolder,
+} from "./conversations.mjs";
 import { createHistory } from "./history.mjs";
+import { currentTopics, topicTree } from "./topics.mjs";
+import {
+  createProjects,
+  defaultProjectsDir,
+  ProjectError,
+} from "./projects.mjs";
 import { createInstaller, defaultProvidersDir } from "./providerInstall.mjs";
 import { createSettings, SettingsError } from "./settings.mjs";
-import { agentDirectory, createTerminal, TerminalError } from "./terminal.mjs";
+import {
+  agentDirectory,
+  agentInstructions,
+  createTerminal,
+  TerminalError,
+} from "./terminal.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const publicRoot = join(here, "public");
@@ -38,11 +81,16 @@ const { values: options } = parseArgs({
       type: "string",
       default: join(here, ".workbench-history"),
     },
+    "page-log": {
+      type: "string",
+      default: join(here, ".workbench-page.log"),
+    },
     settings: {
       type: "string",
       default: join(here, ".workbench-settings.json"),
     },
     "providers-dir": { type: "string", default: defaultProvidersDir() },
+    "projects-dir": { type: "string", default: defaultProjectsDir() },
   },
 });
 
@@ -69,6 +117,8 @@ if (!Number.isInteger(maxConcurrent) || maxConcurrent < 1) {
 const token = randomBytes(24).toString("base64url");
 const tokenBytes = Buffer.from(token);
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
+// A relay report carries one result, which history keeps up to 8 MiB.
+const MAX_RELAY_BODY_BYTES = 12 * 1024 * 1024;
 const STDERR_TAIL_BYTES = 16 * 1024;
 const settings = createSettings(options.settings);
 await settings.load();
@@ -76,30 +126,18 @@ const installer = createInstaller({
   root: options["providers-dir"],
   settings,
 });
-const history = createHistory(options["history-dir"], {
+const HISTORY_LIMITS = {
   maxEntries: 500,
   maxEntryBytes: 8 * 1024 * 1024,
   maxTotalBytes: 200 * 1024 * 1024,
-});
+};
+// Calls made with no project chosen.
+const history = createHistory(options["history-dir"], HISTORY_LIMITS);
+const projects = createProjects(options["projects-dir"], HISTORY_LIMITS);
 
-const MODULES = [
-  "agent.js",
-  "api.js",
-  "app.js",
-  "browse.js",
-  "calls.js",
-  "choices.js",
-  "catalog.js",
-  "doctor.js",
-  "form.js",
-  "markdown.js",
-  "installProviders.js",
-  "providerPaths.js",
-  "render.js",
-  "results.js",
-  "setup.js",
-  "workflows.js",
-];
+// Every page module in public/, read once at start: a module missing from a
+// hand-kept list failed its import and stopped the whole page.
+const MODULES = readdirSync(publicRoot).filter((file) => file.endsWith(".js"));
 // The page's terminal (xterm.js) comes from frontend/package.json.
 const vendor = (path) => join(here, "node_modules", path);
 const STATIC_FILES = new Map([
@@ -504,11 +542,12 @@ async function registrationState(client) {
 }
 
 const terminal = createTerminal({
-  server: reaCommand(["mcp"]),
   directory: agentDirectory(here),
   // Saved provider paths reach REA through the agent's environment.
   environment: () => settings.environment(process.env),
   registration: registrationState,
+  // The transcript gets one last read when the agent exits.
+  onExit: (session) => void stopFollowing(session),
 });
 
 /** Runs a terminal action, mapping its expected refusals to 400. */
@@ -539,8 +578,19 @@ const TERMINAL_ROUTES = {
       ),
     ),
   "POST /api/terminal/start": async (request, response) => {
-    const body = await readJsonBody(request);
-    return terminalAction(response, () => terminal.start(body ?? {}));
+    const body = (await readJsonBody(request)) ?? {};
+    return terminalAction(response, async () => {
+      const link = await agentSession(body.cwd, body.agent ?? "claude");
+      try {
+        const started = await terminal.start(body, link);
+        link.relay.agent = started.label;
+        await startFollowing(link, started.label);
+        return started;
+      } catch (cause) {
+        relaySessions.delete(link.relayToken);
+        throw cause;
+      }
+    });
   },
   "POST /api/terminal/input": async (request, response) => {
     const body = await readJsonBody(request);
@@ -882,11 +932,67 @@ async function handle(request, response) {
   ) {
     return sendJson(response, 403, { error: "Cross-origin request rejected." });
   }
+  // Agent relays authenticate with their session's own token.
+  if (request.method === "POST" && url.pathname === "/api/relay")
+    return relayReport(request, response);
   if (!authorized(request)) {
     return sendJson(response, 401, { error: "Missing or invalid token." });
   }
 
   return routeApi(request, response, url);
+}
+
+// Page lifecycle log: why the page loaded (first load, reload, restored
+// after the browser discarded it) and periodic heartbeats with its memory, so
+// a page that goes blank leaves a trail. One JSON line per report, rotated to
+// <file>.1 past PAGE_LOG_BYTES.
+const PAGE_LOG_BYTES = 2 * 1024 * 1024;
+const PAGE_LOG_FIELDS = new Set([
+  "event",
+  "navigation",
+  "wasDiscarded",
+  "previous",
+  "heap",
+  "heapLimit",
+  "nodes",
+  "history",
+  "visibility",
+  "view",
+  "uptimeMs",
+  "message",
+]);
+let pageLogWrites = Promise.resolve();
+
+async function pageLog(request, response) {
+  const body = await readJsonBody(request);
+  if (
+    typeof body !== "object" ||
+    body === null ||
+    typeof body.event !== "string"
+  )
+    return sendJson(response, 400, {
+      error: "Expected { event: string, ... }.",
+    });
+  const entry = { at: new Date().toISOString() };
+  for (const [key, value] of Object.entries(body))
+    if (PAGE_LOG_FIELDS.has(key)) entry[key] = value;
+  const line = `${JSON.stringify(entry).slice(0, 4096)}\n`;
+  const path = options["page-log"];
+  pageLogWrites = pageLogWrites
+    .then(async () => {
+      const size = await stat(path).then(
+        (info) => info.size,
+        () => 0,
+      );
+      if (size > PAGE_LOG_BYTES) await rename(path, `${path}.1`);
+      await appendFile(path, line, { mode: 0o600 });
+    })
+    .catch((cause) =>
+      process.stderr.write(
+        `Could not write the page log: ${describeError(cause)}\n`,
+      ),
+    );
+  return sendJson(response, 200, { logged: true });
 }
 
 /** Authorized API routes. */
@@ -902,11 +1008,14 @@ async function routeApi(request, response, url) {
   if (route === "POST /api/setup/plan") return setupPlan(request, response);
   if (route === "POST /api/setup/apply") return setupApply(request, response);
   if (route === "POST /api/fs/list") return listDirectory(request, response);
+  if (route === "POST /api/page-log") return pageLog(request, response);
   if (Object.hasOwn(PROVIDER_ROUTES, route))
     return PROVIDER_ROUTES[route](request, response);
   if (route === "GET /api/events") return events(request, response);
   if (url.pathname.startsWith("/api/history"))
     return routeHistory(request, response, url);
+  if (url.pathname.startsWith("/api/projects"))
+    return routeProjects(request, response, url);
   await ensureMcp();
   if (route === "GET /api/tools") {
     return sendJson(response, 200, {
@@ -941,18 +1050,36 @@ async function routeApi(request, response, url) {
   return sendJson(response, 404, { error: "Not found." });
 }
 
-/** Stored call history: summaries, one stored result, or clearing it all. */
+/**
+ * Stored call history of one project (?project=<id>), or of calls made with
+ * no project: summaries, one stored result, or clearing it all.
+ */
 async function routeHistory(request, response, url) {
   const route = `${request.method} ${url.pathname}`;
+  const project = url.searchParams.get("project");
+  const store = project ? (await projects.get(project))?.history : history;
+  if (!store) return sendJson(response, 404, { error: "Unknown project." });
   if (route === "GET /api/history")
-    return sendJson(response, 200, { entries: await history.list() });
+    return sendJson(response, 200, {
+      entries: await store.list(),
+      // Agent calls still running, which history only has once they settle.
+      live: project ? liveAgentCalls(project) : [],
+    });
   if (route === "DELETE /api/history") {
-    await history.clear();
+    await store.clear();
     return sendJson(response, 200, { cleared: true });
+  }
+  const audit = /^\/api\/history\/([\w-]+)\/audit$/.exec(url.pathname);
+  if (request.method === "GET" && audit) {
+    const entry = project ? await projects.get(project) : undefined;
+    const trail = entry
+      ? auditFor(audit[1], await projectTurns(entry))
+      : undefined;
+    return sendJson(response, 200, { audit: trail ?? null });
   }
   const stored = /^\/api\/history\/([\w-]+)$/.exec(url.pathname);
   if (request.method === "GET" && stored) {
-    const result = await history.result(stored[1]);
+    const result = await store.result(stored[1]);
     return result === undefined
       ? sendJson(response, 404, { error: "No stored result for this call." })
       : sendJson(response, 200, { result });
@@ -977,6 +1104,12 @@ async function callTool(request, response) {
       error: "Expected { name: string, arguments?: object }.",
     });
   }
+  const project =
+    body.project === undefined || body.project === null
+      ? undefined
+      : await projects.get(body.project);
+  if (body.project != null && !project)
+    return sendJson(response, 400, { error: "Unknown project." });
   if (mcp.state !== "ready" || !mcp.client) {
     return sendJson(response, 503, {
       error: mcp.failure ?? "The REA MCP server is not ready.",
@@ -1049,19 +1182,520 @@ async function callTool(request, response) {
     response.end();
   }
   // Recorded after the response ends, so storage never delays the result.
-  await history
-    .record({
-      id: historyId,
-      name: body.name,
-      args: body.arguments ?? {},
-      startedAt: acceptedAt,
+  await recordCall(project, {
+    id: historyId,
+    name: body.name,
+    args: body.arguments ?? {},
+    startedAt: acceptedAt,
+    source: "workbench",
+    session: "workbench",
+    ...settled,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Projects
+//
+// projects.mjs owns each project's identity and history; assessment.mjs owns
+// Evidence links and the assessment file. The bridge records calls into them from
+// the page and from agent relays, and tells pages through /api/events.
+
+/** Records one settled call, with its confirmed links, then refreshes the assessment. */
+async function recordCall(project, entry) {
+  const store = project?.history ?? history;
+  const evidence = issuedEvidence(entry.result, entry.args);
+  if (evidence.length) entry.evidence = evidence;
+  try {
+    const links = findLinks(
+      entry.args,
+      await earlierCalls(store, entry.startedAt),
+    );
+    if (links.length) entry.links = links;
+  } catch (cause) {
+    process.stderr.write(
+      `Could not resolve Evidence links: ${describeError(cause)}\n`,
+    );
+  }
+  let summary;
+  try {
+    // Pages get exactly what history holds, resultBytes included, so they
+    // can load the stored result; a copy of the entry would lack it.
+    summary = await store.record(entry);
+  } catch (cause) {
+    process.stderr.write(
+      `Could not store call history: ${describeError(cause)}\n`,
+    );
+    return;
+  }
+  broadcast({
+    type: "history",
+    project: project?.manifest.id ?? null,
+    entry: summary,
+  });
+  if (project) {
+    scheduleAssessment(project);
+    // A survey's own record doesn't call for another survey.
+    if (entry.name !== SURVEY_TOOL) scheduleSurvey(project);
+  }
+}
+
+// The project survey: rene's survey_project_directory, run by the bridge
+// through its own MCP connection and recorded in the project's history like
+// any other call, so the assessment always rests on a recorded tool result.
+// It runs when a folder is opened (if the last survey is missing or older
+// than SURVEY_FRESH_MS), when the user asks, and in the background after calls
+// settle (a minute after the last one, at most every SURVEY_MIN_GAP_MS),
+// because tools such as extract_artifact change what the folder holds.
+const SURVEY_FRESH_MS = 10 * 60_000;
+const SURVEY_QUIET_MS = 60_000;
+const SURVEY_MIN_GAP_MS = 5 * 60_000;
+const surveying = new Map();
+const surveyTimers = new Map();
+const lastSurveyAt = new Map();
+
+/** Runs the survey for a project now; concurrent requests share one run. */
+function runSurvey(project) {
+  const id = project.manifest.id;
+  const running = surveying.get(id);
+  if (running) return running;
+  const run = (async () => {
+    const folder = await projects.verify(project);
+    if (mcp.state !== "ready" || !mcp.client)
+      throw new Error(mcp.failure ?? "The REA MCP server is not ready.");
+    const startedAt = Date.now();
+    const args = { path: folder };
+    let settled;
+    try {
+      const result = await mcp.client.callTool(
+        { name: SURVEY_TOOL, arguments: args },
+        { timeout: requestTimeoutMs, resetTimeoutOnProgress: true },
+      );
+      settled = { outcome: result.isError ? "error" : "ok", result };
+    } catch (cause) {
+      settled = { outcome: "error", failure: describeError(cause) };
+    }
+    lastSurveyAt.set(id, Date.now());
+    await recordCall(project, {
+      id: history.newId(startedAt),
+      name: SURVEY_TOOL,
+      args,
+      startedAt,
+      elapsedMs: Date.now() - startedAt,
+      source: "workbench",
+      session: "workbench",
       ...settled,
-    })
-    .catch((cause) =>
-      process.stderr.write(
-        `Could not store call history: ${describeError(cause)}\n`,
+    });
+    return settled.outcome;
+  })().finally(() => surveying.delete(id));
+  surveying.set(id, run);
+  return run;
+}
+
+const backgroundSurvey = (project) =>
+  void runSurvey(project).catch((cause) =>
+    process.stderr.write(
+      `Could not survey ${project.manifest.path}: ${describeError(cause)}\n`,
+    ),
+  );
+
+/** Surveys a project in the background after its calls go quiet. */
+function scheduleSurvey(project) {
+  const id = project.manifest.id;
+  clearTimeout(surveyTimers.get(id));
+  const wait = Math.max(
+    SURVEY_QUIET_MS,
+    (lastSurveyAt.get(id) ?? 0) + SURVEY_MIN_GAP_MS - Date.now(),
+  );
+  surveyTimers.set(
+    id,
+    setTimeout(() => {
+      surveyTimers.delete(id);
+      backgroundSurvey(project);
+    }, wait).unref(),
+  );
+}
+
+/** Surveys a project that was just opened unless its last survey is recent. */
+async function surveyIfStale(project) {
+  const latest = await latestSurvey(project.history).catch(() => undefined);
+  if (latest && Date.now() - latest.entry.startedAt < SURVEY_FRESH_MS) return;
+  backgroundSurvey(project);
+}
+
+const ASSESSMENT_DELAY_MS = 1500;
+const assessmentTimers = new Map();
+
+/** Rewrites the project's assessment shortly after its calls stop settling. */
+function scheduleAssessment(project) {
+  if (project.manifest.assessment !== "enabled") return;
+  const id = project.manifest.id;
+  clearTimeout(assessmentTimers.get(id));
+  assessmentTimers.set(
+    id,
+    setTimeout(() => {
+      assessmentTimers.delete(id);
+      void refreshAssessment(project).catch((cause) =>
+        process.stderr.write(
+          `Could not update ${ASSESSMENT_FILE} for ${project.manifest.path}: ${describeError(cause)}\n`,
+        ),
+      );
+    }, ASSESSMENT_DELAY_MS),
+  );
+}
+
+async function refreshAssessment(project) {
+  const folder = await projects.verify(project);
+  const outcome = await writeAssessment(
+    folder,
+    project.manifest.name,
+    summarize(await project.history.list()),
+    await latestSurvey(project.history),
+    (await projectTurns(project)).map(turnSummary),
+    await projectTopics(project),
+  );
+  // Pages reread the file only when it changed.
+  if (outcome === "created" || outcome === "updated")
+    broadcast({ type: "assessment", project: project.manifest.id, outcome });
+  return outcome;
+}
+
+/** What the page shows about a project's assessment. */
+async function assessmentState(project) {
+  let folder;
+  try {
+    folder = await projects.verify(project);
+  } catch (cause) {
+    return { choice: project.manifest.assessment, error: cause.message };
+  }
+  return {
+    choice: project.manifest.assessment,
+    file: join(folder, ASSESSMENT_FILE),
+    text: await readAssessment(folder),
+  };
+}
+
+async function routeProjects(request, response, url) {
+  const route = `${request.method} ${url.pathname}`;
+  try {
+    if (route === "GET /api/projects")
+      return sendJson(response, 200, { projects: await projects.list() });
+    if (route === "POST /api/projects/open") {
+      const body = await readJsonBody(request);
+      const manifest = await projects.openPath(body?.path);
+      // The file may predate history it hasn't seen (a restart, an earlier
+      // version): opening rebuilds it from the stored calls.
+      const project = await projects.get(manifest.id);
+      void catchUpConversations(project)
+        .catch(() => {})
+        .finally(() => scheduleAssessment(project));
+      void surveyIfStale(project);
+      return sendJson(response, 200, manifest);
+    }
+    const topicsRoute = /^\/api\/projects\/([0-9a-f]{16})\/topics$/.exec(
+      url.pathname,
+    );
+    if (topicsRoute && request.method === "GET") {
+      const project = await projects.get(topicsRoute[1]);
+      if (!project)
+        return sendJson(response, 404, { error: "Unknown project." });
+      return sendJson(response, 200, await projectTopics(project));
+    }
+    const conversations =
+      /^\/api\/projects\/([0-9a-f]{16})\/conversations(?:\/([\w-]+)\/(\d+))?$/.exec(
+        url.pathname,
+      );
+    if (conversations && request.method === "GET") {
+      const project = await projects.get(conversations[1]);
+      if (!project)
+        return sendJson(response, 404, { error: "Unknown project." });
+      const turns = await projectTurns(project);
+      if (conversations[2] === undefined)
+        return sendJson(response, 200, { turns: turns.map(turnSummary) });
+      const turn = turns.find(
+        (candidate) =>
+          candidate.session === conversations[2] &&
+          candidate.index === Number(conversations[3]),
+      );
+      return turn
+        ? sendJson(response, 200, { turn })
+        : sendJson(response, 404, { error: "No such conversation turn." });
+    }
+    // The user asks for a fresh assessment: survey now, then rebuild.
+    const run = /^\/api\/projects\/([0-9a-f]{16})\/assessment\/run$/.exec(
+      url.pathname,
+    );
+    if (run && request.method === "POST") {
+      const project = await projects.get(run[1]);
+      if (!project)
+        return sendJson(response, 404, { error: "Unknown project." });
+      try {
+        await runSurvey(project);
+        if (project.manifest.assessment === "enabled")
+          await refreshAssessment(project);
+      } catch (cause) {
+        return sendJson(response, 502, {
+          ...(await assessmentState(project)),
+          error: `The survey didn't run: ${describeError(cause)}`,
+        });
+      }
+      return sendJson(response, 200, await assessmentState(project));
+    }
+    const match = /^\/api\/projects\/([0-9a-f]{16})\/assessment$/.exec(
+      url.pathname,
+    );
+    const project = match && (await projects.get(match[1]));
+    if (match && !project)
+      return sendJson(response, 404, { error: "Unknown project." });
+    if (project && request.method === "GET")
+      return sendJson(response, 200, await assessmentState(project));
+    if (project && request.method === "POST") {
+      // The page asks once per project; only "enabled" writes into the folder.
+      const body = await readJsonBody(request);
+      if (typeof body?.enabled !== "boolean")
+        return sendJson(response, 400, {
+          error: "Expected { enabled: boolean }.",
+        });
+      await projects.update(project.manifest.id, {
+        assessment: body.enabled ? "enabled" : "declined",
+      });
+      if (body.enabled) await refreshAssessment(project);
+      return sendJson(response, 200, await assessmentState(project));
+    }
+  } catch (cause) {
+    if (cause instanceof ProjectError)
+      return sendJson(response, 400, { error: cause.message });
+    throw cause;
+  }
+  return sendJson(response, 404, { error: "Not found." });
+}
+
+// ---------------------------------------------------------------------------
+// Agent sessions and their relays
+//
+// Each agent session gets its own reporting token, written to a private file
+// the relay reads. A report is accepted only with a token the bridge issued,
+// and is recorded in that session's project; the page's token isn't needed
+// or given to the agent.
+
+/** token -> { project, session, agent, live: Map<ref, entry> } */
+const relaySessions = new Map();
+const relayScript = join(here, "relay.mjs");
+
+/** Opens the folder's project and prepares the relay an agent session uses. */
+async function agentSession(cwd, agentId) {
+  let project;
+  try {
+    const manifest = await projects.openPath(cwd);
+    project = await projects.get(manifest.id);
+    scheduleAssessment(project);
+    void surveyIfStale(project);
+  } catch (cause) {
+    if (cause instanceof ProjectError) throw new TerminalError(cause.message);
+    throw cause;
+  }
+  const session = `agent-${Date.now()}-${randomBytes(4).toString("hex")}`;
+  const relayToken = randomBytes(24).toString("base64url");
+  const directory = agentDirectory(here);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const report = join(directory, "relay-report.json");
+  const address = server.address();
+  await writeFile(
+    `${report}.tmp`,
+    JSON.stringify({
+      url: `http://127.0.0.1:${address.port}/api/relay`,
+      token: relayToken,
+    }),
+    { mode: 0o600 },
+  );
+  await rename(`${report}.tmp`, report);
+  const relay = { project: project.manifest.id, session, live: new Map() };
+  relaySessions.set(relayToken, relay);
+  const rea = reaCommand(["mcp"]);
+  return {
+    relay,
+    relayToken,
+    project: project.manifest.id,
+    session,
+    // Claude Code gets a fresh session id; its transcripts are followed by
+    // folder (startFollowing), which also catches a resumed conversation.
+    // Other agents' conversations aren't captured yet.
+    conversationId: agentId === "claude" ? randomUUID() : undefined,
+    server: {
+      command: process.execPath,
+      args: [relayScript, "--report", report, "--", rea.command, ...rea.args],
+    },
+    instructions: agentInstructions(
+      project.manifest.assessment === "enabled" ? ASSESSMENT_FILE : undefined,
+    ),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Agent conversations (conversations.mjs owns parsing, storage and linking)
+
+/** workbench session -> { follower, project } while an agent runs. */
+const following = new Map();
+
+/**
+ * Follows the Claude Code transcripts of the agent's folder while it runs:
+ * the conversation it starts, or one the user resumes or begins with /clear.
+ */
+async function startFollowing(link, label) {
+  if (!link.conversationId) return;
+  const project = await projects.get(link.project);
+  following.set(link.session, {
+    project,
+    follower: followTranscriptFolder({
+      store: project.conversations,
+      folder: claudeTranscriptFolder(
+        settings.environment(process.env),
+        project.manifest.path,
+      ),
+      // A second's slack: the agent may write before this call returns.
+      since: Date.now() - 1000,
+      agent: label,
+      onEvents: () => conversationChanged(project, link.session),
+    }),
+  });
+}
+
+async function stopFollowing(session) {
+  const followed = following.get(session);
+  if (!followed) return;
+  following.delete(session);
+  await followed.follower.stop();
+}
+
+function conversationChanged(project, session) {
+  broadcast({ type: "conversation", project: project.manifest.id, session });
+  scheduleAssessment(project);
+}
+
+/**
+ * Reads what the folder's transcripts gained while nothing followed them
+ * (the bridge was down, or a conversation ran past a restart): every
+ * transcript changed since the project was first opened.
+ */
+async function catchUpConversations(project) {
+  await followTranscriptFolder({
+    store: project.conversations,
+    folder: claudeTranscriptFolder(
+      settings.environment(process.env),
+      project.manifest.path,
+    ),
+    since: project.manifest.createdAt,
+    agent: "Claude Code",
+    onEvents: () => conversationChanged(project, null),
+  }).stop();
+}
+
+/** Every conversation turn in a project, oldest first, tied to recorded calls. */
+async function projectTurns(project) {
+  const history = await project.history.list();
+  const turns = [];
+  for (const meta of await project.conversations.sessions())
+    turns.push(
+      ...conversationTurns(
+        meta,
+        await project.conversations.events(meta.session),
+        history,
       ),
     );
+  return turns;
+}
+
+/** The project's thread > topic > turn > call tree (topics.mjs). */
+async function projectTopics(project) {
+  const history = await project.history.list();
+  return topicTree(
+    await currentTopics(project.history),
+    await projectTurns(project),
+    history,
+  );
+}
+
+/** A turn as the History list shows it: request, calls and conclusion. */
+const turnSummary = (turn) => ({
+  session: turn.session,
+  agent: turn.agent,
+  index: turn.index,
+  at: turn.at,
+  prompt: turn.prompt,
+  calls: turn.events
+    .filter((event) => event.kind === "tool_use" && event.rea)
+    .map((event) => ({ tool: event.tool, historyId: event.historyId })),
+  conclusion:
+    turn.events.findLast((event) => event.kind === "reply")?.text ?? null,
+});
+
+/** Agent calls of a project that have started and not settled. */
+const liveAgentCalls = (project) =>
+  [...relaySessions.values()]
+    .filter((relay) => relay.project === project)
+    .flatMap((relay) => [...relay.live.values()]);
+
+function relaySessionFor(request) {
+  const supplied = String(request.headers["x-rea-relay-token"] ?? "");
+  for (const [token, relay] of relaySessions) {
+    const expected = Buffer.from(token);
+    const given = Buffer.from(supplied);
+    if (given.length === expected.length && timingSafeEqual(given, expected))
+      return relay;
+  }
+  return undefined;
+}
+
+/** One report from an agent's relay: a call started or settled. */
+async function relayReport(request, response) {
+  const relay = relaySessionFor(request);
+  if (!relay) return sendJson(response, 401, { error: "Unknown relay." });
+  const event = await readJsonBody(request, MAX_RELAY_BODY_BYTES);
+  if (typeof event?.ref !== "string" || event.ref.length > 200)
+    return sendJson(response, 400, { error: "Expected a call report." });
+  if (event.type === "started" && typeof event.name === "string") {
+    const startedAt = Number.isFinite(event.startedAt)
+      ? event.startedAt
+      : Date.now();
+    const entry = {
+      id: history.newId(startedAt),
+      name: event.name,
+      args:
+        event.args &&
+        typeof event.args === "object" &&
+        !Array.isArray(event.args)
+          ? event.args
+          : {},
+      startedAt,
+      outcome: "running",
+      source: "agent",
+      session: relay.session,
+      agent: relay.agent,
+    };
+    relay.live.set(event.ref, entry);
+    broadcast({ type: "history", project: relay.project, entry });
+    return sendJson(response, 200, { id: entry.id });
+  }
+  const started = relay.live.get(event.ref);
+  if (event.type === "settled" && started) {
+    relay.live.delete(event.ref);
+    const settled = {
+      ...started,
+      outcome: event.outcome === "ok" ? "ok" : "error",
+      elapsedMs: Number.isFinite(event.elapsedMs) ? event.elapsedMs : undefined,
+    };
+    if (event.result !== undefined) settled.result = event.result;
+    if (event.resultOmitted === true) {
+      settled.resultOmitted = true;
+      settled.resultBytes = event.resultBytes;
+      settled.untrusted = event.untrusted === true;
+    }
+    if (event.cancelled === true) settled.cancelled = true;
+    if (typeof event.failure === "string") settled.failure = event.failure;
+    sendJson(response, 200, { id: settled.id });
+    await recordCall(await projects.get(relay.project), settled);
+    return;
+  }
+  return sendJson(response, 400, { error: "Unknown or unmatched report." });
 }
 
 /** prompts/get: REA renders the workflow brief from caller-selected arguments. */
@@ -1166,12 +1800,12 @@ function authorized(request) {
   );
 }
 
-async function readJsonBody(request) {
+async function readJsonBody(request, limit = MAX_BODY_BYTES) {
   const chunks = [];
   let size = 0;
   for await (const chunk of request) {
     size += chunk.length;
-    if (size > MAX_BODY_BYTES) throw new Error("Request body is too large.");
+    if (size > limit) throw new Error("Request body is too large.");
     chunks.push(chunk);
   }
   try {
@@ -1228,6 +1862,8 @@ async function shutdown(exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
   for (const listener of listeners) listener.end();
+  // The last of each followed transcript is kept before the bridge goes.
+  await Promise.allSettled([...following.keys()].map(stopFollowing));
   terminal.close();
   server.close();
   await stopMcp();

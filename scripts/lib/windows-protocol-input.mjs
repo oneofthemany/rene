@@ -18,10 +18,10 @@ export async function verifyWindowsProtocolInput(packageRoot, workspace) {
   const echo = await verifyEcho(launch);
   const cancellation = await verifyBlockedCancellation(launch);
   await verifyNativePendingWrite(native, workspace);
-  const { JadxMcpTransport } = await import(
-    pathToFileURL(join(packageRoot, "dist/android/JadxMcpTransport.js"))
+  const { OwnedMcpTransport } = await import(
+    pathToFileURL(join(packageRoot, "dist/process/OwnedMcpTransport.js"))
   );
-  await verifyTransportPendingWrite(JadxMcpTransport, workspace);
+  await verifyTransportPendingWrite(OwnedMcpTransport, workspace);
   return {
     echo,
     cancellation,
@@ -193,11 +193,14 @@ async function verifyNativePendingWrite(native, workspace) {
 }
 
 async function verifyTransportPendingWrite(Transport, workspace) {
-  const transport = new Transport({
-    command: process.execPath,
-    arguments: ["-e", "setInterval(() => {}, 1000)"],
-    cwd: workspace,
-  });
+  const transport = new Transport(
+    { id: "probe", label: "Probe" },
+    {
+      command: process.execPath,
+      arguments: ["-e", "setInterval(() => {}, 1000)"],
+      cwd: workspace,
+    },
+  );
   transport.onerror = () => {};
   try {
     await transport.start();

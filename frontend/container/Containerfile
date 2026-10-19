@@ -80,6 +80,17 @@ RUN case "${TARGETARCH:-amd64}" in \
   && rm /tmp/duckdb.zip \
   && /usr/local/bin/duckdb --version
 
+# Build toolchain for the agent toolbox (run_command): npm for the Node.js
+# above, Rust (cargo, rustc) and a C/C++ compiler, so agents can install and
+# build projects under the home folder through REA, recorded like any other
+# call. Cargo's cache lives in the mounted home folder (~/.cargo), so crates
+# download once.
+RUN dnf -y install --setopt=install_weak_deps=False nodejs24-npm gcc-c++ make cargo rust \
+  && dnf clean all \
+  && if [ ! -e /usr/bin/npm ]; then ln -s /usr/bin/npm-24 /usr/bin/npm; fi \
+  && if [ ! -e /usr/bin/npx ]; then ln -s /usr/bin/npx-24 /usr/bin/npx; fi \
+  && npm --version && cargo --version && g++ --version | head -1
+
 # REA finds these tools only through absolute paths. A path saved in the
 # workbench settings (forwarded by the launcher) takes precedence.
 ENV REA_BINWALK_COMMAND=/usr/bin/binwalk \

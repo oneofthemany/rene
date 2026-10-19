@@ -38,6 +38,8 @@ export const TOOL_KINDS = [
   "python-provider",
   "application",
   "session",
+  "toolbox",
+  "codegraph-provider",
 ] as const;
 
 /** Adapter family responsible for implementing a public MCP tool. */

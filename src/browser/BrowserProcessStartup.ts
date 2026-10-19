@@ -150,7 +150,10 @@ const startupError = (
     state.failure === "spawn-error" ? { cause: state.cause } : undefined,
   );
 
-const readDevtoolsPort = async (path: string): Promise<number | null> => {
+/** The port in Chrome's DevToolsActivePort file, or null while it is unknown. */
+export const readDevtoolsPort = async (
+  path: string,
+): Promise<number | null> => {
   try {
     const firstLine = (await readFile(path, "utf8")).trim().split("\n")[0];
     const port = Number(firstLine);

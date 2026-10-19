@@ -16,7 +16,9 @@
         <span class="dot" data-state="starting"></span>
         <span class="server-text">Connecting…</span>
       </div>
-      <button type="button" class="quiet" id="open-agent">Agent</button>
+      <button type="button" class="quiet" id="open-agent">
+        Agent terminal
+      </button>
       <button type="button" class="quiet" id="open-providers">Providers</button>
       <button type="button" class="quiet" id="open-setup">Agent setup</button>
       <button type="button" class="quiet" id="restart">Restart server</button>
@@ -42,6 +44,28 @@
       </nav>
 
       <section class="workspace">
+        <section class="project-bar" aria-label="Project and agent">
+          <div class="project-field">
+            <label for="project-path">Project</label>
+            <div class="path-control">
+              <input
+                id="project-path"
+                spellcheck="false"
+                autocomplete="off"
+                placeholder="Folder the agent and your calls work in"
+              />
+              <button type="button" class="quiet" id="project-browse">
+                Browse…
+              </button>
+              <button type="button" class="quiet" id="project-open">
+                Open
+              </button>
+            </div>
+            <p class="hint" id="project-assessment"></p>
+            <span class="form-error" id="project-message" role="alert"></span>
+          </div>
+          <div class="agent-controls" id="agent-controls"></div>
+        </section>
         <section
           id="workflow-panel"
           class="workflow-panel"
@@ -71,15 +95,69 @@
         <div id="result-view" class="result-view"></div>
       </section>
 
-      <aside class="history" aria-label="Call history">
-        <div class="history-head">
-          <h2 id="history-title">History</h2>
-          <button type="button" class="quiet" id="clear-history" hidden>
-            Clear
+      <aside class="side" aria-label="History and project">
+        <div class="side-tabs" role="tablist">
+          <button
+            type="button"
+            role="tab"
+            id="tab-history"
+            aria-controls="panel-history"
+            aria-selected="true"
+          >
+            History
+          </button>
+          <button
+            type="button"
+            role="tab"
+            id="tab-project"
+            aria-controls="panel-project"
+            aria-selected="false"
+          >
+            Project
           </button>
         </div>
-        <ol id="history-list"></ol>
-        <p class="hint" id="history-empty">Calls you run appear here.</p>
+        <section
+          class="history"
+          id="panel-history"
+          role="tabpanel"
+          aria-labelledby="tab-history"
+        >
+          <div class="history-head">
+            <h2 id="history-title">History</h2>
+            <button type="button" class="quiet" id="fold-calls">
+              Expand all
+            </button>
+            <button type="button" class="quiet" id="clear-history" hidden>
+              Clear
+            </button>
+          </div>
+          <div class="mode-switch history-filter" id="history-filter">
+            <button type="button" data-source="all" aria-pressed="true">
+              All
+            </button>
+            <button type="button" data-source="agent" aria-pressed="false">
+              Agent
+            </button>
+            <button type="button" data-source="workbench" aria-pressed="false">
+              You
+            </button>
+            <button type="button" data-source="topics" aria-pressed="false">
+              Topics
+            </button>
+          </div>
+          <div class="topics-view" id="topics-view" hidden></div>
+          <ol id="history-list"></ol>
+          <p class="hint" id="history-empty">
+            Calls you or the agent run appear here.
+          </p>
+        </section>
+        <section
+          class="projects"
+          id="panel-project"
+          role="tabpanel"
+          aria-labelledby="tab-project"
+          hidden
+        ></section>
       </aside>
     </main>
 

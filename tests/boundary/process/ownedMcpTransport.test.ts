@@ -7,9 +7,9 @@ import {
 import { expect, it } from "vitest";
 import type { ProviderProcessHandle } from "../../../src/process/ProviderProcess.js";
 import {
-  JadxMcpTransport,
-  type JadxLauncher,
-} from "../../../src/android/JadxMcpTransport.js";
+  OwnedMcpTransport,
+  type OwnedMcpLauncher,
+} from "../../../src/process/OwnedMcpTransport.js";
 
 class FixtureProcess extends EventEmitter implements ProviderProcessHandle {
   readonly pid = 1;
@@ -27,7 +27,7 @@ class FixtureProcess extends EventEmitter implements ProviderProcessHandle {
 }
 
 const fixtureLauncher =
-  (process: FixtureProcess): JadxLauncher =>
+  (process: FixtureProcess): OwnedMcpLauncher =>
   async ({ runId }) => ({
     process,
     ownership: {
@@ -56,7 +56,8 @@ it("joins pending input errors before detaching the owned protocol stream", asyn
       },
     }),
   );
-  const transport = new JadxMcpTransport(
+  const transport = new OwnedMcpTransport(
+    { id: "fixture", label: "Fixture" },
     { command: "fixture", arguments: [] },
     async ({ runId }) => ({
       process,
@@ -90,7 +91,8 @@ it("joins pending input errors before detaching the owned protocol stream", asyn
 
 it("decodes split UTF-8 and newline bytes, then routes multiple complete frames", async () => {
   const process = new FixtureProcess();
-  const transport = new JadxMcpTransport(
+  const transport = new OwnedMcpTransport(
+    { id: "fixture", label: "Fixture" },
     { command: "fixture", arguments: [] },
     fixtureLauncher(process),
   );
@@ -130,7 +132,8 @@ it.each([
   ["truncated UTF-8 sequence", Buffer.from([0xe2, 0x82])],
 ])("rejects %s in a complete JSON-RPC frame", async (_label, invalid) => {
   const process = new FixtureProcess();
-  const transport = new JadxMcpTransport(
+  const transport = new OwnedMcpTransport(
+    { id: "fixture", label: "Fixture" },
     { command: "fixture", arguments: [] },
     fixtureLauncher(process),
   );
@@ -157,7 +160,8 @@ it.each([
 
 it("accepts a complete JSON-RPC frame at the 8 MiB boundary", async () => {
   const process = new FixtureProcess();
-  const transport = new JadxMcpTransport(
+  const transport = new OwnedMcpTransport(
+    { id: "fixture", label: "Fixture" },
     { command: "fixture", arguments: [] },
     fixtureLauncher(process),
   );
@@ -191,7 +195,8 @@ it("accepts a complete JSON-RPC frame at the 8 MiB boundary", async () => {
 it("retries an incomplete owned stop while joining concurrent close callers", async () => {
   const process = new FixtureProcess();
   let cleanupFails = true;
-  const transport = new JadxMcpTransport(
+  const transport = new OwnedMcpTransport(
+    { id: "fixture", label: "Fixture" },
     { command: "fixture", arguments: [] },
     async ({ runId }) => ({
       process,

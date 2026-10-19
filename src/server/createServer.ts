@@ -28,6 +28,14 @@ import { registerGoTools } from "./registerGoTools.js";
 import { createRustBinaryService } from "../composition/rust.js";
 import type { RustBinaryService } from "../application/rust/RustBinaryService.js";
 import { registerRustTools } from "./registerRustTools.js";
+import { registerProjectSurveyTools } from "./registerProjectSurveyTools.js";
+import { registerToolboxTools } from "./registerToolboxTools.js";
+import { registerSourceGraphTools } from "./registerSourceGraphTools.js";
+import { CodeGraphProvider } from "../codegraph/CodeGraphProvider.js";
+import { CodeGraphSessions } from "../codegraph/CodeGraphSessions.js";
+import { ToolboxService } from "../application/toolbox/ToolboxService.js";
+import { ProjectSurveyService } from "../application/projectSurvey/ProjectSurveyService.js";
+import { surveyProjectDirectory } from "../artifacts/projectSurvey/ProjectDirectorySurvey.js";
 import type { RecordedCrashService } from "../application/binaryDiagnostics/RecordedCrashService.js";
 import { registerAnalysisViewTool } from "./registerAnalysisViewTool.js";
 import { registerBinaryDiagnosticsTools } from "./registerBinaryDiagnosticsTools.js";
@@ -139,7 +147,9 @@ import { registerReverseEngineeringTools } from "./registerReverseEngineeringToo
 import { CutterBridgeClient } from "../cutter/CutterBridgeClient.js";
 import { CutterBridgeService } from "../cutter/CutterBridgeService.js";
 import { registerCutterTools } from "./registerCutterTools.js";
+import { BrowserSessionManager } from "../browser/BrowserSessionManager.js";
 import { GdbSessionManager } from "../gdb/GdbSessionManager.js";
+import { registerBrowserSessionTools } from "./registerBrowserSessionTools.js";
 import { registerGdbTools } from "./registerGdbTools.js";
 import { RizinDebugSessionManager } from "../rizin/RizinDebugSessionManager.js";
 import { registerRizinDebugTools } from "./registerRizinDebugTools.js";
@@ -357,6 +367,14 @@ export const createServer = (
     environment: providerEnvironment,
   });
   const rizinDebugSessions = new RizinDebugSessionManager(providerEnvironment);
+  const browserSessions = new BrowserSessionManager({
+    environment: providerEnvironment,
+  });
+  const toolbox = new ToolboxService(providerEnvironment);
+  const sourceGraph = new CodeGraphProvider(
+    providerEnvironment,
+    new CodeGraphSessions(providerEnvironment),
+  );
   const android =
     options.androidAnalysis ?? createAndroidAnalysisProvider(environment);
   const pcap = options.pcapAnalysis ?? createPcapAnalysisProvider(environment);
@@ -392,6 +410,9 @@ export const createServer = (
       android.close(),
       cutter.close(),
       fridaInstrumentation.closeAll(),
+      browserSessions.closeAll(),
+      toolbox.close(),
+      sourceGraph.close(),
       wasmArtifact.close(),
       packetCapture.close(),
       signalRecording.close(),
@@ -470,6 +491,8 @@ export const createServer = (
     artifactResources,
     goBinary,
     rustBinary,
+    toolbox,
+    sourceGraph,
     peResources,
     electronFuses,
     webNetworkCapture,
@@ -516,6 +539,7 @@ export const createServer = (
       : (evidence) => session.recordEvidence(evidence),
     session,
   );
+  registerBrowserSessionTools(server, browserSessions, toolLogger, delivery);
   registerGdbTools(
     server,
     gdbSessions,
@@ -684,6 +708,8 @@ const registerConfiguredAnalysisTools = (
     withAdmittedAnalysis,
     goBinary,
     rustBinary,
+    toolbox,
+    sourceGraph,
     peResources,
     webNetworkCapture,
   }: ServerToolContext,
@@ -741,6 +767,27 @@ const registerConfiguredAnalysisTools = (
   registerRustTools(
     server,
     rustBinary,
+    toolLogger,
+    recordEvidence,
+    withAdmittedAnalysis,
+  );
+  registerProjectSurveyTools(
+    server,
+    new ProjectSurveyService(surveyProjectDirectory),
+    toolLogger,
+    recordEvidence,
+    withAdmittedAnalysis,
+  );
+  registerToolboxTools(
+    server,
+    toolbox,
+    toolLogger,
+    recordEvidence,
+    withAdmittedAnalysis,
+  );
+  registerSourceGraphTools(
+    server,
+    sourceGraph,
     toolLogger,
     recordEvidence,
     withAdmittedAnalysis,
@@ -852,6 +899,8 @@ const createSessionRecorders = (
 interface ServerToolContext extends ReturnType<typeof createSessionRecorders> {
   readonly goBinary: GoBinaryService;
   readonly rustBinary: RustBinaryService;
+  readonly toolbox: ToolboxService;
+  readonly sourceGraph: CodeGraphProvider;
   readonly peResources: PeResourcesService;
   readonly electronFuses: ElectronFuseService;
   readonly webNetworkCapture: WebNetworkCaptureService;

@@ -1,0 +1,502 @@
+// Project assessment: how tools relate in one project, and the markdown file
+// that carries it into the project folder.
+//
+// Links between calls are confirmed, never guessed. REA identifies each
+// Evidence record by a SHA-256 digest of its content (ev_<64 hex>). When a
+// call's arguments name an Evidence ID that an earlier call in the project
+// issued (its own Evidence, or the parent Evidence REA says it retained),
+// that call used that result: the identifier can't coincide by accident. A referenced ID that no recorded call returned
+// (imported, from another project, or from a result too large to keep) is
+// kept as an unresolved reference rather than linked to anything.
+//
+// <project>/.rene/assessment.md is written only after the user agrees for
+// that project. The workbench rewrites only the text between its markers;
+// everything else in the file belongs to the user and their agent.
+
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
+export const ASSESSMENT_FILE = join(".rene", "assessment.md");
+const BEGIN = "<!-- rene:generated -->";
+const END = "<!-- /rene:generated -->";
+
+const EVIDENCE_ID = /^ev_[a-f0-9]{64}$/;
+const CONFIDENCE = new Set(["observed", "derived", "inferred"]);
+// Identical Evidence returned by several calls was returned by each of them.
+const MAX_PRODUCERS = 5;
+
+/** REA's structured payload: structuredContent, or a lone JSON text block. */
+function payloadOf(result) {
+  if (result?.structuredContent !== undefined) return result.structuredContent;
+  const texts = (result?.content ?? []).filter(
+    (block) => block.type === "text",
+  );
+  if (texts.length !== 1) return undefined;
+  try {
+    return JSON.parse(texts[0].text);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The Evidence IDs a call issued: its result's own Evidence, and the parent
+ * Evidence REA says it retained (a summary receipt's parent_evidence_id) when
+ * the call wasn't given that ID, so it came from this call rather than into it.
+ */
+export function issuedEvidence(result, args) {
+  if (!result || result.isError) return [];
+  const payload = payloadOf(result);
+  if (
+    typeof payload?.evidence_id !== "string" ||
+    !EVIDENCE_ID.test(payload.evidence_id) ||
+    !CONFIDENCE.has(payload.confidence)
+  )
+    return [];
+  const issued = [payload.evidence_id];
+  const parent = payload.normalized_result?.parent_evidence_id;
+  const given = new Set(
+    referencedEvidence(args).map((reference) => reference.evidence),
+  );
+  if (
+    typeof parent === "string" &&
+    EVIDENCE_ID.test(parent) &&
+    !given.has(parent)
+  )
+    issued.push(parent);
+  return issued;
+}
+
+/** Every argument whose value is exactly an Evidence ID, with its path. */
+function referencedEvidence(args) {
+  const found = [];
+  const walk = (value, path) => {
+    if (typeof value === "string") {
+      if (EVIDENCE_ID.test(value)) found.push({ path, evidence: value });
+    } else if (Array.isArray(value)) {
+      value.forEach((item, index) => walk(item, `${path}[${index}]`));
+    } else if (value && typeof value === "object") {
+      for (const [key, item] of Object.entries(value))
+        walk(item, path ? `${path}.${key}` : key);
+    }
+  };
+  walk(args, "");
+  return found;
+}
+
+/**
+ * Confirmed links into a call: the earlier calls that returned each Evidence
+ * ID its arguments name, or an unresolved reference when none did.
+ * @param {object} args the call's arguments
+ * @param {{ id: string, name: string, startedAt: number, evidence?: string[] }[]} earlier
+ *   the project's recorded calls that started before it, newest first
+ * @returns {{ from: string | null, tool?: string, arg: string, evidence: string }[]}
+ */
+export function findLinks(args, earlier) {
+  const links = [];
+  for (const { path, evidence } of referencedEvidence(args)) {
+    const producers = earlier
+      .filter((call) => call.evidence?.includes(evidence))
+      .slice(0, MAX_PRODUCERS);
+    if (producers.length === 0)
+      links.push({ from: null, arg: path || "(value)", evidence });
+    for (const producer of producers)
+      links.push({
+        from: producer.id,
+        tool: producer.name,
+        arg: path || "(value)",
+        evidence,
+      });
+  }
+  return links;
+}
+
+/** The project's calls recorded before `before`, newest first. */
+export const earlierCalls = async (history, before) =>
+  (await history.list()).filter((entry) => entry.startedAt <= before);
+
+const MAX_CHAIN = 6;
+const MAX_PATHS = 2000;
+const SHOWN_PATHWAYS = 12;
+const SHOWN_LINKS = 15;
+
+/** Tool pathways, confirmed links and usage, from a project's stored summaries. */
+export function summarize(entries) {
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+  const next = new Map();
+  const counted = new Map();
+  const usage = new Map();
+  let unresolved = 0;
+  for (const entry of entries) {
+    const use = usage.get(entry.name) ?? { runs: 0, failed: 0, agent: 0 };
+    use.runs += 1;
+    if (entry.outcome !== "ok") use.failed += 1;
+    if (entry.source === "agent") use.agent += 1;
+    usage.set(entry.name, use);
+    for (const edge of entry.links ?? []) {
+      if (edge.from === null) {
+        unresolved += 1;
+        continue;
+      }
+      // A link to a call history has since pruned has no endpoint to show.
+      if (!byId.has(edge.from)) continue;
+      next.set(edge.from, [...(next.get(edge.from) ?? []), entry.id]);
+      const key = `${edge.tool}\u0000${entry.name}\u0000${edge.arg}`;
+      counted.set(key, (counted.get(key) ?? 0) + 1);
+    }
+  }
+
+  // Chains start at calls whose Evidence others used but that used none.
+  const fed = new Set([...next.values()].flat());
+  const pathways = new Map();
+  let walked = 0;
+  const walk = (id, trail) => {
+    if (walked >= MAX_PATHS) return;
+    const children = (next.get(id) ?? []).filter(
+      (child) => !trail.includes(child),
+    );
+    if (children.length === 0 || trail.length >= MAX_CHAIN) {
+      walked += 1;
+      if (trail.length < 2) return;
+      const names = trail.map((step) => byId.get(step).name);
+      const key = names.join(" → ");
+      const last = byId.get(trail.at(-1));
+      const pathway = pathways.get(key) ?? {
+        names,
+        runs: 0,
+        ok: 0,
+        examples: [],
+      };
+      pathway.runs += 1;
+      if (last.outcome === "ok") pathway.ok += 1;
+      if (pathway.examples.length < 2) pathway.examples.push(trail[0]);
+      pathways.set(key, pathway);
+      return;
+    }
+    for (const child of [...new Set(children)]) walk(child, [...trail, child]);
+  };
+  for (const id of next.keys()) if (!fed.has(id)) walk(id, [id]);
+
+  return {
+    calls: entries.length,
+    pathways: [...pathways.values()].sort((a, b) => b.runs - a.runs),
+    unresolved,
+    links: [...counted.entries()]
+      .map(([key, count]) => {
+        const [from, to, arg] = key.split("\u0000");
+        return { from, to, arg, count };
+      })
+      .sort((a, b) => b.count - a.count),
+    usage: [...usage.entries()]
+      .map(([name, use]) => ({ name, ...use }))
+      .sort((a, b) => b.runs - a.runs),
+  };
+}
+
+const shortId = (id) => id.slice(-8);
+
+export const SURVEY_TOOL = "survey_project_directory";
+const SHOWN_FOLDERS = 30;
+const SHOWN_TYPES = 30;
+
+const size = (bytes) =>
+  bytes < 1024
+    ? `${bytes} B`
+    : bytes < 1024 ** 2
+      ? `${(bytes / 1024).toFixed(1)} KiB`
+      : bytes < 1024 ** 3
+        ? `${(bytes / 1024 ** 2).toFixed(1)} MiB`
+        : `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
+const cell = (text) => String(text).replaceAll("|", "\\|");
+
+/**
+ * The newest successful survey_project_directory call in a history, with
+ * the survey its Evidence carries, or undefined when there is none.
+ */
+export async function latestSurvey(history) {
+  const entry = (await history.list()).find(
+    (candidate) => candidate.name === SURVEY_TOOL && candidate.outcome === "ok",
+  );
+  if (!entry) return undefined;
+  const survey = payloadOf(await history.result(entry.id))?.normalized_result;
+  return survey && Array.isArray(survey.file_types)
+    ? { entry, survey }
+    : undefined;
+}
+
+/** Folder structure, file types and the tools that apply, from one survey. */
+function surveyLines(latest) {
+  if (!latest)
+    return [
+      "## Folder structure",
+      "",
+      "_Not surveyed yet: the workbench runs survey_project_directory when the folder is opened._",
+      "",
+    ];
+  const { entry, survey } = latest;
+  const lines = [
+    `_From survey_project_directory, ${new Date(entry.startedAt).toISOString()} (entry ${shortId(entry.id)})._`,
+    "",
+    "## Folder structure",
+    "",
+    "| Folder | Files | Size | Main types |",
+    "| --- | --- | --- | --- |",
+  ];
+  for (const folder of survey.structure.slice(0, SHOWN_FOLDERS))
+    lines.push(
+      `| \`${cell(folder.path)}\` | ${folder.files} | ${size(folder.bytes)} | ${folder.top_types.map(({ type, files }) => `${type} (${files})`).join(", ")} |`,
+    );
+  if (survey.structure.length > SHOWN_FOLDERS)
+    lines.push(`| … ${survey.structure.length - SHOWN_FOLDERS} more | | | |`);
+  lines.push(
+    "",
+    "## File types",
+    "",
+    "| Type | Decided by | Files | Size | Examples |",
+    "| --- | --- | --- | --- | --- |",
+  );
+  for (const type of survey.file_types.slice(0, SHOWN_TYPES))
+    lines.push(
+      `| ${type.type} | ${type.detection} | ${type.files} | ${size(type.bytes)} | ${type.examples.map((path) => `\`${cell(path)}\``).join(", ")} |`,
+    );
+  if (survey.file_types.length > SHOWN_TYPES)
+    lines.push(`| … ${survey.file_types.length - SHOWN_TYPES} more | | | | |`);
+  lines.push("", "## Applicable tools", "");
+  if (survey.applicable_tools.length === 0)
+    lines.push("_No file type here is one an REA tool takes directly._");
+  for (const tool of survey.applicable_tools)
+    lines.push(
+      `- \`${tool.tool}\`${tool.access === "open_binary" && tool.tool !== "open_binary" ? " (after open_binary)" : ""} — ${tool.file_types.join(", ")}; e.g. ${tool.examples.map((path) => `\`${path}\``).join(", ")}`,
+    );
+  const coverage = survey.coverage;
+  lines.push(
+    "",
+    "## Coverage",
+    "",
+    coverage.complete
+      ? `Complete: ${coverage.files} files in ${coverage.directories} folders, ${size(coverage.bytes)}.`
+      : `Partial: ${coverage.files} files in ${coverage.directories} folders, ${size(coverage.bytes)}. Types in folders not walked are unknown, not absent.`,
+  );
+  if (coverage.excluded_folders.length)
+    lines.push(
+      `- Not walked (excluded): ${coverage.excluded_folders.map((path) => `\`${path}\``).join(", ")}`,
+    );
+  if (coverage.depth_limit_folders.length)
+    lines.push(
+      `- Not walked (past max_depth): ${coverage.depth_limit_folders.length} folders`,
+    );
+  if (coverage.entry_limit_reached)
+    lines.push("- The entry limit was reached.");
+  if (coverage.unreadable.length)
+    lines.push(`- Unreadable: ${coverage.unreadable.length} entries`);
+  lines.push("");
+  return lines;
+}
+
+const SHOWN_TURNS = 15;
+const QUOTE = 300;
+
+const quote = (text) => {
+  const flat = text.replace(/\s+/gu, " ").trim();
+  return `"${flat.length > QUOTE ? `${flat.slice(0, QUOTE)}…` : flat}"`;
+};
+
+/**
+ * Recent conversation turns, newest first: what was asked, which rene calls
+ * followed (with their history entry ids) and what the agent concluded,
+ * quoted rather than summarised.
+ */
+function conversationLines(turns) {
+  const lines = ["## Conversations", ""];
+  if (!turns?.length)
+    return [
+      ...lines,
+      "_None recorded yet: Claude Code sessions started from the workbench are captured with their transcripts._",
+      "",
+    ];
+  for (const turn of [...turns].reverse().slice(0, SHOWN_TURNS)) {
+    const when = turn.at
+      ? new Date(turn.at).toISOString().slice(0, 16).replace("T", " ")
+      : "?";
+    lines.push(
+      `- ${when} · ${turn.agent ?? "Agent"} — asked: ${turn.prompt ? quote(turn.prompt) : "_(no prompt)_"}`,
+    );
+    if (turn.calls.length)
+      lines.push(
+        `  - rene calls: ${turn.calls
+          .map(
+            (call) =>
+              `\`${call.tool}\`${call.historyId ? ` (${shortId(call.historyId)})` : " (not recorded)"}`,
+          )
+          .join(", ")}`,
+      );
+    if (turn.conclusion) lines.push(`  - concluded: ${quote(turn.conclusion)}`);
+  }
+  if (turns.length > SHOWN_TURNS)
+    lines.push(
+      `- … ${turns.length - SHOWN_TURNS} earlier turns in the workbench's history`,
+    );
+  lines.push("");
+  return lines;
+}
+
+/**
+ * Threads and the topics under them, from record_topic declarations, with
+ * full ids so an agent can declare work under an existing thread.
+ */
+function topicLines(tree) {
+  const lines = ["## Topics", ""];
+  if (!tree?.threads?.length)
+    return [
+      ...lines,
+      "_None declared yet: agents (or you) declare threads and topics with record_topic._",
+      "",
+    ];
+  const describe = (node) =>
+    `**${node.title}** — ${node.kind}, ${node.status}, ${node.turns.length} turn${node.turns.length === 1 ? "" : "s"} (\`${node.topic_id}\`)`;
+  const walk = (node, depth) => {
+    const indent = "  ".repeat(depth);
+    lines.push(
+      `${indent}- ${describe(node)}${node.orphan ? " — parent not found" : ""}`,
+    );
+    if (node.summary) lines.push(`${indent}  - ${quote(node.summary)}`);
+    for (const relation of node.relations ?? [])
+      lines.push(
+        `${indent}  - ${relation.relation.replace("_", " ")} \`${relation.topic_id}\``,
+      );
+    for (const fact of node.facts ?? [])
+      lines.push(
+        `${indent}  - shares ${fact.shared.map((item) => `${item.kind} \`${item.value}\``).join(", ")}${fact.more ? ` and ${fact.more} more` : ""} with \`${fact.topic_id}\``,
+      );
+    for (const child of node.children) walk(child, depth + 1);
+  };
+  for (const thread of tree.threads) walk(thread, 0);
+  if (tree.loose_turns?.length)
+    lines.push(`- ${tree.loose_turns.length} turns aren't in any topic yet`);
+  lines.push("");
+  return lines;
+}
+
+/** The generated block, markers included. */
+export function generatedBlock(summary, latest, turns, tree) {
+  const lines = [
+    BEGIN,
+    "<!-- Rewritten by the REA workbench from this project's call history. Links are confirmed by Evidence ID: a call named Evidence (ev_<sha256>) an earlier call returned. Edit outside these markers. -->",
+    "",
+    ...surveyLines(latest),
+    ...topicLines(tree),
+    ...conversationLines(turns),
+    "## Pathways",
+    "",
+  ];
+  if (summary.pathways.length === 0)
+    lines.push(
+      "_None yet: no call has named Evidence an earlier call returned._",
+    );
+  summary.pathways.slice(0, SHOWN_PATHWAYS).forEach((pathway, index) => {
+    lines.push(
+      `${index + 1}. ${pathway.names.map((name) => `\`${name}\``).join(" → ")} — ${pathway.runs} run${pathway.runs === 1 ? "" : "s"}, ${pathway.ok} ended ok (from ${pathway.examples.map(shortId).join(", ")})`,
+    );
+  });
+  lines.push("", "## Evidence links", "");
+  if (summary.links.length === 0) lines.push("_None yet._");
+  for (const link of summary.links.slice(0, SHOWN_LINKS))
+    lines.push(
+      `- \`${link.from}\` Evidence → \`${link.to}\` \`${link.arg}\` (${link.count}×)`,
+    );
+  if (summary.unresolved)
+    lines.push(
+      `- ${summary.unresolved} reference${summary.unresolved === 1 ? "" : "s"} to Evidence no recorded call returned (imported, from elsewhere, or from a result too large to keep)`,
+    );
+  lines.push("", "## Tools used", "");
+  lines.push(
+    "| Tool | Runs | Failed | By agent |",
+    "| --- | --- | --- | --- |",
+  );
+  for (const use of summary.usage)
+    lines.push(
+      `| \`${use.name}\` | ${use.runs} | ${use.failed} | ${use.agent} |`,
+    );
+  lines.push(
+    "",
+    `_${summary.calls} calls in the workbench's history for this folder; ids are history entry ids._`,
+    END,
+  );
+  return lines.join("\n");
+}
+
+const template = (name, block) =>
+  [
+    `# Project assessment — ${name}`,
+    "",
+    "<!-- Project memory for people and agents working in this folder with REA.",
+    "     The workbench updates only the generated section; everything else is yours. -->",
+    "",
+    "## Target",
+    "",
+    "_What is being analysed, and what is known about it._",
+    "",
+    "## Rules",
+    "",
+    "_How to work on this target: which engine or tools to prefer, what to avoid, and why._",
+    "",
+    block,
+    "",
+    "## Findings",
+    "",
+    "_Conclusions, each with the history entry ids it rests on._",
+    "",
+    "## Open questions",
+    "",
+    "_What is still unknown._",
+    "",
+  ].join("\n");
+
+/**
+ * Writes the generated block into the project's assessment, creating the
+ * file from the template when there is none. Returns what happened.
+ * @returns {Promise<"created" | "updated" | "unchanged" | "markers-missing">}
+ */
+export async function writeAssessment(
+  folder,
+  name,
+  summary,
+  latest,
+  turns,
+  tree,
+) {
+  const path = join(folder, ASSESSMENT_FILE);
+  const block = generatedBlock(summary, latest, turns, tree);
+  let current;
+  try {
+    current = await readFile(path, "utf8");
+  } catch (cause) {
+    if (cause.code !== "ENOENT") throw cause;
+  }
+  let text;
+  if (current === undefined) {
+    await mkdir(join(folder, ".rene"), { recursive: true });
+    text = template(name, block);
+  } else {
+    const begin = current.indexOf(BEGIN);
+    const end = current.indexOf(END, begin);
+    // Someone removed the markers; the block isn't put back against their edit.
+    if (begin === -1 || end === -1) return "markers-missing";
+    text = current.slice(0, begin) + block + current.slice(end + END.length);
+    if (text === current) return "unchanged";
+  }
+  const temporary = `${path}.${process.pid}.tmp`;
+  await writeFile(temporary, text);
+  // An edit made while this was being written wins; ours is retried later.
+  const onDisk = await readFile(path, "utf8").catch(() => undefined);
+  if (onDisk !== current) {
+    await rm(temporary, { force: true });
+    return "unchanged";
+  }
+  await rename(temporary, path);
+  return current === undefined ? "created" : "updated";
+}
+
+/** The assessment's text, or undefined when there is none. */
+export const readAssessment = (folder) =>
+  readFile(join(folder, ASSESSMENT_FILE), "utf8").catch(() => undefined);

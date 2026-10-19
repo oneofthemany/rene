@@ -87,11 +87,180 @@ function resultTabs(result, payload, onEvidenceLink) {
   return tabs;
 }
 
+/** Who ran a call: the agent (by name) or the person at the page. */
+const sourceLabel = (entry) =>
+  entry.source === "agent" ? (entry.agent ?? "Agent") : "You";
+
+/**
+ * Earlier calls whose Evidence this call named in its arguments, confirmed
+ * by Evidence ID, and named Evidence no recorded call returned.
+ */
+function linkLine(entry, onLink) {
+  if (!entry.links?.length) return h("p", { id: "result-links", hidden: true });
+  return h(
+    "p",
+    {
+      id: "result-links",
+      class: "link-line",
+      title:
+        "This call's arguments name the Evidence ID (ev_<sha256>) these calls returned.",
+    },
+    "Uses Evidence from",
+    entry.links.map((link) =>
+      link.from === null
+        ? h(
+            "span",
+            { title: link.evidence },
+            `${link.arg}: Evidence no recorded call returned`,
+          )
+        : h(
+            "button",
+            {
+              type: "button",
+              class: "link",
+              title: link.evidence,
+              onclick: () => onLink(link.from),
+            },
+            `${link.tool} (${link.arg})`,
+          ),
+    ),
+  );
+}
+
+const said = (event) =>
+  event.kind === "action"
+    ? h("li", { class: "said action" }, `Used ${event.tool}`)
+    : h(
+        "li",
+        { class: `said ${event.kind}` },
+        h(
+          "span",
+          { class: "said-kind" },
+          event.kind === "reasoning" ? "Reasoning" : "Reply",
+        ),
+        h("span", { class: "said-text" }, event.text),
+      );
+
+/**
+ * The audit trail of an agent's call, from its conversation: the request,
+ * why the call was made, what the agent saw, and what it did next. Text is
+ * the agent's own, quoted; the call is tied to the conversation by session,
+ * tool and identical arguments.
+ */
+export function showAudit(entry, audit) {
+  const host = document.getElementById("result-audit");
+  if (!host) return;
+  if (!audit) {
+    host.replaceChildren(
+      entry.source === "agent"
+        ? h(
+            "p",
+            { class: "hint" },
+            "No conversation is recorded for this call (only Claude Code sessions started from the workbench are captured).",
+          )
+        : null,
+    );
+    return;
+  }
+  host.replaceChildren(
+    h(
+      "section",
+      { class: "audit" },
+      h("h3", {}, "Audit trail"),
+      h(
+        "p",
+        { class: "hint", title: `Tied by ${audit.matchedBy}.` },
+        `${audit.agent ?? "Agent"}, turn ${audit.turn + 1}`,
+      ),
+      h("h4", {}, "Asked"),
+      h("p", { class: "said-text" }, audit.request ?? "(no prompt)"),
+      h("h4", {}, "Why this call"),
+      audit.why.length
+        ? h("ul", { class: "said-list" }, audit.why.map(said))
+        : h("p", { class: "hint" }, "Nothing said before the call."),
+      h("h4", {}, "What the agent saw"),
+      audit.produced
+        ? h("pre", { class: "said-result" }, audit.produced.text || "(empty)")
+        : h("p", { class: "hint" }, "No result in the transcript yet."),
+      h("h4", {}, "What came of it"),
+      audit.outcome.length
+        ? h("ul", { class: "said-list" }, audit.outcome.map(said))
+        : h("p", { class: "hint" }, "Nothing yet after this call."),
+    ),
+  );
+}
+
+/** One conversation turn, in order, with rene calls linking to their entries. */
+export function showTurn(turn, onCall) {
+  const view = document.getElementById("result-view");
+  const items = turn.events.map((event) => {
+    if (event.kind === "tool_use")
+      return h(
+        "li",
+        { class: "said action" },
+        event.rea && event.historyId
+          ? h(
+              "button",
+              {
+                type: "button",
+                class: "link",
+                onclick: () => onCall(event.historyId),
+              },
+              `rene: ${event.tool}`,
+            )
+          : `${event.rea ? "rene: " : "Used "}${event.tool}${event.rea ? " (not recorded)" : ""}`,
+      );
+    if (event.kind === "tool_result")
+      return h(
+        "li",
+        { class: "said result" },
+        h(
+          "details",
+          {},
+          h("summary", {}, event.isError ? "Result (error)" : "Result"),
+          h("pre", { class: "said-result" }, event.text || "(empty)"),
+        ),
+      );
+    return said(event);
+  });
+  view.replaceChildren(
+    h(
+      "section",
+      { class: "audit turn" },
+      h(
+        "h3",
+        {},
+        `${turn.agent ?? "Agent"} conversation, turn ${turn.index + 1}`,
+      ),
+      h(
+        "p",
+        { class: "hint" },
+        turn.at ? new Date(turn.at).toLocaleString() : "",
+      ),
+      h("h4", {}, "Asked"),
+      h("p", { class: "said-text" }, turn.prompt ?? "(no prompt)"),
+      h("ul", { class: "said-list" }, items),
+    ),
+  );
+}
+
+/** Replaces only the shown result's link line, keeping its tab and scroll. */
+export function updateLinks(entry, onLink) {
+  document.getElementById("result-links")?.replaceWith(linkLine(entry, onLink));
+}
+
 /** Renders one finished call into the result view. */
-export function showEntry(entry, onEvidenceLink) {
+export function showEntry(entry, onEvidenceLink, onLink) {
   const resultView = document.getElementById("result-view");
   const actions = h("div", { class: "result-tools" });
-  const line = runLine(entry, actions);
+  const line = h(
+    "div",
+    {},
+    runLine(entry, actions),
+    h("p", { class: "hint" }, `Run by ${sourceLabel(entry)}`),
+    linkLine(entry, onLink),
+    h("div", { id: "result-audit" }),
+  );
 
   if (!entry.result) {
     resultView.replaceChildren(
@@ -207,16 +376,19 @@ export function showLive(entry, onCancel) {
       h("strong", {}, entry.name),
       entry.outcome === "running" ? progress : null,
       h("span", {}, liveStatus(entry)),
-      h(
-        "button",
-        {
-          type: "button",
-          class: "quiet",
-          disabled: entry.cancelRequested,
-          onclick: () => onCancel(entry),
-        },
-        "Cancel",
-      ),
+      // The agent owns its calls; only it can cancel them.
+      entry.source === "agent"
+        ? h("span", { class: "hint" }, `Run by ${sourceLabel(entry)}`)
+        : h(
+            "button",
+            {
+              type: "button",
+              class: "quiet",
+              disabled: entry.cancelRequested,
+              onclick: () => onCancel(entry),
+            },
+            "Cancel",
+          ),
     ),
   );
 }
@@ -230,56 +402,143 @@ function startedLabel(startedAt) {
 }
 
 /** Renders call history; onSelect shows an entry, onCancel stops a live one. */
+/** Turns whose calls are shown nested under them, by turn historyId. */
+const expandedTurns = new Set();
+
+/** Opens or folds every turn's nested calls at once. */
+export function setTurnsExpanded(open, history) {
+  expandedTurns.clear();
+  if (open)
+    for (const entry of history)
+      if (entry.kind === "turn") expandedTurns.add(entry.historyId);
+}
+
+/**
+ * Draws History. An agent's call that a turn links (the confirmed timestamp
+ * link in conversations.mjs) is listed under that turn, folded until opened;
+ * calls no turn links stay at the top level.
+ */
 export function renderHistory(history, { onSelect, onCancel, shown }) {
   const live = history.filter(isLive).length;
   document.getElementById("history-title").textContent = live
     ? `History, ${live} in progress`
     : "History";
-  document.getElementById("history-empty").hidden = history.length > 0;
-  document.getElementById("history-list").replaceChildren(
-    ...history.slice(0, 50).map((entry) =>
+  const byId = new Map(history.map((entry) => [entry.historyId, entry]));
+  const nested = new Map();
+  for (const entry of history)
+    if (entry.kind === "turn")
+      nested.set(
+        entry,
+        entry.turn.calls
+          .map((call) => byId.get(call.historyId))
+          .filter((call) => call !== undefined && call.kind !== "turn"),
+      );
+  const inTurn = new Set([...nested.values()].flat());
+  for (const [turn, calls] of nested)
+    if (calls.includes(shown)) expandedTurns.add(turn.historyId);
+  const top = history.filter((entry) => !inTurn.has(entry));
+  document.getElementById("history-empty").hidden = top.length > 0;
+  const item = (entry) =>
+    h(
+      "li",
+      {
+        "data-outcome": entry.outcome,
+        "aria-current": String(entry === shown),
+      },
       h(
-        "li",
+        "button",
         {
-          "data-outcome": entry.outcome,
-          "aria-current": String(entry === shown),
+          type: "button",
+          class: "h-open",
+          title: "Show this call and restore its arguments",
+          onclick: () => void onSelect(entry),
         },
+        entry.kind === "turn"
+          ? h(
+              "span",
+              { class: "h-name h-turn" },
+              entry.turn.prompt
+                ? `“${entry.turn.prompt.replace(/\s+/g, " ").slice(0, 80)}”`
+                : "Conversation",
+            )
+          : h("span", { class: "h-name" }, entry.name),
+        h(
+          "span",
+          { class: "h-meta" },
+          h(
+            "span",
+            { class: "h-source", "data-source": entry.source ?? "workbench" },
+            sourceLabel(entry),
+          ),
+          " · ",
+          isLive(entry)
+            ? liveStatus(entry)
+            : [
+                startedLabel(entry.startedAt),
+                entry.elapsedMs === undefined
+                  ? ""
+                  : `, ${(entry.elapsedMs / 1000).toFixed(1)} s`,
+              ],
+        ),
+        entry.kind === "turn" && entry.turn.calls.length
+          ? h(
+              "span",
+              { class: "h-link" },
+              `→ ${entry.turn.calls.length} rene call${entry.turn.calls.length === 1 ? "" : "s"}`,
+            )
+          : null,
+        entry.links?.some((link) => link.from !== null)
+          ? h(
+              "span",
+              { class: "h-link" },
+              `← ${[...new Set(entry.links.filter((link) => link.from !== null).map((link) => link.tool))].join(", ")}`,
+            )
+          : null,
+      ),
+      isLive(entry) && entry.source !== "agent"
+        ? h(
+            "button",
+            {
+              type: "button",
+              class: "h-cancel",
+              disabled: entry.cancelRequested,
+              "aria-label": `Cancel ${entry.name}`,
+              onclick: () => void onCancel(entry),
+            },
+            "Cancel",
+          )
+        : null,
+    );
+  document.getElementById("history-list").replaceChildren(
+    ...top.slice(0, 50).map((entry) => {
+      const calls = nested.get(entry);
+      const row = item(entry);
+      if (!calls?.length) return row;
+      const open = expandedTurns.has(entry.historyId);
+      row.append(
         h(
           "button",
           {
             type: "button",
-            class: "h-open",
-            title: "Show this call and restore its arguments",
-            onclick: () => void onSelect(entry),
+            class: "h-fold",
+            "aria-expanded": String(open),
+            onclick: () => {
+              if (open) expandedTurns.delete(entry.historyId);
+              else expandedTurns.add(entry.historyId);
+              renderHistory(history, { onSelect, onCancel, shown });
+            },
           },
-          h("span", { class: "h-name" }, entry.name),
-          h(
-            "span",
-            { class: "h-meta" },
-            isLive(entry)
-              ? liveStatus(entry)
-              : [
-                  startedLabel(entry.startedAt),
-                  entry.elapsedMs === undefined
-                    ? ""
-                    : `, ${(entry.elapsedMs / 1000).toFixed(1)} s`,
-                ],
-          ),
+          `${open ? "▾" : "▸"} ${calls.length} call${calls.length === 1 ? "" : "s"}`,
         ),
-        isLive(entry)
+        open
           ? h(
-              "button",
-              {
-                type: "button",
-                class: "h-cancel",
-                disabled: entry.cancelRequested,
-                "aria-label": `Cancel ${entry.name}`,
-                onclick: () => void onCancel(entry),
-              },
-              "Cancel",
+              "ol",
+              { class: "h-nested" },
+              ...[...calls].sort((a, b) => a.startedAt - b.startedAt).map(item),
             )
           : null,
-      ),
-    ),
+      );
+      return row;
+    }),
   );
 }

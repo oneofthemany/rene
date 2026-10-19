@@ -33,7 +33,11 @@ import { ENHANCED_TOOL_CONTRACTS } from "./enhancedToolContracts.js";
 import { SESSION_TOOL_CONTRACTS } from "./sessionToolContracts.js";
 import { CUTTER_TOOL_CONTRACTS } from "./cutterToolContracts.js";
 import { REVERSE_ENGINEERING_TOOL_CONTRACTS } from "./reverseEngineeringToolContracts.js";
+import { BROWSER_SESSION_TOOL_CONTRACTS } from "./browserSessionToolContracts.js";
 import { GDB_TOOL_CONTRACTS } from "./gdbToolContracts.js";
+import { PROJECT_SURVEY_TOOL_CONTRACTS } from "./projectSurveyToolContracts.js";
+import { TOOLBOX_TOOL_CONTRACTS } from "./toolboxToolContracts.js";
+import { SOURCE_GRAPH_TOOL_CONTRACTS } from "./sourceGraphToolContracts.js";
 import { RIZIN_DEBUG_TOOL_CONTRACTS } from "./rizinDebugToolContracts.js";
 import { FRIDA_TOOL_CONTRACTS } from "./fridaToolContracts.js";
 
@@ -75,6 +79,10 @@ export const TOOL_CONTRACTS = [
   ...CUTTER_TOOL_CONTRACTS,
   ...REVERSE_ENGINEERING_TOOL_CONTRACTS,
   ...GDB_TOOL_CONTRACTS,
+  ...BROWSER_SESSION_TOOL_CONTRACTS,
+  ...PROJECT_SURVEY_TOOL_CONTRACTS,
+  ...TOOLBOX_TOOL_CONTRACTS,
+  ...SOURCE_GRAPH_TOOL_CONTRACTS,
   ...RIZIN_DEBUG_TOOL_CONTRACTS,
   ...FRIDA_TOOL_CONTRACTS,
 ] as const;

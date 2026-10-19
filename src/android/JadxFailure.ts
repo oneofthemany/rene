@@ -20,7 +20,7 @@ import {
   regularFileCancellation,
 } from "../filesystem/OwnedRegularFile.js";
 import type { JadxSession } from "./JadxSession.js";
-import type { JadxMcpTransport } from "./JadxMcpTransport.js";
+import type { OwnedMcpTransport } from "../process/OwnedMcpTransport.js";
 
 interface FailureContext {
   readonly cause: unknown;
@@ -34,7 +34,7 @@ interface FailureContext {
 type DiagnosticFailure = {
   readonly operation: string;
   readonly cause: unknown;
-  readonly transport: JadxMcpTransport | undefined;
+  readonly transport: OwnedMcpTransport | undefined;
 } & (
   | { readonly kind: "startup"; readonly command: string }
   | { readonly kind: "execution" }

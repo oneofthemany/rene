@@ -180,11 +180,11 @@ button.link {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 270px minmax(0, 1fr) 240px;
+  grid-template-columns: 270px minmax(0, 1fr) 320px;
 }
 
 .catalog,
-.history {
+.side {
   overflow: auto;
   background: var(--panel);
 }
@@ -193,23 +193,230 @@ button.link {
   border-right: 1px solid var(--rule);
 }
 
-.history {
+.side {
   border-left: 1px solid var(--rule);
+}
+
+.history,
+.projects {
   padding: 12px 14px;
 }
 
 .workspace {
   overflow: auto;
-  padding: 20px 28px 48px;
+  padding: 0 28px 48px;
 }
 
 @media (max-width: 1100px) {
   .layout {
     grid-template-columns: 240px minmax(0, 1fr);
   }
-  .history {
+  .side {
     display: none;
   }
+}
+
+/* ---- Project bar and side tabs ------------------------------------------ */
+
+.project-bar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 12px 24px;
+  margin: 0 -28px 20px;
+  padding: 12px 28px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--rule);
+}
+
+.project-field {
+  flex: 1 1 360px;
+  min-width: 0;
+}
+
+.project-field label,
+.agent-pick label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.project-field .hint {
+  margin: 4px 0 0;
+  font-size: 12px;
+}
+
+.agent-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.agent-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.side-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  background: var(--panel);
+  border-bottom: 1px solid var(--rule);
+}
+
+.side-tabs button {
+  flex: 1;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--muted);
+  padding: 10px 8px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.side-tabs button[aria-selected="true"] {
+  color: var(--ink);
+  border-bottom-color: var(--accent);
+}
+
+.mode-switch.history-filter {
+  margin: 0 0 8px;
+  overflow: visible;
+}
+
+.history-filter button {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.history .h-source {
+  font-size: 11px;
+  color: var(--muted);
+  font-family: var(--sans);
+}
+
+.history .h-source[data-source="agent"] {
+  color: var(--accent);
+}
+
+.history .h-link {
+  font-size: 11.5px;
+  color: var(--derived);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.link-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+  font-size: 13px;
+  color: var(--muted);
+  margin: 0 0 10px;
+}
+
+.projects h3 {
+  font-size: 13px;
+  margin: 0 0 8px;
+  color: var(--muted);
+}
+
+.assessment {
+  margin-bottom: 20px;
+}
+
+.assessment-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.assessment-head button.quiet {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.assessment p {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.assessment-text {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--code-bg);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-m);
+  padding: 8px 10px;
+  max-height: 60vh;
+  overflow: auto;
+}
+
+.project-list {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+}
+
+.project-list li {
+  margin-bottom: 4px;
+}
+
+.project-list .p-open {
+  width: 100%;
+  display: grid;
+  text-align: left;
+  border: 0;
+  border-left: 3px solid var(--rule);
+  background: none;
+  padding: 4px 8px;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.project-list li[aria-current="true"] .p-open {
+  border-left-color: var(--accent);
+  background: var(--ground);
+}
+
+.project-list .p-open:hover:not(:disabled) {
+  background: var(--ground);
+}
+
+.project-list .p-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.project-list .p-path {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-list .p-warn {
+  font-size: 12px;
+  color: var(--danger);
 }
 
 @media (max-width: 720px) {
@@ -1391,4 +1598,384 @@ progress {
   padding: 6px;
   border-radius: 6px;
   background: #000;
+}
+
+/* ---- Conversations and audit trail -------------------------------------- */
+
+.history .h-turn {
+  font-family: var(--sans);
+  font-style: italic;
+}
+
+.audit {
+  margin: 16px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-m);
+  background: var(--panel);
+}
+
+.audit h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+
+.audit h4 {
+  margin: 14px 0 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.said-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.said {
+  display: grid;
+  gap: 2px;
+}
+
+.said-kind {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.said.reasoning .said-text {
+  color: var(--muted);
+}
+
+.said-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 13.5px;
+  max-width: 90ch;
+}
+
+.said.action {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--derived);
+}
+
+.said-result {
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 240px;
+  overflow: auto;
+  background: var(--code-bg);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-s);
+  padding: 6px 8px;
+  margin: 4px 0 0;
+}
+
+.said.action button.link {
+  justify-self: start;
+  font-family: var(--mono);
+}
+
+/* ---- Rendered markdown (assessment, workflow briefs) -------------------- */
+
+.assessment-tools {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 0 0 6px;
+  font-size: 12px;
+}
+
+.assessment-tools .hint {
+  margin: 0 auto 0 0;
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.assessment-doc {
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  max-height: 65vh;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.assessment-page .assessment-doc {
+  max-height: none;
+  font-size: 14px;
+  max-width: 110ch;
+}
+
+.assessment-doc h3 {
+  font-size: 15px;
+  margin: 4px 0 8px;
+  color: var(--ink);
+}
+
+.assessment-doc h4 {
+  font-size: 13px;
+  margin: 18px 0 6px;
+  padding-bottom: 3px;
+  border-bottom: 1px solid var(--rule);
+  color: var(--ink);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.assessment-page .assessment-doc h3 {
+  font-size: 20px;
+}
+
+.assessment-page .assessment-doc h4 {
+  font-size: 13.5px;
+  margin-top: 26px;
+}
+
+.assessment-doc p,
+.assessment-doc li {
+  margin: 4px 0;
+}
+
+.assessment-doc em {
+  color: var(--muted);
+}
+
+.assessment-doc ul,
+.assessment-doc ol {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+
+.assessment-doc ul.nested {
+  padding-left: 14px;
+  margin: 2px 0;
+  color: var(--muted);
+}
+
+.assessment-doc code,
+.wf-body code {
+  font-family: var(--mono);
+  font-size: 0.92em;
+  background: var(--code-bg);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-s);
+  padding: 0 4px;
+}
+
+.assessment-doc blockquote {
+  margin: 6px 0;
+  padding: 2px 10px;
+  border-left: 3px solid var(--rule);
+  color: var(--muted);
+}
+
+.md-table {
+  overflow-x: auto;
+  margin: 6px 0 10px;
+}
+
+.md-table table {
+  border-collapse: collapse;
+  font-size: 12px;
+  width: 100%;
+}
+
+.assessment-page .md-table table {
+  font-size: 13px;
+}
+
+.md-table th,
+.md-table td {
+  text-align: left;
+  vertical-align: top;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.md-table th {
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+  border-bottom-width: 2px;
+}
+
+.md-table tbody tr:hover {
+  background: var(--ground);
+}
+
+/* History: Topics view */
+.topics-view {
+  overflow-y: auto;
+  min-height: 0;
+  font-size: 13px;
+}
+
+.topics-view .topic-actions {
+  display: flex;
+  gap: 6px;
+  margin: 4px 0 8px;
+}
+
+.topic {
+  border-left: 2px solid var(--rule);
+  margin: 0 0 6px;
+  padding-left: 8px;
+}
+
+.topic.topic-thread {
+  border-left-color: var(--accent);
+}
+
+.topic.topic-done,
+.topic.topic-abandoned {
+  opacity: 0.75;
+}
+
+.topic > summary {
+  cursor: pointer;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 0;
+}
+
+.topic-kind,
+.topic-status,
+.topic-count,
+.topic-flag {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.topic-kind {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.topic-thread > summary .topic-kind {
+  color: var(--accent);
+}
+
+.topic-title {
+  color: var(--ink);
+  font-weight: 600;
+  flex: 1 1 auto;
+}
+
+.topic-flag {
+  color: var(--danger);
+}
+
+.topic-body {
+  padding: 2px 0 4px 4px;
+}
+
+.topic-summary {
+  margin: 2px 0 6px;
+  color: var(--ink);
+}
+
+.topic-fact {
+  margin: 2px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.topic-turns {
+  list-style: none;
+  margin: 4px 0;
+  padding: 0;
+}
+
+.topic-turns li {
+  padding: 3px 0;
+  border-top: 1px solid var(--rule);
+}
+
+.topic-turns button.link {
+  font-family: var(--sans);
+  text-align: left;
+}
+
+.topic-when {
+  color: var(--muted);
+  margin-right: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.topic-calls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.topic-calls button.chip {
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-s);
+  background: var(--panel);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 0 5px;
+  cursor: pointer;
+}
+
+.topic-form {
+  display: grid;
+  gap: 6px;
+  margin: 6px 0;
+  padding: 8px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-m);
+  background: var(--panel);
+}
+
+.topic-form label {
+  display: grid;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.topic-form-row {
+  display: flex;
+  gap: 8px;
+}
+
+/* History: a turn's calls nested under it */
+.history button.h-fold,
+.topic-turn-calls button.h-fold {
+  border: 0;
+  background: none;
+  padding: 0 4px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.history ol.h-nested {
+  list-style: none;
+  margin: 2px 0 4px 12px;
+  padding-left: 8px;
+  border-left: 1px solid var(--rule);
+}
+
+.topic-turn-calls {
+  display: block;
+  margin-top: 2px;
 }

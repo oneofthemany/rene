@@ -1,0 +1,308 @@
+import { z } from "zod";
+
+import { localPathStringSchema } from "./localPath.js";
+
+/**
+ * The agent toolbox: reading, writing and editing files, finding files,
+ * searching text and running commands, as REA tools so every action an agent
+ * takes is a recorded, auditable call. Each tool works only inside the
+ * toolbox roots (the user's home folder unless REA_TOOLBOX_ROOTS says
+ * otherwise), resolved through symbolic links before any access.
+ */
+
+const absolutePath = localPathStringSchema.describe(
+  "Absolute path inside the toolbox roots (the home folder by default).",
+);
+const excludeNames = z
+  .array(z.string().min(1))
+  .default([".git", "node_modules"])
+  .describe("Folder names not descended into.");
+
+export const MAX_READ_BYTES = 4 * 1024 * 1024;
+export const MAX_WRITE_BYTES = 8 * 1024 * 1024;
+export const MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024;
+
+export const readFileInputSchema = z.strictObject({
+  path: absolutePath,
+  start_line: z
+    .number()
+    .int()
+    .min(1)
+    .default(1)
+    .describe("First line to return, counting from 1."),
+  max_lines: z
+    .number()
+    .int()
+    .min(1)
+    .max(20_000)
+    .default(2000)
+    .describe("Lines returned from start_line."),
+});
+
+export const readFileResultSchema = z.strictObject({
+  path: z.string(),
+  bytes: z.number().int().nonnegative(),
+  sha256: z.string(),
+  binary: z.boolean(),
+  start_line: z.number().int(),
+  end_line: z.number().int(),
+  total_lines: z.number().int().nonnegative(),
+  truncated: z.boolean(),
+  text: z.string(),
+});
+
+export const writeFileInputSchema = z.strictObject({
+  path: absolutePath,
+  content: z
+    .string()
+    .max(MAX_WRITE_BYTES)
+    .describe("The file's complete new text."),
+  overwrite: z
+    .boolean()
+    .default(false)
+    .describe(
+      "Replace an existing file; without it an existing file is refused.",
+    ),
+  create_directories: z
+    .boolean()
+    .default(false)
+    .describe("Create missing parent folders."),
+});
+
+export const writeFileResultSchema = z.strictObject({
+  path: z.string(),
+  bytes: z.number().int().nonnegative(),
+  sha256: z.string(),
+  created: z.boolean(),
+  previous_sha256: z.string().nullable(),
+});
+
+export const editFileInputSchema = z.strictObject({
+  path: absolutePath,
+  old_text: z.string().min(1).describe("Exact text to replace."),
+  new_text: z.string().describe("Its replacement; empty deletes it."),
+  replace_all: z
+    .boolean()
+    .default(false)
+    .describe(
+      "Replace every occurrence; without it old_text must occur exactly once.",
+    ),
+});
+
+export const editFileResultSchema = z.strictObject({
+  path: z.string(),
+  replacements: z.number().int().positive(),
+  bytes: z.number().int().nonnegative(),
+  sha256: z.string(),
+  previous_sha256: z.string(),
+});
+
+export const findFilesInputSchema = z.strictObject({
+  root: absolutePath.describe("Folder to search, inside the toolbox roots."),
+  pattern: z
+    .string()
+    .min(1)
+    .default("**/*")
+    .describe("Glob matched against paths relative to root, e.g. **/*.ts."),
+  exclude_names: excludeNames,
+  include_directories: z.boolean().default(false),
+  max_results: z.number().int().min(1).max(20_000).default(1000),
+});
+
+export const findFilesResultSchema = z.strictObject({
+  root: z.string(),
+  pattern: z.string(),
+  matches: z.array(
+    z.strictObject({
+      path: z.string(),
+      kind: z.enum(["file", "directory", "symlink"]),
+      bytes: z.number().int().nonnegative(),
+      modified: z.string(),
+    }),
+  ),
+  truncated: z.boolean(),
+  excluded_folders: z.array(z.string()),
+  unreadable: z.array(z.string()),
+});
+
+export const searchTextInputSchema = z.strictObject({
+  root: absolutePath.describe(
+    "Folder (searched recursively) or single file, inside the toolbox roots.",
+  ),
+  query: z.string().min(1).describe("Text or regular expression to find."),
+  regex: z
+    .boolean()
+    .default(false)
+    .describe("Treat query as a JavaScript regular expression."),
+  case_sensitive: z.boolean().default(true),
+  pattern: z
+    .string()
+    .min(1)
+    .default("**/*")
+    .describe("Glob limiting which files are searched, relative to root."),
+  exclude_names: excludeNames,
+  context_lines: z.number().int().min(0).max(10).default(0),
+  max_matches: z.number().int().min(1).max(10_000).default(500),
+});
+
+const searchLine = z.strictObject({
+  line: z.number().int().positive(),
+  text: z.string(),
+});
+
+export const searchTextResultSchema = z.strictObject({
+  root: z.string(),
+  query: z.string(),
+  matches: z.array(
+    z.strictObject({
+      path: z.string(),
+      line: z.number().int().positive(),
+      column: z.number().int().positive(),
+      text: z.string(),
+      before: z.array(searchLine),
+      after: z.array(searchLine),
+    }),
+  ),
+  files_searched: z.number().int().nonnegative(),
+  files_with_matches: z.number().int().nonnegative(),
+  truncated: z.boolean(),
+  skipped_binary: z.number().int().nonnegative(),
+  skipped_large: z.number().int().nonnegative(),
+  excluded_folders: z.array(z.string()),
+  unreadable: z.array(z.string()),
+});
+
+export const runCommandInputSchema = z.strictObject({
+  command: z
+    .string()
+    .min(1)
+    .describe(
+      "Shell command line, run with bash -c (pipes and redirects work).",
+    ),
+  cwd: absolutePath.describe("Working folder, inside the toolbox roots."),
+  timeout_ms: z
+    .number()
+    .int()
+    .min(100)
+    .max(30 * 60_000)
+    .default(120_000)
+    .describe("The command and everything it started are stopped after this."),
+  environment: z
+    .record(z.string(), z.string())
+    .default({})
+    .describe("Extra environment variables for the command."),
+});
+
+export const runCommandResultSchema = z.strictObject({
+  command: z.string(),
+  cwd: z.string(),
+  exit_code: z.number().int().nullable(),
+  signal: z.string().nullable(),
+  stdout: z.string(),
+  stderr: z.string(),
+  output_truncated: z.boolean(),
+  stopped: z
+    .enum(["timeout", "cancelled", "output-limit"])
+    .nullable()
+    .describe("Why REA stopped the command, or null when it ended by itself."),
+  duration_ms: z.number().int().nonnegative(),
+});
+
+/**
+ * Conversation topics: a thread (the chat relationship, the top of the
+ * hierarchy) and the topics under it, each a kind of request. A declaration
+ * is a recorded call; the latest declaration of a topic_id is its current
+ * state, so the topic tree and every change to it live in the call history.
+ */
+export const TOPIC_KINDS = [
+  "thread",
+  "feature",
+  "question",
+  "bug",
+  "investigation",
+  "refactor",
+  "docs",
+  "decision",
+  "other",
+] as const;
+export const TOPIC_RELATIONS = [
+  "follows_up",
+  "fixes",
+  "reopens",
+  "depends_on",
+  "duplicates",
+  "supersedes",
+] as const;
+
+const topicId = z.string().uuid();
+
+export const recordTopicInputSchema = z
+  .strictObject({
+    topic_id: topicId
+      .optional()
+      .describe("An existing topic to update; omit to declare a new one."),
+    title: z.string().min(1).max(200),
+    kind: z
+      .enum(TOPIC_KINDS)
+      .describe(
+        "thread: a chat relationship, the top of the hierarchy (no parent). The other kinds sit under a thread.",
+      ),
+    parent_id: topicId
+      .nullable()
+      .default(null)
+      .describe(
+        "The thread (or topic) this one belongs to; null for a thread.",
+      ),
+    status: z.enum(["open", "done", "abandoned"]).default("open"),
+    relations: z
+      .array(
+        z.strictObject({
+          topic_id: topicId,
+          relation: z.enum(TOPIC_RELATIONS),
+        }),
+      )
+      .max(20)
+      .default([])
+      .describe("How this topic relates to other topics."),
+    summary: z
+      .string()
+      .max(2000)
+      .default("")
+      .describe("What was asked, found or decided, in a few sentences."),
+  })
+  .superRefine((topic, context) => {
+    if (topic.kind === "thread" && topic.parent_id !== null)
+      context.addIssue({
+        code: "custom",
+        path: ["parent_id"],
+        message: "A thread is the top of the hierarchy and has no parent.",
+      });
+    if (topic.kind !== "thread" && topic.parent_id === null)
+      context.addIssue({
+        code: "custom",
+        path: ["parent_id"],
+        message: `A ${topic.kind} topic belongs to a thread: set parent_id.`,
+      });
+  });
+
+export const recordTopicResultSchema = z.strictObject({
+  topic_id: topicId,
+  title: z.string(),
+  kind: z.enum(TOPIC_KINDS),
+  parent_id: topicId.nullable(),
+  status: z.enum(["open", "done", "abandoned"]),
+  relations: z.array(
+    z.strictObject({ topic_id: topicId, relation: z.enum(TOPIC_RELATIONS) }),
+  ),
+  summary: z.string(),
+  declared_at: z.string(),
+  created: z.boolean(),
+});
+
+export type RecordTopicInput = z.infer<typeof recordTopicInputSchema>;
+export type ReadFileInput = z.infer<typeof readFileInputSchema>;
+export type WriteFileInput = z.infer<typeof writeFileInputSchema>;
+export type EditFileInput = z.infer<typeof editFileInputSchema>;
+export type FindFilesInput = z.infer<typeof findFilesInputSchema>;
+export type SearchTextInput = z.infer<typeof searchTextInputSchema>;
+export type RunCommandInput = z.infer<typeof runCommandInputSchema>;

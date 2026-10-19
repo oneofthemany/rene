@@ -99,6 +99,11 @@ const SOURCE_PATHS = {
     "dist/contracts/webNetworkCaptureToolContracts.js",
   webNetworkCaptureProvider: "dist/browser/history/CaptureRelease.js",
   browserScenarioContracts: "dist/contracts/browserScenarioToolContracts.js",
+  browserSessionContracts: "dist/contracts/browserSessionToolContracts.js",
+  projectSurveyContracts: "dist/contracts/projectSurveyToolContracts.js",
+  toolboxContracts: "dist/contracts/toolboxToolContracts.js",
+  sourceGraphContracts: "dist/contracts/sourceGraphToolContracts.js",
+  sourceGraphDomain: "dist/domain/sourceGraph.js",
   electronContracts: "dist/contracts/javascript/electronToolContracts.js",
   electronFuseProvider: "dist/electron/ElectronFuseProvider.js",
   javascriptRuntimeObservationContracts:

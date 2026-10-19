@@ -293,7 +293,8 @@ const acquireAttachedScenario = (
   });
 };
 
-const allowedBrowserEnvironment = (
+/** Host variables a launched browser receives; everything else stays out. */
+export const allowedBrowserEnvironment = (
   environment: Readonly<Record<string, string | undefined>>,
 ): Record<string, string | undefined> => {
   const allowed = [

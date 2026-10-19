@@ -31,6 +31,7 @@ export const toolFamilyCatalog = (sources) => {
       surface: "artifact-provider",
       contracts: [
         ...sources.artifactContracts.ARTIFACT_TOOL_CONTRACTS,
+        ...sources.projectSurveyContracts.PROJECT_SURVEY_TOOL_CONTRACTS,
         ...sources.evmContracts.EVM_TOOL_CONTRACTS,
         ...sources.goContracts.GO_TOOL_CONTRACTS,
         ...sources.rustContracts.RUST_TOOL_CONTRACTS,
@@ -105,6 +106,7 @@ export const toolFamilyCatalog = (sources) => {
         ...sources.browserContracts.BROWSER_TOOL_CONTRACTS,
         ...sources.webRuntimeContracts.WEB_RUNTIME_TOOL_CONTRACTS,
         ...sources.browserScenarioContracts.BROWSER_SCENARIO_TOOL_CONTRACTS,
+        ...sources.browserSessionContracts.BROWSER_SESSION_TOOL_CONTRACTS,
         ...sources.webNetworkCaptureContracts
           .WEB_NETWORK_CAPTURE_TOOL_CONTRACTS,
       ],
@@ -131,6 +133,16 @@ export const toolFamilyCatalog = (sources) => {
         ...sources.javascriptRecoveryContracts
           .JAVASCRIPT_RECOVERY_TOOL_CONTRACTS,
       ],
+    },
+    {
+      id: "toolbox",
+      surface: "toolbox",
+      contracts: sources.toolboxContracts.TOOLBOX_TOOL_CONTRACTS,
+    },
+    {
+      id: "codegraph",
+      surface: "codegraph-provider",
+      contracts: sources.sourceGraphContracts.SOURCE_GRAPH_TOOL_CONTRACTS,
     },
     {
       id: "session",
@@ -323,6 +335,10 @@ export const providerCatalog = (sources) => {
     {
       identity: sources.duckdbProvider.DUCKDB_PROVIDER_IDENTITY,
       contracts: sources.duckdbContracts.DUCKDB_TOOL_CONTRACTS,
+    },
+    {
+      identity: sources.sourceGraphDomain.CODEGRAPH_PROVIDER_IDENTITY,
+      contracts: sources.sourceGraphContracts.SOURCE_GRAPH_TOOL_CONTRACTS,
     },
     {
       identity: sources.pythonProvider.PYTHON_PROVIDER_IDENTITY,

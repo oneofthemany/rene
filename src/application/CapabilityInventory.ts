@@ -320,7 +320,8 @@ const optionalProviderFailureFor = ({
   policy,
 }: AvailabilityContext): OptionalProviderLoadFailure | undefined => {
   const failures = policy.optionalProviderLoadFailures;
-  if (name === "capture_browser_scenario")
+  // Browser sessions launch through Playwright, like scenarios.
+  if (name === "capture_browser_scenario" || BROWSER_SESSION_TOOLS.has(name))
     return failures?.browserScenarioCapture;
   if (kind === "browser-provider") return failures?.browserObservation;
   if (name === "capture_electron_scenario")
@@ -509,12 +510,14 @@ const workflowAvailabilityFor = ({
       reason: "unsupported_host",
       remediation: "Run process capture on a supported Linux or macOS host.",
     };
-  if (kind === "application") return { reason: "available", remediation: null };
+  if (kind === "application" || kind === "toolbox")
+    return { reason: "available", remediation: null };
   if (
     kind === "pcap-provider" ||
     kind === "duckdb-provider" ||
     kind === "python-provider" ||
-    kind === "flutter-provider"
+    kind === "flutter-provider" ||
+    kind === "codegraph-provider"
   )
     return { reason: "available", remediation: null };
   const electron = electronProviderAvailability(name, kind, policy);
@@ -573,12 +576,18 @@ const electronProviderAvailability = (
       };
 };
 
+const BROWSER_SESSION_TOOLS: ReadonlySet<string> = new Set([
+  "start_browser_session",
+  "browser_session_status",
+  "close_browser_session",
+]);
+
 const browserProviderAvailability = (
   name: string,
   kind: ToolKind,
   policy: AvailabilityPolicy,
 ): Availability | null => {
-  if (name === "capture_browser_scenario")
+  if (name === "capture_browser_scenario" || BROWSER_SESSION_TOOLS.has(name))
     return policy.browserScenarioEnabled === true
       ? { reason: "available", remediation: null }
       : {

@@ -5,3 +5,5 @@
 .workbench-settings.json.bak
 .workbench-settings.json.tmp
 .workbench-agent/
+.workbench-page.log
+.workbench-page.log.1

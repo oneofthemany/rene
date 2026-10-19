@@ -94,7 +94,12 @@ export function createHistory(directory, limits) {
   return {
     newId,
 
-    /** Records one settled call. Failures are reported, never thrown at the call. */
+    /**
+     * Records one settled call and resolves to the summary it stored (with
+     * resultBytes, resultOmitted and untrusted), so callers can tell others
+     * exactly what history holds. Failures are reported, never thrown at the
+     * call.
+     */
     record(entry) {
       pending.add(entry.id);
       return serial(async () => {
@@ -113,6 +118,7 @@ export function createHistory(directory, limits) {
         }
         await writeAtomic(`${entry.id}.json`, JSON.stringify(summary));
         await prune();
+        return summary;
       }).finally(() => pending.delete(entry.id));
     },
 

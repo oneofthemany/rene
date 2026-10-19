@@ -50,6 +50,7 @@ const browserEvidence = effects({
   accessesNetwork: true,
 });
 const sessionEvidence = effects({ mutatesSession: true });
+const sourceGraphQuery = effects({ launchesProcess: true });
 
 /** Explicit effect audit for every public tool. */
 export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
@@ -639,6 +640,62 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
   import_managed_reconstruction: sessionEvidence,
   project_managed_application_graph: sessionEvidence,
   list_browser_targets: browserEvidence,
+  survey_project_directory: effects(),
+  read_file: effects(),
+  record_topic: effects(),
+  // The project's CodeGraph server is a REA-owned child kept up between calls.
+  explore_source_graph: sourceGraphQuery,
+  search_source_symbols: sourceGraphQuery,
+  read_source_node: sourceGraphQuery,
+  find_source_callers: sourceGraphQuery,
+  find_source_callees: sourceGraphQuery,
+  analyze_source_impact: sourceGraphQuery,
+  list_source_files: sourceGraphQuery,
+  source_graph_status: sourceGraphQuery,
+  index_source_graph: effects({
+    writesFilesystem: true,
+    launchesProcess: true,
+    mayDiscardData: true,
+    idempotent: false,
+  }),
+  find_files: effects(),
+  search_text: effects(),
+  write_file: effects({
+    writesFilesystem: true,
+    mayDiscardData: true,
+    idempotent: false,
+  }),
+  edit_file: effects({
+    writesFilesystem: true,
+    mayDiscardData: true,
+    idempotent: false,
+  }),
+  run_command: effects({
+    mutatesTarget: true,
+    writesFilesystem: true,
+    launchesProcess: true,
+    accessesNetwork: true,
+    mayDiscardData: true,
+    executesForeignCode: true,
+    idempotent: false,
+  }),
+  start_browser_session: effects({
+    mutatesSession: true,
+    writesFilesystem: true,
+    launchesProcess: true,
+    accessesNetwork: true,
+    changesUiState: true,
+    executesForeignCode: true,
+    idempotent: false,
+  }),
+  browser_session_status: browserEvidence,
+  close_browser_session: effects({
+    mutatesSession: true,
+    writesFilesystem: true,
+    changesUiState: true,
+    mayDiscardData: true,
+    idempotent: false,
+  }),
   inspect_web_page: browserEvidence,
   analyze_web_bundle: browserEvidence,
   observe_web_session: browserEvidence,
