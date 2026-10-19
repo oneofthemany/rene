@@ -301,6 +301,7 @@
     "compile:termux": "node scripts/clean-build-output.mjs && node --max-old-space-size=3072 node_modules/typescript-termux/lib/tsc.js -p tsconfig.build.json && node scripts/record-catalog-digests.mjs && node scripts/bundle-runtime.mjs",
     "artifacts:mcp-catalog": "node scripts/generate-mcp-tool-catalog.mjs",
     "artifacts:skills": "node scripts/generate-skill-metadata.mjs",
+    "codegraph:build": "node scripts/build-codegraph.mjs",
     "artifacts:product-catalog": "node scripts/generate-product-catalog.mjs",
     "artifacts:managed-evidence": "node scripts/generate-completion-ledger.mjs",
     "artifacts:error-schema": "node scripts/generate-error-schema.mjs",

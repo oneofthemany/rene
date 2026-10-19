@@ -25,6 +25,10 @@
 // When the state can't be read or written the gate lets the action through:
 // a broken gate mustn't stop the agent, and the turn then shows as
 // undeclared.
+//
+// The same PreToolUse hook holds the agent to the user's other standing
+// rule: the user makes every commit. A shell command that would write or
+// publish git history is refused whatever the topic state (gitHistoryWrite).
 
 import { readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -71,6 +75,84 @@ function stateStore(directory, session) {
   };
 }
 
+/**
+ * The user makes every commit, never the agent. Git subcommands that write
+ * history or publish it are refused in any shell command an agent sends
+ * (Claude Code's Bash or rene's run_command); reading history, staging and
+ * unstaging stay allowed. Checked before the topic gate and independent of
+ * its state, so it holds even when that state can't be read.
+ */
+const HISTORY_WRITES = new Set([
+  "commit",
+  "commit-tree",
+  "merge",
+  "rebase",
+  "cherry-pick",
+  "revert",
+  "am",
+  "update-ref",
+  "push",
+  "pull",
+  "subtree",
+  "filter-branch",
+  "filter-repo",
+  "replace",
+  "notes",
+]);
+// Global options whose value is the next word, e.g. git -C <path> commit.
+const OPTIONS_WITH_VALUE = new Set([
+  "-C",
+  "-c",
+  "--git-dir",
+  "--work-tree",
+  "--namespace",
+  "--exec-path",
+]);
+const SHELL_TOOLS = new Set(["Bash", "mcp__rea__run_command"]);
+
+/** The history-writing git subcommand a shell command line runs, if any. */
+export function gitHistoryWrite(command) {
+  for (const segment of String(command).split(/&&|\|\||[;|\n&()`]|\$\(/u)) {
+    const words = segment.trim().split(/\s+/u);
+    let index = words.findIndex((word) => /(?:^|\/)git$/u.test(word));
+    if (index < 0) continue;
+    index += 1;
+    while (index < words.length && words[index].startsWith("-")) {
+      const option = words[index];
+      index += OPTIONS_WITH_VALUE.has(option) && !option.includes("=") ? 2 : 1;
+    }
+    const subcommand = words[index];
+    const rest = words.slice(index + 1);
+    if (subcommand === undefined) continue;
+    if (HISTORY_WRITES.has(subcommand)) return subcommand;
+    // Moving a branch to another commit rewrites history; unstaging doesn't.
+    if (
+      subcommand === "reset" &&
+      rest.some((word) => /^--(?:soft|hard|keep|merge)$/u.test(word))
+    )
+      return "reset";
+    // Listing tags and stashes reads; creating or dropping them writes.
+    if (
+      subcommand === "tag" &&
+      rest.some(
+        (word) => !/^(?:-l|--list|-n\d*|--sort=.*|--contains)$/u.test(word),
+      )
+    )
+      return "tag";
+    if (subcommand === "stash" && !["list", "show"].includes(rest[0]))
+      return "stash";
+  }
+  return undefined;
+}
+
+/** The refusal for an agent's history-writing git command, if it sent one. */
+const gitHistoryRefusal = (toolName, toolInput) => {
+  if (!SHELL_TOOLS.has(toolName)) return undefined;
+  const subcommand = gitHistoryWrite(toolInput?.command ?? "");
+  if (subcommand === undefined) return undefined;
+  return `git ${subcommand} is refused: the user makes every commit and every change to git history, never the agent. Leave the changes in the working tree, say what is ready, and ask the user to commit.`;
+};
+
 /** A tool result that reports failure. */
 const failed = (response) =>
   response?.isError === true || response?.is_error === true;
@@ -82,6 +164,17 @@ const failed = (response) =>
  */
 export async function gate(input, directory) {
   const event = input.hook_event_name;
+  if (event === "PreToolUse") {
+    const refusal = gitHistoryRefusal(input.tool_name, input.tool_input);
+    if (refusal !== undefined)
+      return {
+        hookSpecificOutput: {
+          hookEventName: event,
+          permissionDecision: "deny",
+          permissionDecisionReason: refusal,
+        },
+      };
+  }
   const store = stateStore(directory, input.session_id);
   if (event === "UserPromptSubmit") {
     await store.write({ pending: false, declared: false });

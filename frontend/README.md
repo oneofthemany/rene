@@ -290,7 +290,32 @@ turn (calls sent in the same message as it pass), and a turn that would end
 without a successful declaration is sent back once. The gate follows the
 turn from the hook events themselves, keeping one small state file per
 session in `.workbench-agent/topic-gate/`, rather than from the transcript,
-which Claude Code writes a little after the fact. While rene is disconnected the agent can't use tools until it is
+which Claude Code writes a little after the fact.
+
+### The user makes every commit
+
+No agent writes git history, whichever agent it is and whatever tool it uses.
+The workbench starts every agent (Claude Code, Copilot CLI and the
+registration agents alike) with git's environment configuration
+(`GIT_CONFIG_COUNT`/`KEY`/`VALUE`) pointing `core.hooksPath` at
+`frontend/agent-git-hooks/`. Every process the agent starts inherits it,
+including rene in its container, which the container launcher forwards it to.
+There, git's own hooks refuse:
+
+- `reference-transaction`: any reference update that writes history. That's
+  moving or deleting a branch (commit, merge, rebase, cherry-pick, revert,
+  reset, pull), creating or changing tags, stashes, notes and replacements,
+  and new commits only HEAD or a brand-new branch would hold (a first commit,
+  an orphan branch, a commit on a detached HEAD).
+- `pre-push`: every push.
+
+Fetching, creating and switching branches at existing commits, detaching,
+staging, unstaging and reading history stay allowed. You, outside an agent
+session, are unaffected. In agent sessions the repository's own hooks don't
+run, since nothing they guard can happen there. For Claude Code the topic gate
+also refuses those git commands before they run, so the agent is told why
+straight away; the agent instructions and each project assessment's Rules say
+the same. While rene is disconnected the agent can't use tools until it is
 reconnected. Copilot CLI and registration agents only get the instruction.
 
 Besides declared relations, topics are linked by fact: two topics whose calls

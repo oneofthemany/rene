@@ -78,3 +78,6 @@ website/_site/
 # Temporary translation output prepared before replacing the complete site.
 website/.i18n-*/
 /.rene/assessment.md
+
+# CodeGraph indexes (index_source_graph)
+.codegraph/

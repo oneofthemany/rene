@@ -1,0 +1,68 @@
+#!/bin/sh
+# rene: the user makes every commit, never an agent.
+#
+# The workbench points every agent session's git at this folder (through
+# GIT_CONFIG_COUNT/KEY/VALUE in the agent's environment, which reaches every
+# process the agent starts, including rene in its container). git runs this
+# hook for every reference update; in the "prepared" state a nonzero exit
+# aborts the whole update. Refused: moving or deleting a branch (commit,
+# merge, rebase, cherry-pick, revert, reset, pull) and creating or changing
+# tags, stashes, notes and replacements. Allowed: fetching (remote-tracking
+# refs), updates that leave a reference where it was, and pointing HEAD or a
+# new branch at a commit some existing reference already contains (checking
+# out, creating a branch from existing history). A commit only HEAD or a
+# brand-new branch would hold (the first commit of a repository, an orphan
+# branch, a commit on a detached HEAD) is new history, so it's refused too.
+
+[ "$1" = prepared ] || exit 0
+
+# Whether a commit is already in history some reference holds.
+existing() {
+  [ -n "$(git for-each-ref --contains "$1" --count=1 2>/dev/null)" ]
+}
+
+refused=""
+while read -r old new ref; do
+  # Pointing a symbolic reference (HEAD) at another branch writes nothing.
+  case "$new" in ref:*) continue ;; esac
+  case "$ref" in
+    # Fetched remote-tracking branches are someone else's history.
+    refs/remotes/*) continue ;;
+    refs/*)
+      # Deleting a branch, tag, note or stash discards history. (git branch
+      # -D reports the old value as zeros, so this comes before the
+      # unchanged-value check.)
+      case "$new" in
+        *[!0]*) ;;
+        *)
+          refused="$refused $ref"
+          continue
+          ;;
+      esac
+      [ "$old" = "$new" ] && continue
+      # A new branch at a commit existing history holds writes nothing.
+      case "$ref" in
+        refs/heads/*)
+          case "$old" in
+            *[!0]*) ;;
+            *) existing "$new" && continue ;;
+          esac
+          ;;
+      esac
+      refused="$refused $ref"
+      ;;
+    HEAD)
+      # Detaching at an existing commit reads; a commit only HEAD holds is
+      # new history.
+      [ "$old" = "$new" ] && continue
+      case "$new" in *[!0]*) ;; *) continue ;; esac
+      existing "$new" || refused="$refused HEAD"
+      ;;
+    # git's own bookkeeping: ORIG_HEAD, AUTO_MERGE, MERGE_HEAD, FETCH_HEAD...
+    *) ;;
+  esac
+done
+
+[ -z "$refused" ] && exit 0
+echo "rene: refused to change git history ($refused ). The user makes every commit, never the agent: leave the changes in the working tree, say what is ready, and ask the user to commit." >&2
+exit 1

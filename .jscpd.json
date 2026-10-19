@@ -9,6 +9,7 @@
     ".devin/**",
     "tests/fixtures/**",
     "third_party/**",
+    "packages/codegraph/**",
     "tests/conformance/**/*.c",
     "tests/conformance/**/*.m",
     "tests/conformance/**/*.swift",

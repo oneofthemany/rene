@@ -1,0 +1,5 @@
+#!/bin/sh
+# rene: the user makes every commit and every push, never an agent. See
+# reference-transaction in this folder for how agent sessions get this hook.
+echo "rene: refused to push. The user pushes, never the agent: say what is ready and ask the user." >&2
+exit 1

@@ -194,8 +194,22 @@
       ],
       "outputs": [".cache/mcp-tool-catalog.json"]
     },
+    "codegraph:build": {
+      "inputs": [
+        "scripts/build-codegraph.mjs",
+        "packages/codegraph/package.json",
+        "packages/codegraph/package-lock.json",
+        "packages/codegraph/tsconfig.json",
+        "packages/codegraph/src/**",
+        "packages/codegraph/scripts/**",
+        "packages/codegraph/ui/**",
+        "!packages/codegraph/ui/node_modules/**",
+        "!packages/codegraph/**/*.test.ts"
+      ],
+      "outputs": ["packages/codegraph/dist/**"]
+    },
     "artifacts:skills": {
-      "dependsOn": ["compile"],
+      "dependsOn": ["compile", "codegraph:build"],
       "inputs": [
         "package.json",
         "package-lock.json",

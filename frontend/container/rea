@@ -33,7 +33,9 @@ esac
 while IFS= read -r variable; do
   case "$variable" in
     REA_REGISTRATION_ENTRYPOINT) ;;
-    REA_* | GHIDRA_* | HOPPER_* | JAVA_HOME | NO_COLOR | FORCE_COLOR | XDG_CACHE_HOME | XDG_CONFIG_HOME | XDG_DATA_HOME)
+    # GIT_CONFIG_*: an agent session's git configuration, which carries the
+    # workbench's agent git hooks (the user makes every commit) into rene.
+    REA_* | GHIDRA_* | HOPPER_* | JAVA_HOME | NO_COLOR | FORCE_COLOR | XDG_CACHE_HOME | XDG_CONFIG_HOME | XDG_DATA_HOME | GIT_CONFIG_COUNT | GIT_CONFIG_KEY_* | GIT_CONFIG_VALUE_*)
       args+=(--env "$variable=${!variable}")
       ;;
   esac

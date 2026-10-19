@@ -182,6 +182,12 @@ export const zipTypeOf = (path: string): string | undefined => {
   return undefined;
 };
 
+/** Source trees CodeGraph parses: index the project root, then explore it. */
+const SOURCE_GRAPH = [
+  ["index_source_graph", "path"],
+  ["explore_source_graph", "path"],
+] as const;
+
 /**
  * REA tools that accept each file type. "path" tools take the file (or, for
  * source trees, the project root) directly; "open_binary" means the type is
@@ -243,6 +249,7 @@ export const TOOLS_FOR_TYPE: Readonly<
     ["open_binary", "open_binary"],
   ],
   javascript: [
+    ...SOURCE_GRAPH,
     ["analyze_javascript_application", "path"],
     ["recover_javascript_sources", "path"],
     ["open_binary", "open_binary"],
@@ -262,9 +269,21 @@ export const TOOLS_FOR_TYPE: Readonly<
   ],
   har: [["inspect_web_network_capture", "path"]],
   "python-source": [
+    ...SOURCE_GRAPH,
     ["inspect_python_blocking_calls", "path"],
     ["inspect_python_docs_drift", "path"],
   ],
+  "typescript-source": SOURCE_GRAPH,
+  "java-source": SOURCE_GRAPH,
+  "kotlin-source": SOURCE_GRAPH,
+  "c-source": SOURCE_GRAPH,
+  "cpp-source": SOURCE_GRAPH,
+  "rust-source": SOURCE_GRAPH,
+  "go-source": SOURCE_GRAPH,
+  "swift-source": SOURCE_GRAPH,
+  "csharp-source": SOURCE_GRAPH,
+  "objective-c-source": SOURCE_GRAPH,
+  "solidity-source": SOURCE_GRAPH,
   "sigrok-session": [["decode_signal_recording", "path"]],
   squashfs: [
     ["inspect_firmware_regions", "path"],
