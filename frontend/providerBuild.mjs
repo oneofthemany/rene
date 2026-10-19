@@ -106,13 +106,17 @@ const UNPACK = {
   ],
 };
 
-/** Unpacks an archive and returns its single top-level folder. */
+/**
+ * Unpacks an archive and returns its single top-level folder, or the unpack
+ * folder itself for archives whose files sit at the top (`flat`).
+ */
 async function unpack(release, file, staging, signal) {
   const target = join(staging, "unpacked");
   await mkdir(target);
   // tar and unzip refuse absolute and ../ member names by default.
   const [command, args] = UNPACK[release.archive](file, target);
   await tool(command, args, { signal }, release.label);
+  if (release.flat) return target;
   const entries = await readdir(target, { withFileTypes: true });
   if (entries.length !== 1 || !entries[0].isDirectory())
     throw new BuildError(
@@ -246,7 +250,12 @@ export async function verifyContent(release, content, env, signal) {
     release.label,
   );
   const output = `${stdout}\n${stderr}`;
-  if (!release.check.expect.test(output))
+  // A function takes the release's version, which an approved update sets.
+  const expect =
+    typeof release.check.expect === "function"
+      ? release.check.expect(release.version)
+      : release.check.expect;
+  if (!expect.test(output))
     throw new BuildError(
       `${release.label}: the installed tool reported ${JSON.stringify(output.trim().slice(0, 300))}, not the expected version.`,
     );

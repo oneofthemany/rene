@@ -1,7 +1,9 @@
 // Update checks for downloaded providers.
 //
-// Only releases REA accepts are offered: Java 21 patch releases and Ghidra
-// 12.1.x. JADX and Kuna stay on the versions REA pins and verified. The
+// Only releases REA accepts are offered: Java 21 patch releases, Ghidra
+// 12.1.x and DuckDB 1.x (a database can only be read by a DuckDB at least as
+// new as its writer). JADX and Kuna stay on the versions REA pins and
+// verified. The
 // upstream release metadata supplies each candidate's size and SHA-256; a
 // release the user approves is recorded in <providers>/pins.json, which then
 // replaces the built-in pin and is checked like it on download.
@@ -76,7 +78,32 @@ async function latestGhidra(_host, signal) {
   return candidates[0];
 }
 
-const SOURCES = { jdk: latestJdk, ghidra: latestGhidra };
+/** Newest DuckDB 1.x CLI for this architecture; REA accepts only 1.x. */
+async function latestDuckdb(host, signal) {
+  const architecture = host === "linux-arm64" ? "arm64" : "amd64";
+  const releases = await getJson(
+    "https://api.github.com/repos/duckdb/duckdb/releases?per_page=20",
+    signal,
+  );
+  const candidates = releases
+    .filter((release) => !release.draft && !release.prerelease)
+    .map((release) => {
+      const version = /^v(1\.\d+\.\d+)$/.exec(release.tag_name)?.[1];
+      const asset = release.assets?.find(
+        (candidate) =>
+          candidate.name === `duckdb_cli-linux-${architecture}.zip`,
+      );
+      const sha256 = asset?.digest?.replace(/^sha256:/, "");
+      return version && asset && sha256
+        ? { version, url: asset.browser_download_url, sha256, size: asset.size }
+        : undefined;
+    })
+    .filter(Boolean)
+    .sort((a, b) => compareVersions(b.version, a.version));
+  return candidates[0];
+}
+
+const SOURCES = { jdk: latestJdk, ghidra: latestGhidra, duckdb: latestDuckdb };
 
 /** A pin is usable only with an https URL, a SHA-256 and a positive size. */
 const validPin = (pin) =>

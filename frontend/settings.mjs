@@ -63,6 +63,9 @@ export const PROVIDER_SETTINGS = [
   { name: "REA_PWNTOOLS_PYTHON", label: "pwntools Python", kind: "file" },
   { name: "REA_UNBLOB_COMMAND", label: "Unblob launcher", kind: "file" },
   { name: "REA_MITMDUMP_COMMAND", label: "mitmdump", kind: "file" },
+  { name: "REA_DUCKDB_COMMAND", label: "DuckDB CLI", kind: "file" },
+  { name: "REA_RIZIN_COMMAND", label: "rizin", kind: "file" },
+  { name: "REA_WAKARU_COMMAND", label: "Wakaru", kind: "file" },
   // The default analysis engine, chosen with the "What you use" switches.
   {
     name: "REA_ANALYSIS_PROVIDER",

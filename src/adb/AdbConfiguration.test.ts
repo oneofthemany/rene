@@ -49,6 +49,23 @@ describe("parseAdbVersionOutput", () => {
     });
   });
 
+  it("reads a distribution build version suffixed without a separator", () => {
+    expect(
+      parseAdbVersionOutput(
+        [
+          "Android Debug Bridge version 1.0.41",
+          "Version 37.0.0p1-android-tools",
+          "Installed as /usr/bin/adb",
+          "Running on Linux 7.2.11-200.fc44.x86_64 (x86_64)",
+          "",
+        ].join("\n"),
+      ),
+    ).toEqual({
+      version: "37.0.0p1-android-tools",
+      installedPath: "/usr/bin/adb",
+    });
+  });
+
   it("reports null identity fields when the named lines are absent", () => {
     expect(parseAdbVersionOutput("unexpected output")).toEqual({
       version: null,

@@ -13,6 +13,7 @@ import { ProviderAdapterError } from "../../../src/domain/providerAdapterError.j
 import { ProviderCleanupError } from "../../../src/domain/providerCleanupError.js";
 import { err, ok as resultOk } from "../../../src/domain/result.js";
 import { createEvidenceBundle } from "../../../src/domain/evidenceBundle.js";
+import { projectAnalysisError } from "../../../src/domain/analysisErrorProjection.js";
 import { createEvidence } from "../../../src/domain/evidence.js";
 import { thinMach } from "../../../src/domain/binaryTarget.fixture.js";
 import { observed as ok } from "../../fixtures/analysisExecution.js";
@@ -1628,6 +1629,17 @@ it("requires explicit close before an external mutation of an active Ghidra sess
       message: expect.stringContaining(
         "Close the active Ghidra session explicitly",
       ),
+    },
+  });
+  if (result.ok)
+    throw new Error("expected the external mutation to be refused");
+  // A precondition the caller can clear, not unreadable provider output.
+  expect(projectAnalysisError(result.error)).toMatchObject({
+    code: "capability_unavailable",
+    retryable: false,
+    remediation: {
+      action:
+        "Call close_binary (with snapshot_path to keep the analysis), then retry execute_rizin_command.",
     },
   });
   expect(mutate).not.toHaveBeenCalled();

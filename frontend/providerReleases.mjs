@@ -168,6 +168,21 @@ const WABT = {
   },
 };
 
+const DUCKDB = {
+  x64: {
+    url: "https://github.com/duckdb/duckdb/releases/download/v1.5.6/duckdb_cli-linux-amd64.zip",
+    sha256: "6e89deac1ebbc36eed0291caf8b567b030c7b86ac35998f71854e22b3c5d5e2f",
+    size: 21294383,
+  },
+  arm64: {
+    url: "https://github.com/duckdb/duckdb/releases/download/v1.5.6/duckdb_cli-linux-arm64.zip",
+    sha256: "c544e92c9b7c31fc53c2139802cabd8e2d1b2b3e3f933117f31611239c1402db",
+    size: 19297624,
+  },
+};
+
+const escapeVersion = (version) => version.replace(/[.+]/g, "\\$&");
+
 /**
  * Tools for other kinds of targets, at the versions REA's guides name.
  * Python tools are built with uv (kind "python"); `size` is then an
@@ -268,10 +283,47 @@ const tools = (arch) => [
     },
     purpose: "Saved mitmproxy network captures.",
   },
+  {
+    // Updates follow new DuckDB 1.x releases (providerUpdates.mjs), so the
+    // check takes the version of the release being installed.
+    id: "duckdb",
+    group: "tool",
+    label: "DuckDB CLI",
+    version: "1.5.6",
+    ...DUCKDB[arch],
+    diskBytes: 60 * MiB,
+    archive: "zip",
+    flat: true,
+    settings: { REA_DUCKDB_COMMAND: "duckdb" },
+    check: {
+      command: ["duckdb", "--version"],
+      expect: (version) => new RegExp(`^v${escapeVersion(version)}\\b`, "m"),
+    },
+    purpose: "DuckDB database snapshots, read with the newest DuckDB 1.x.",
+  },
+];
+
+/** Tools REA accepts only on Linux x64. */
+const x64Tools = [
+  {
+    id: "wakaru",
+    group: "tool",
+    label: "Wakaru",
+    version: "1.14.0",
+    url: "https://github.com/pionxzh/wakaru/releases/download/v1.14.0/wakaru-linux-x64.tar.gz",
+    sha256: "db0e620034723195ab426e94d00d55dbd8fd0106a928ada2563f1103196d09fa",
+    size: 9899060,
+    diskBytes: 26 * MiB,
+    archive: "tar.gz",
+    flat: true,
+    settings: { REA_WAKARU_COMMAND: "wakaru" },
+    check: { command: ["wakaru", "--version"], expect: /^wakaru 1\.14\.0$/m },
+    purpose: "Bundled JavaScript: recovered modules and readable sources.",
+  },
 ];
 
 /** Pinned releases per host: analysis providers, then tools. */
 export const RELEASES = {
-  "linux-x64": [...RELEASE_TABLE["linux-x64"], ...tools("x64")],
+  "linux-x64": [...RELEASE_TABLE["linux-x64"], ...tools("x64"), ...x64Tools],
   "linux-arm64": [...RELEASE_TABLE["linux-arm64"], ...tools("arm64")],
 };

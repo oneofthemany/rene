@@ -48,7 +48,8 @@ Options:
   --dry-run             Show the plan (and available updates) and exit.
   --no-updates          Don't check for updates.
   --only ID,ID          Install just these (jdk, ghidra, jadx, kuna, apktool,
-                        wabt, pwntools, unblob, mitmproxy).
+                        wabt, pwntools, unblob, mitmproxy, duckdb,
+                        wakaru).
   --settings PATH       Workbench settings file (default: frontend/.workbench-settings.json).
   --providers-dir PATH  Where providers go (default: ${defaultProvidersDir()}).
   -h, --help            Show this help.`);

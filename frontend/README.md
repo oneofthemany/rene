@@ -81,7 +81,7 @@ the versions they name:
 | pwntools  | 4.15.0, pyelftools 0.33, Unicorn 2.1.2 | `REA_PWNTOOLS_PYTHON`    |
 | Unblob    | 26.6.4, with sasquatch for SquashFS    | `REA_UNBLOB_COMMAND`     |
 | mitmproxy | 12.2.3 (mitmdump)                      | `REA_MITMDUMP_COMMAND`   |
-| DuckDB    | 1.5.4 CLI, updated to newer 1.x        | `REA_DUCKDB_COMMAND`     |
+| DuckDB    | 1.5.6 CLI, updated to newer 1.x        | `REA_DUCKDB_COMMAND`     |
 | Wakaru    | 1.14.0 (Linux x64 only)                | `REA_WAKARU_COMMAND`     |
 
 The Python tools are built with your `uv` into relocatable environments from
@@ -153,7 +153,7 @@ changes:
   `~/.cache/rea/hopper-releases` so `rea doctor` accepts the launcher offline
 - binwalk 3.1, sigrok-cli 0.7.2, gdb with pwndbg 2026.09.15 (from its
   source release and hash-locked `uv.lock`), tshark/capinfos, rizin,
-  objdump, a baseline DuckDB 1.5.4 CLI (official release, pinned SHA-256;
+  objdump, a baseline DuckDB 1.5.6 CLI (official release, pinned SHA-256;
   the workbench's updatable DuckDB install takes precedence), Unblob's
   extractors, Chromium and adb, with the `REA_*` paths REA needs set in the
   image

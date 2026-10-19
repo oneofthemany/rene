@@ -80,6 +80,20 @@ export const CHOICES = [
     purpose: "Saved mitmproxy network captures.",
     releases: ["mitmproxy"],
   },
+  {
+    id: "duckdb",
+    group: "Other targets",
+    label: "DuckDB",
+    purpose: "DuckDB databases; offers each new DuckDB 1.x release.",
+    releases: ["duckdb"],
+  },
+  {
+    id: "wakaru",
+    group: "Other targets",
+    label: "Wakaru",
+    purpose: "Bundled JavaScript: recovered modules and sources (Linux x64).",
+    releases: ["wakaru"],
+  },
 ];
 
 const BY_ID = new Map(CHOICES.map((choice) => [choice.id, choice]));

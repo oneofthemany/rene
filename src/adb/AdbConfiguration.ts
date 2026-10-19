@@ -71,11 +71,11 @@ export interface AdbClientIdentity {
 /**
  * Parse `adb version` output. The first line carries the protocol version,
  * `Version ` the build version (no colon), and `Installed as` the binary path.
+ * Distribution builds may suffix the release directly, as in Fedora's
+ * `37.0.0p1-android-tools`.
  */
 export const parseAdbVersionOutput = (stdout: string): AdbClientIdentity => {
-  const build = /^Version\s+(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\s*$/mu.exec(
-    stdout,
-  );
+  const build = /^Version\s+(\d+\.\d+\.\d+[0-9A-Za-z.+-]*)\s*$/mu.exec(stdout);
   const installed = /^Installed as\s+(.+)$/mu.exec(stdout);
   return {
     version: build === null ? null : build[1]!.trim(),

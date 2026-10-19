@@ -7,7 +7,7 @@ import {
 } from "../../domain/analysisProfile.js";
 import {
   AnalysisCancelledError,
-  AnalysisOutputError,
+  AnalysisCapabilityUnavailableError,
 } from "../../domain/analysisErrorCore.js";
 import type { AnalysisError } from "../../domain/analysisErrorBase.js";
 import { err, ok, type Result } from "../../domain/result.js";
@@ -417,11 +417,18 @@ export class BinarySession
       if (!pendingCleanup.ok) return pendingCleanup;
 
       const activeAtDispatch = this.#active;
+      // A session precondition, not provider output: the same request succeeds
+      // once the caller closes the Ghidra session.
       if (activeAtDispatch?.route.binding?.identity.id === "ghidra")
         return err(
-          new AnalysisOutputError(
+          new AnalysisCapabilityUnavailableError(
+            "ghidra",
             operationName,
             "Close the active Ghidra session explicitly before an external mutation; rebinding would discard its ephemeral analysis edits.",
+            {
+              userMessage: `${operationName} cannot run while a Ghidra session is open; closing it here would discard that session's ephemeral analysis edits.`,
+              remediationAction: `Call close_binary (with snapshot_path to keep the analysis), then retry ${operationName}.`,
+            },
           ),
         );
       // A protocol reply does not prove that background writers have stopped.

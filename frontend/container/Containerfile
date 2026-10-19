@@ -55,9 +55,30 @@ ARG REA_HOME
 RUN --mount=type=bind,source=hopper-install.mjs,target=/tmp/hopper-install.mjs \
     HOME="${REA_HOME}" node /tmp/hopper-install.mjs "${REA_REPO}"
 
-# Packet captures (tshark, capinfos).
-RUN dnf -y install --setopt=install_weak_deps=False wireshark-cli \
+# Packet captures (tshark, capinfos), rizin for REA's rizin commands and
+# debug sessions, and binutils for objdump.
+RUN dnf -y install --setopt=install_weak_deps=False wireshark-cli rizin binutils \
   && dnf clean all
+
+# Baseline DuckDB CLI from its official release, for DuckDB database
+# snapshots. REA needs one at least as new as the DuckDB that wrote the
+# database, so the workbench installs DuckDB too and offers each new 1.x
+# release; its saved path takes precedence without rebuilding this image.
+ARG DUCKDB_VERSION=1.5.6
+ARG DUCKDB_SHA256_AMD64=6e89deac1ebbc36eed0291caf8b567b030c7b86ac35998f71854e22b3c5d5e2f
+ARG DUCKDB_SHA256_ARM64=c544e92c9b7c31fc53c2139802cabd8e2d1b2b3e3f933117f31611239c1402db
+ARG TARGETARCH
+RUN case "${TARGETARCH:-amd64}" in \
+      amd64) sum="${DUCKDB_SHA256_AMD64}" ;; \
+      arm64) sum="${DUCKDB_SHA256_ARM64}" ;; \
+      *) echo "No DuckDB CLI for ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+  && curl -fsSL -o /tmp/duckdb.zip \
+      "https://github.com/duckdb/duckdb/releases/download/v${DUCKDB_VERSION}/duckdb_cli-linux-${TARGETARCH:-amd64}.zip" \
+  && echo "${sum}  /tmp/duckdb.zip" | sha256sum -c - \
+  && unzip -q /tmp/duckdb.zip duckdb -d /usr/local/bin \
+  && rm /tmp/duckdb.zip \
+  && /usr/local/bin/duckdb --version
 
 # REA finds these tools only through absolute paths. A path saved in the
 # workbench settings (forwarded by the launcher) takes precedence.
@@ -67,4 +88,7 @@ ENV REA_BINWALK_COMMAND=/usr/bin/binwalk \
     REA_CAPINFOS_COMMAND=/usr/bin/capinfos \
     REA_ADB_PATH=/usr/bin/adb \
     REA_GDB_COMMAND=/usr/bin/gdb \
-    REA_PYTHON_COMMAND=/usr/bin/python3
+    REA_PYTHON_COMMAND=/usr/bin/python3 \
+    REA_RIZIN_COMMAND=/usr/bin/rizin \
+    REA_OBJDUMP_COMMAND=/usr/bin/objdump \
+    REA_DUCKDB_COMMAND=/usr/local/bin/duckdb
