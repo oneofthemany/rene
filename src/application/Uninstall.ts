@@ -27,7 +27,7 @@ import {
   skillDestinations,
 } from "./SetupSkill.js";
 import { classifyClientRegistrationCommand } from "./ClientRegistrationIdentity.js";
-import { CURRENT_ENTRYPOINT_PATH } from "../process/CurrentEntrypointPath.js";
+import { REGISTRATION_ENTRYPOINT_PATH } from "../process/CurrentEntrypointPath.js";
 import { dshDocument } from "./DshCordisPatch.js";
 import { resolveClientConfigTransactionPath } from "./ClientConfigPath.js";
 import {
@@ -678,8 +678,10 @@ const isOwnedRegistration = (value: unknown, client: SetupClient): boolean => {
     if (!parsed.success) return false;
     const command = parsed.data.command;
     return (
-      classifyClientRegistrationCommand(command, CURRENT_ENTRYPOINT_PATH) ===
-      "owned"
+      classifyClientRegistrationCommand(
+        command,
+        REGISTRATION_ENTRYPOINT_PATH,
+      ) === "owned"
     );
   }
   const parsed = registrationSchema.safeParse(value);
@@ -688,7 +690,7 @@ const isOwnedRegistration = (value: unknown, client: SetupClient): boolean => {
   return (
     classifyClientRegistrationCommand(
       [command, ...args],
-      CURRENT_ENTRYPOINT_PATH,
+      REGISTRATION_ENTRYPOINT_PATH,
     ) === "owned"
   );
 };

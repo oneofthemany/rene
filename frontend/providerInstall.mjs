@@ -10,8 +10,7 @@
 // resulting paths goes through settings.mjs, which keeps its own backup.
 
 import { execFile } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
-import { createWriteStream } from "node:fs";
+import { randomBytes } from "node:crypto";
 import {
   mkdir,
   readdir,
@@ -24,9 +23,8 @@ import {
 } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
-import { promisify } from "node:util";
+import { buildContent, fingerprint, verifyContent } from "./providerBuild.mjs";
+import { releaseWanted } from "./choices.mjs";
 import { RELEASES } from "./providerReleases.mjs";
 import {
   compareVersions,
@@ -35,7 +33,6 @@ import {
   savePins,
 } from "./providerUpdates.mjs";
 
-const run = promisify(execFile);
 const MARKER = ".rea-workbench-install.json";
 const MiB = 1024 * 1024;
 
@@ -70,7 +67,9 @@ async function installed(root, release) {
     const marker = JSON.parse(
       await readFile(join(finalDir(root, release), MARKER), "utf8"),
     );
-    if (marker.sha256 !== release.sha256) return false;
+    // Installs from before fingerprints recorded only the archive digest.
+    if ((marker.fingerprint ?? marker.sha256) !== fingerprint(release))
+      return false;
     for (const path of Object.values(settingValues(root, release)))
       await stat(path);
     return true;
@@ -79,84 +78,41 @@ async function installed(root, release) {
   }
 }
 
-async function download(release, file, signal, report) {
-  const response = await fetch(release.url, { signal, redirect: "follow" });
-  if (!response.ok || !response.body)
-    throw new InstallError(
-      `${release.label}: download failed with HTTP ${response.status}.`,
-    );
-  const hash = createHash("sha256");
-  let received = 0;
-  let reported = 0;
-  const counted = Readable.fromWeb(response.body).map(
-    (chunk) => {
-      received += chunk.length;
-      if (received > release.size)
-        throw new InstallError(
-          `${release.label}: the download is larger than the pinned ${release.size} bytes.`,
-        );
-      hash.update(chunk);
-      if (
-        received - reported >= release.size / 100 ||
-        received === release.size
-      ) {
-        reported = received;
-        report({ phase: "download", received, total: release.size });
-      }
-      return chunk;
-    },
-    { signal },
+const writeMarker = (dir, release) =>
+  writeFile(
+    join(dir, MARKER),
+    `${JSON.stringify(
+      {
+        id: release.id,
+        version: release.version,
+        url: release.url,
+        fingerprint: fingerprint(release),
+        installedAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    )}\n`,
   );
-  await pipeline(counted, createWriteStream(file, { mode: 0o600 }), {
-    signal,
-  });
-  report({ phase: "verify" });
-  const digest = hash.digest("hex");
-  if (received !== release.size || digest !== release.sha256)
-    throw new InstallError(
-      `${release.label}: the download does not match the pinned release (got ${received} bytes, SHA-256 ${digest}). Nothing was installed.`,
-    );
-}
 
-/** Unpacks into `staging` and returns the folder that becomes the install. */
-async function unpack(release, file, staging, signal) {
-  if (release.archive === "file") {
-    const folder = join(staging, "content");
-    await mkdir(folder);
-    await rename(file, join(folder, release.fileName));
-    return folder;
-  }
-  const target = join(staging, "unpacked");
-  await mkdir(target);
-  // Both tools refuse absolute and ../ member names by default.
-  const [command, args] =
-    release.archive === "zip"
-      ? ["unzip", ["-q", file, "-d", target]]
-      : ["tar", ["-xzf", file, "-C", target, "--no-same-owner"]];
+/**
+ * Moves a built folder into place. A folder already there is kept when it
+ * is a complete install of this release.
+ */
+async function publish(root, release, content) {
+  const final = finalDir(root, release);
   try {
-    await run(command, args, { signal, maxBuffer: 4 * MiB });
+    await rename(content, final);
+    return true;
   } catch (cause) {
-    if (cause.code === "ENOENT")
-      throw new InstallError(
-        `${release.label}: ${command} is needed to unpack ${release.archive} archives.`,
-      );
+    if (await installed(root, release)) return false;
     throw new InstallError(
-      `${release.label}: ${command} failed: ${(cause.stderr || describe(cause)).trim()}`,
+      `${release.label}: ${final} already exists and is not a complete install from this workbench. Move it aside and retry.`,
+      { cause },
     );
   }
-  const entries = await readdir(target, { withFileTypes: true });
-  if (entries.length !== 1 || !entries[0].isDirectory())
-    throw new InstallError(
-      `${release.label}: expected one top-level folder in the archive, found ${entries.length} entries.`,
-    );
-  return join(target, entries[0].name);
 }
 
-async function installOne(root, release, signal, report) {
-  if (await installed(root, release)) {
-    report({ phase: "present" });
-    return;
-  }
+async function stage(root, release) {
   await mkdir(root, { recursive: true, mode: 0o700 });
   const free = await statfs(root);
   const needed = release.size + release.diskBytes;
@@ -169,37 +125,26 @@ async function installOne(root, release, signal, report) {
     `.staging-${release.id}-${randomBytes(4).toString("hex")}`,
   );
   await mkdir(staging, { mode: 0o700 });
+  return staging;
+}
+
+async function installOne(root, release, { signal, report, env }) {
+  if (await installed(root, release)) {
+    report({ phase: "present" });
+    return;
+  }
+  const staging = await stage(root, release);
   try {
-    const file = join(staging, "download");
-    await download(release, file, signal, report);
-    report({ phase: "unpack" });
-    const content = await unpack(release, file, staging, signal);
-    await writeFile(
-      join(content, MARKER),
-      `${JSON.stringify(
-        {
-          id: release.id,
-          version: release.version,
-          url: release.url,
-          sha256: release.sha256,
-          installedAt: new Date().toISOString(),
-        },
-        null,
-        2,
-      )}\n`,
-    );
+    const content = await buildContent(release, staging, {
+      root,
+      signal,
+      report,
+    });
+    report({ phase: "check" });
+    await verifyContent(release, content, env, signal);
+    await writeMarker(content, release);
     signal.throwIfAborted();
-    try {
-      await rename(content, finalDir(root, release));
-    } catch (cause) {
-      // Another run finished the same release first; keep its copy.
-      if (!(await installed(root, release))) {
-        throw new InstallError(
-          `${release.label}: ${finalDir(root, release)} already exists and is not a complete install from this workbench. Move it aside and retry.`,
-          { cause },
-        );
-      }
-    }
+    await publish(root, release, content);
     report({ phase: "installed" });
   } finally {
     await rm(staging, { recursive: true, force: true });
@@ -227,7 +172,7 @@ async function sweep(root) {
  * Installs releases one at a time; one failing doesn't stop the others.
  * Returns the paths of every release that is now installed.
  */
-async function installEach(root, chosen, signal, emit) {
+async function installEach(root, chosen, { signal, emit, env }) {
   const values = {};
   const failed = [];
   const done = [];
@@ -240,7 +185,12 @@ async function installEach(root, chosen, signal, emit) {
     }
     try {
       report({ phase: "start" });
-      await installOne(root, release, signal, report);
+      // Checks see the paths installed so far, such as Java for Apktool.
+      await installOne(root, release, {
+        signal,
+        report,
+        env: { ...env, ...values },
+      });
       Object.assign(values, settingValues(root, release));
       done.push(release);
     } catch (cause) {
@@ -268,12 +218,11 @@ async function installAndRecord({
   signal,
   emit,
 }) {
-  const { values, failed, done } = await installEach(
-    root,
-    chosen,
+  const { values, failed, done } = await installEach(root, chosen, {
     signal,
     emit,
-  );
+    env: settings.environment(process.env),
+  });
   const changed = Object.keys(values).length
     ? await settings.save(values)
     : false;
@@ -316,7 +265,7 @@ function withJava(ids, components, releases) {
 }
 
 /** One release's plan entry, given the paths REA currently runs with. */
-async function describeRelease(root, release, effective) {
+async function describeRelease(root, release, { effective, uvAvailable }) {
   const here = await installed(root, release);
   const ours = settingValues(root, release);
   const inUse = Object.entries(ours).every(
@@ -338,11 +287,20 @@ async function describeRelease(root, release, effective) {
           : "missing";
   return {
     id: release.id,
+    group: release.group ?? "provider",
+    kind: release.kind ?? "download",
     label: release.label,
     version: release.version,
     purpose: release.purpose,
     url: release.url,
     sha256: release.sha256,
+    packages: release.packages,
+    extras: (release.extras ?? []).map(({ label, url, sha256 }) => ({
+      label,
+      url,
+      sha256,
+    })),
+    blocked: here ? undefined : blockedBy(release, uvAvailable),
     downloadBytes: here ? 0 : release.size,
     diskBytes: here ? 0 : release.diskBytes,
     needs: release.needs,
@@ -352,9 +310,27 @@ async function describeRelease(root, release, effective) {
       Object.keys(ours).map((name) => [name, effective.get(name) ?? ""]),
     ),
     state,
-    recommended: state === "missing" || state === "available",
+    recommended:
+      (state === "missing" || state === "available") &&
+      (here || !blockedBy(release, uvAvailable)),
   };
 }
+
+/** Why a release can't be installed yet, if it can't. */
+function blockedBy(release, uvAvailable) {
+  // uv builds the Python tools; the workbench doesn't install it.
+  if (release.kind === "python" && !uvAvailable)
+    return "Needs uv (https://docs.astral.sh/uv/) on PATH.";
+  return undefined;
+}
+
+/** Whether uv runs; Python tools need it. */
+const uvRuns = () =>
+  new Promise((resolvePromise) =>
+    execFile("uv", ["--version"], { timeout: 10_000 }, (error) =>
+      resolvePromise(!error),
+    ),
+  );
 
 /** Removes this workbench's older installs of a provider after an update. */
 async function pruneOlder(root, release) {
@@ -384,15 +360,28 @@ export function createInstaller({ root, settings, env = process.env }) {
   const current = (overrides) => withPins(root, host, builtIn, overrides);
 
   async function plan() {
-    const releases = await current();
+    const [releases, uvAvailable] = await Promise.all([current(), uvRuns()]);
     const effective = new Map(
       settings
         .describe(env)
         .settings.map((setting) => [setting.name, setting.effective]),
     );
-    const components = await Promise.all(
-      releases.map((release) => describeRelease(root, release, effective)),
-    );
+    const use = settings.use();
+    const components = (
+      await Promise.all(
+        releases.map((release) =>
+          describeRelease(root, release, { effective, uvAvailable }),
+        ),
+      )
+    ).map((component, index) => {
+      // Releases for things the user turned off are listed, not offered.
+      const used = releaseWanted(releases[index], releases, use);
+      return {
+        ...component,
+        used,
+        recommended: component.recommended && used,
+      };
+    });
     return {
       root,
       host,

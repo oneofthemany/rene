@@ -62,7 +62,7 @@ import type {
   SetupProviderEnvironment,
 } from "./SetupTypes.js";
 import type { DoctorScope } from "./Doctor.js";
-import { CURRENT_ENTRYPOINT_PATH } from "../process/CurrentEntrypointPath.js";
+import { REGISTRATION_ENTRYPOINT_PATH } from "../process/CurrentEntrypointPath.js";
 import { analysisProviderSelectorSchema } from "../contracts/providerSelection.js";
 
 /** Resolve the executable and arguments used in a managed MCP registration. */
@@ -91,7 +91,7 @@ const setupRegistration = (
   const registrationCommand = setupRegistrationCommand(
     platform,
     invokingPackageRunner(environment, platform),
-    CURRENT_ENTRYPOINT_PATH,
+    REGISTRATION_ENTRYPOINT_PATH,
   );
   const registrationCommandBlocker =
     registrationCommand.length === 0
@@ -216,7 +216,13 @@ export const systemSetupHost = (
         if (result.cleanupFailure !== undefined)
           pendingLinuxHopperCleanup.retain(result.cleanupFailure);
         if (result.status === "installed")
-          return { status: "installed", launcherPath: result.launcherPath };
+          return {
+            status: "installed",
+            launcherPath: result.launcherPath,
+            ...(result.warning === undefined
+              ? {}
+              : { warning: result.warning }),
+          };
         const failure = setupInstallFailure(
           result.reason,
           result.packageFailure,

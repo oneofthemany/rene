@@ -40,13 +40,15 @@ Downloads pinned, checksum-verified releases of Java 21, Ghidra, the JADX
 MCP JAR and Kuna into the providers folder, then saves their paths for REA.
 Providers REA already points at another copy of are left alone unless named
 with --only. Then checks for newer Java 21 and Ghidra 12.1.x releases and
-asks before updating. Hopper (install-hopper.mjs) and IDA are separate.
+asks before updating. Hopper, binwalk, sigrok-cli, gdb/pwndbg and Chromium
+come with the REA container (frontend/container); IDA needs a license.
 
 Options:
   -y, --yes             Install and update without asking.
   --dry-run             Show the plan (and available updates) and exit.
   --no-updates          Don't check for updates.
-  --only ID,ID          Install just these (jdk, ghidra, jadx, kuna).
+  --only ID,ID          Install just these (jdk, ghidra, jadx, kuna, apktool,
+                        wabt, pwntools, unblob, mitmproxy).
   --settings PATH       Workbench settings file (default: frontend/.workbench-settings.json).
   --providers-dir PATH  Where providers go (default: ${defaultProvidersDir()}).
   -h, --help            Show this help.`);
@@ -70,6 +72,8 @@ const PHASE = {
   start: "starting",
   verify: "checking SHA-256",
   unpack: "unpacking",
+  build: "building with uv",
+  check: "checking the installed version",
   installed: "installed",
   present: "already installed",
   cancelled: "cancelled",
@@ -141,7 +145,7 @@ async function chooseComponents(plan) {
   );
   if (unknown?.length) {
     console.error(
-      `Unknown provider: ${unknown.join(", ")}. Choose from jdk, ghidra, jadx, kuna.`,
+      `Unknown provider: ${unknown.join(", ")}. Choose from ${plan.components.map((c) => c.id).join(", ")}.`,
     );
     process.exit(2);
   }
@@ -158,16 +162,20 @@ async function installMissing(plan) {
   const chosen = await chooseComponents(plan);
   console.log(`Analysis providers (folder: ${plan.root})`);
   for (const component of plan.components) {
+    if (!component.used && !chosen.includes(component)) continue;
     const mark = chosen.includes(component) ? "+" : " ";
     const size = component.downloadBytes
       ? `, download ${mib(component.downloadBytes)}`
       : "";
     console.log(
-      `  ${mark} ${component.label} ${component.version}: ${STATE[component.state]}${size}`,
+      `  ${mark} ${component.label} ${component.version}: ${STATE[component.state]}${size}${component.blocked ? ` (${component.blocked})` : ""}`,
     );
   }
   if (chosen.length === 0) {
-    console.log("Nothing to install.");
+    const off = plan.components.filter((c) => !c.used).map((c) => c.label);
+    console.log(
+      `Nothing to install.${off.length ? ` Not used: ${off.join(", ")} (turn them on in the workbench's Providers page).` : ""}`,
+    );
     return true;
   }
   const total = chosen.reduce((sum, c) => sum + c.downloadBytes, 0);
@@ -175,9 +183,16 @@ async function installMissing(plan) {
   console.log(
     `\nPlan: install ${chosen.map((c) => c.label).join(", ")} (download ${mib(total)}, about ${mib(disk)} on disk).`,
   );
-  for (const component of chosen)
-    if (component.downloadBytes)
-      console.log(`  ${component.url}\n    SHA-256 ${component.sha256}`);
+  for (const component of chosen) {
+    if (!component.downloadBytes) continue;
+    if (component.kind === "python")
+      console.log(
+        `  ${component.label}: built with uv from PyPI: ${component.packages.join(" ")}`,
+      );
+    else console.log(`  ${component.url}\n    SHA-256 ${component.sha256}`);
+    for (const extra of component.extras)
+      console.log(`  ${extra.url}\n    SHA-256 ${extra.sha256}`);
+  }
   console.log(`Paths are saved in ${options.settings}.`);
   if (options["dry-run"]) return true;
   if (!(await confirm("Install these?"))) return true;
@@ -196,7 +211,7 @@ async function installMissing(plan) {
 async function offerUpdates(plan) {
   const ours = new Set(
     plan.components
-      .filter((component) => component.state === "ready")
+      .filter((component) => component.state === "ready" && component.used)
       .map((component) => component.id),
   );
   if (ours.size === 0) return true;

@@ -2,11 +2,18 @@
 // as ready and how to fix it; this view lays out its report.
 
 import { apiJson } from "./api.js";
+import { renderChoices } from "./choices.js";
 import { renderInstallProviders } from "./installProviders.js";
 import { renderProviderPaths } from "./providerPaths.js";
 import { h, renderError } from "./render.js";
 
 let latest;
+
+/** Failing checks, leaving out providers and tools the user turned off. */
+const toFix = ({ report, unused = [] }) =>
+  (report.checks ?? []).filter(
+    (check) => !check.ok && !unused.includes(check.name),
+  );
 
 /** Runs the doctor check and updates the header button with what needs fixing. */
 export async function refreshDoctor() {
@@ -18,13 +25,13 @@ export async function refreshDoctor() {
     button.title = cause.message;
     throw cause;
   }
-  const failing = latest.report.checks?.filter((check) => !check.ok) ?? [];
+  const failing = toFix(latest);
   button.textContent = failing.length
     ? `Providers, ${failing.length} to fix`
     : "Providers ready";
   button.title = failing.length
     ? `Not ready: ${failing.map((check) => check.name).join(", ")}`
-    : "Every rea doctor check passed.";
+    : "Everything you use is ready.";
   button.dataset.ready = latest.report.checks?.some((check) => check.ok)
     ? "some"
     : "none";
@@ -54,19 +61,30 @@ const stateLabel = (check) =>
     : (STATE_TEXT[check.classification] ??
       (check.classification ?? "Not ready").replace(/_/g, " "));
 
-function checkRow(check) {
+function checkRow(check, unused = []) {
+  const notUsed = !check.ok && unused.includes(check.name);
   return h(
     "tr",
     {},
     h("td", {}, h("code", {}, check.name)),
     h(
       "td",
-      { class: check.ok ? "doctor-state-ready" : "doctor-state-problem" },
-      stateLabel(check),
+      {
+        class: check.ok
+          ? "doctor-state-ready"
+          : notUsed
+            ? "doctor-state-unused"
+            : "doctor-state-problem",
+      },
+      notUsed ? "Not used" : stateLabel(check),
     ),
     // Some checks repeat their remediation as the detail; show it once.
     h("td", {}, check.detail === check.remediation ? "" : (check.detail ?? "")),
-    h("td", { class: "doctor-fix" }, check.ok ? "" : (check.remediation ?? "")),
+    h(
+      "td",
+      { class: "doctor-fix" },
+      check.ok || notUsed ? "" : (check.remediation ?? ""),
+    ),
   );
 }
 
@@ -91,9 +109,9 @@ function table(headings, rows) {
   );
 }
 
-async function render(container, { report, checkedAt }) {
+async function render(container, { report, checkedAt, unused = [] }) {
   const checks = report.checks ?? [];
-  const failing = checks.filter((check) => !check.ok).length;
+  const failing = toFix({ report, unused }).length;
   const providers = (report.providerInspections ?? []).filter(
     (provider) => provider.available,
   );
@@ -107,12 +125,9 @@ async function render(container, { report, checkedAt }) {
     "Check again",
   );
   const recheckAll = () => showProviders(container, { recheck: true });
-  const [installs, paths] = await Promise.all([
-    renderInstallProviders({
-      onInstalled: recheckAll,
-      hopperReady:
-        report.checks?.find((check) => check.name === "hopper")?.ok === true,
-    }),
+  const [choices, installs, paths] = await Promise.all([
+    renderChoices({ report, onSaved: recheckAll }),
+    renderInstallProviders({ onInstalled: recheckAll }),
     renderProviderPaths({ report, onSaved: recheckAll }),
   ]);
 
@@ -131,11 +146,17 @@ async function render(container, { report, checkedAt }) {
         {},
         failing
           ? `${failing} of ${checks.length} checks need attention. Tools that need a missing provider fail until it is set up.`
-          : `All ${checks.length} checks passed.`,
+          : unused.length
+            ? `Everything you use is ready. ${unused.length} ${unused.length === 1 ? "check is" : "checks are"} for things you turned off.`
+            : `All ${checks.length} checks passed.`,
       ),
+      choices,
       // Installing comes first: it fixes most failing checks in one step.
       installs,
-      table(["Check", "State", "Detail", "How to fix"], checks.map(checkRow)),
+      table(
+        ["Check", "State", "Detail", "How to fix"],
+        checks.map((check) => checkRow(check, unused)),
+      ),
       providers.length
         ? table(
             ["Provider", "Version"],
@@ -156,7 +177,9 @@ async function render(container, { report, checkedAt }) {
             h("summary", {}, "Other findings"),
             table(
               ["Check", "State", "Detail", "Note"],
-              report.informational_checks.map(checkRow),
+              report.informational_checks.map((check) =>
+                checkRow(check, unused),
+              ),
             ),
           )
         : null,

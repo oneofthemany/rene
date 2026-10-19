@@ -1,16 +1,19 @@
 #!/bin/bash
 # Stops a workbench this script started earlier, installs REA's locked
 # dependencies when needed, rebuilds the runtime, offers to download the
-# analysis providers REA is missing (Java, Ghidra, JADX, Kuna; pinned and
-# checksum-verified, into a user-owned folder), and starts the workbench UI.
-# It never installs Node.js or npm, and never uses administrator access.
+# analysis providers and tools REA is missing (pinned and checksum-verified,
+# into a user-owned folder), builds and starts the `rene` podman container
+# that runs REA with its system tools (Hopper, binwalk, gdb, ...), and starts
+# the workbench UI. It never installs Node.js or npm, never changes the host
+# system, and never uses administrator access.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 install=true
 build=true
 providers=ask
-hopper=true
+container=true
+rebuild_container=false
 open_browser=true
 dry_run=false
 stop_only=false
@@ -25,16 +28,21 @@ Usage: frontend/start.sh [options] [-- bridge options]
 Stops the workbench this script started earlier (if it is still running),
 checks the Node.js toolchain, runs `npm ci` when installed dependencies do not
 match package-lock.json, runs `npm run build:cached`, offers to download the
-analysis providers REA is missing (frontend/install-providers.mjs), then
-starts the REA workbench and opens it in your browser.
+analysis providers and tools REA is missing (frontend/install-providers.mjs),
+builds the REA container image when its recipe changed (asks first), starts
+the `rene` container, then starts the REA workbench and opens it in your
+browser. REA runs inside the container (frontend/container/rea).
 
 Options:
   --no-install   Never run npm ci; fail if dependencies are stale.
   --no-build     Skip npm run build:cached.
   --install-providers
                  Download missing providers without asking.
-  --no-providers Don't offer to download providers or Hopper.
-  --no-hopper    Don't offer to install Hopper.
+  --no-providers Don't offer to download providers and tools.
+  --rebuild-container
+                 Rebuild the container image even if its recipe is unchanged
+                 (for example to pick up Fedora updates or a new Hopper).
+  --no-container Run REA directly on the host instead of in the container.
   --no-open      Print the URL instead of opening a browser.
   --dry-run      Show the planned steps without running them.
   --stop         Stop the running workbench and exit.
@@ -56,7 +64,8 @@ while (($# > 0)); do
     --no-build) build=false ;;
     --install-providers) providers=yes ;;
     --no-providers) providers=skip ;;
-    --no-hopper) hopper=false ;;
+    --rebuild-container) rebuild_container=true ;;
+    --no-container) container=false ;;
     --no-open) open_browser=false ;;
     --dry-run) dry_run=true ;;
     --stop) stop_only=true ;;
@@ -201,11 +210,18 @@ case "$providers" in
   ask) printf '  %s (asks before downloading)\n' "${provider_install[*]}" ;;
   yes) printf '  %s\n' "${provider_install[*]}" ;;
 esac
-[ "$providers" = skip ] || [ "$hopper" = false ] || printf '  node frontend/install-hopper.mjs (asks before running rea setup --install-hopper)\n'
+container_script="$repo_root/frontend/container/container.sh"
+if [ "$container" = true ]; then
+  image_state="$("$container_script" image-state)"
+  if [ "$rebuild_container" = true ] || [ "$image_state" != current ]; then
+    printf '  %s build (image is %s; asks before building)\n' "$container_script" "$image_state"
+  fi
+  printf '  %s ensure (start the rene container)\n' "$container_script"
+  launch+=(--rea "$repo_root/frontend/container/rea")
+fi
 printf '  %s\n' "${launch[*]}"
 if [ "$dry_run" = true ]; then
   [ "$providers" = skip ] || { printf '\n'; node frontend/install-providers.mjs --dry-run; }
-  [ "$providers" = skip ] || [ "$hopper" = false ] || node frontend/install-hopper.mjs --dry-run
   exit 0
 fi
 
@@ -223,9 +239,26 @@ if [ "$providers" != skip ]; then
   printf '\n==> Analysis providers\n'
   # A failed or declined download leaves REA usable; the Providers page can retry.
   "${provider_install[@]}" || printf 'Some providers were not installed; the workbench starts anyway. Retry from its Providers page.\n'
-  if [ "$hopper" = true ]; then
-    node frontend/install-hopper.mjs || printf 'Hopper was not installed; the workbench starts anyway. Retry from its Providers page.\n'
+fi
+
+if [ "$container" = true ]; then
+  printf '\n==> REA container\n'
+  if [ "$rebuild_container" = true ] || [ "$image_state" != current ]; then
+    build_args=(build)
+    [ "$providers" = yes ] && build_args+=(--yes)
+    if ! "$container_script" "${build_args[@]}"; then
+      if [ "$image_state" = missing ]; then
+        printf 'No container image; REA runs on the host without its system tools.\n'
+        container=false
+        launch=(node frontend/server.mjs)
+        [ "$open_browser" = true ] && launch+=(--open)
+        launch+=(--pid-file "$pid_file" ${server_args[@]+"${server_args[@]}"})
+      else
+        printf 'Keeping the existing container image.\n'
+      fi
+    fi
   fi
+  [ "$container" = true ] && "$container_script" ensure
 fi
 
 printf '\n==> Starting the workbench (Ctrl+C to stop)\n'

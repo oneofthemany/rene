@@ -15,7 +15,7 @@ import { valid } from "semver";
 
 import { RegularFileCleanupFailure } from "./RegularFileRead.js";
 import { PRODUCT_IDENTITY } from "../identity.js";
-import { CURRENT_ENTRYPOINT_PATH } from "../process/CurrentEntrypointPath.js";
+import { REGISTRATION_ENTRYPOINT_PATH } from "../process/CurrentEntrypointPath.js";
 import {
   MCP_STARTUP_POLICY,
   mcpProviderDeadlineAllowanceMs,
@@ -119,7 +119,7 @@ export interface ClientRegistrationInspection {
 /** Project diagnostics from the same inspection used to select maintenance. */
 export const readClientRegistrationStatuses = async (
   home: string,
-  currentCommandPath: string | undefined = CURRENT_ENTRYPOINT_PATH,
+  currentCommandPath: string | undefined = REGISTRATION_ENTRYPOINT_PATH,
   options: ClientRegistrationReadOptions = {},
 ): Promise<readonly ClientRegistrationStatus[]> =>
   (
@@ -131,7 +131,7 @@ export const readClientRegistrationStatuses = async (
  */
 export const readClientRegistrationInspections = async (
   home: string,
-  currentCommandPath: string | undefined = CURRENT_ENTRYPOINT_PATH,
+  currentCommandPath: string | undefined = REGISTRATION_ENTRYPOINT_PATH,
   options: ClientRegistrationReadOptions = {},
 ): Promise<readonly ClientRegistrationInspection[]> => {
   const inspections: ClientRegistrationInspection[] = [];

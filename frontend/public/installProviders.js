@@ -3,7 +3,6 @@
 // restarts REA; this view picks what to install and shows progress.
 
 import { api, apiJson, ndjson } from "./api.js";
-import { renderHopperPanel } from "./hopperPanel.js";
 import { h, renderError } from "./render.js";
 
 const mib = (bytes) => `${Math.round(bytes / 1024 / 1024)} MiB`;
@@ -25,6 +24,10 @@ function phaseText(event) {
       return "Checking SHA-256…";
     case "unpack":
       return "Unpacking…";
+    case "build":
+      return "Building with uv…";
+    case "check":
+      return "Checking version…";
     case "installed":
       return "Installed";
     case "present":
@@ -36,6 +39,34 @@ function phaseText(event) {
     default:
       return event.phase;
   }
+}
+
+const CONTAINER_STATE = {
+  current: "built",
+  stale: "built from an older recipe; start.sh rebuilds it",
+  missing: "not built yet; start.sh builds it",
+};
+
+/** The container holds the system tools; start.sh builds and runs it. */
+async function containerNote() {
+  const status = await apiJson("/api/container").catch(() => undefined);
+  return h(
+    "div",
+    { class: "hint install-manual" },
+    h("h4", {}, "REA container"),
+    h(
+      "p",
+      {},
+      "Hopper (demo), binwalk, sigrok-cli, gdb with pwndbg, Unblob's extractors, Chromium and adb come with the rene podman container (frontend/container), which REA runs in. Run frontend/start.sh to build or update it.",
+    ),
+    status
+      ? h(
+          "p",
+          {},
+          `Image: ${CONTAINER_STATE[status.image] ?? status.image}. Container: ${status.container}.`,
+        )
+      : null,
+  );
 }
 
 const idaNote = () =>
@@ -164,7 +195,8 @@ async function runningCalls() {
 }
 
 function installForm(plan, onInstalled) {
-  const rows = plan.components.map(installRow);
+  // Things the user turned off under "What you use" aren't offered.
+  const rows = plan.components.filter((c) => c.used).map(installRow);
   const byId = new Map(rows.map((row) => [row.component.id, row]));
   const install = h("button", { type: "button", class: "primary" });
   const cancel = h(
@@ -336,7 +368,7 @@ function updateControls(byId, onInstalled) {
  * Renders the install section. onInstalled runs after REA has restarted with
  * the new paths (or after an install started elsewhere finishes).
  */
-export async function renderInstallProviders({ onInstalled, hopperReady }) {
+export async function renderInstallProviders({ onInstalled }) {
   const area = h("section", { class: "provider-install" });
   let plan;
   try {
@@ -361,7 +393,7 @@ export async function renderInstallProviders({ onInstalled, hopperReady }) {
           `Provider downloads support Linux x64 and arm64, not ${plan.host}. Set provider paths below instead.`,
         ),
     ...(plan.supported ? installForm(plan, onInstalled) : []),
-    await renderHopperPanel({ ready: hopperReady, onInstalled }),
+    await containerNote(),
     idaNote(),
   );
   return area;

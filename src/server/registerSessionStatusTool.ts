@@ -19,7 +19,7 @@ import { mcpClientMetadata } from "./mcpClientMetadata.js";
 import type { AvailabilityPolicy } from "../application/CapabilityInventory.js";
 import { toolRegistrationOptions } from "./toolRegistrationOptions.js";
 import { err } from "../domain/result.js";
-import { CURRENT_ENTRYPOINT_PATH } from "../process/CurrentEntrypointPath.js";
+import { REGISTRATION_ENTRYPOINT_PATH } from "../process/CurrentEntrypointPath.js";
 
 /** Provider-owned live probes used by session discovery. */
 export interface SessionAvailabilityProbes {
@@ -110,7 +110,7 @@ export const registerSessionStatusTool = (
       );
       const serverIdentity = createServerIdentity({
         startedAt,
-        commandPath: CURRENT_ENTRYPOINT_PATH,
+        commandPath: REGISTRATION_ENTRYPOINT_PATH,
         catalog: server.catalogIdentity,
         expected: {
           ...(input.expected_package_version === undefined

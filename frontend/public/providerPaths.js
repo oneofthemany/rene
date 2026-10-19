@@ -90,10 +90,13 @@ export async function renderProviderPaths({ report, onSaved }) {
     area.replaceChildren(renderError(undefined, cause.message));
     return area;
   }
-  const rows = described.settings.map((setting) => ({
-    setting,
-    ...pathRow(setting, readiness(setting, report)),
-  }));
+  // The default engine is chosen under "What you use", not as a path.
+  const rows = described.settings
+    .filter((setting) => setting.kind !== "choice")
+    .map((setting) => ({
+      setting,
+      ...pathRow(setting, readiness(setting, report)),
+    }));
   const formError = h("span", { class: "form-error", role: "alert" });
   const save = h(
     "button",

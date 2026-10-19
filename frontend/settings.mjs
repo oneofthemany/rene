@@ -11,11 +11,13 @@
 import { existsSync } from "node:fs";
 import { copyFile, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { isAbsolute } from "node:path";
+import { cleanUse, effectiveUse, ENGINES } from "./choices.mjs";
 
 /**
  * Variables the page may set. `inspection` names the rea doctor provider
  * inspection whose `available` verdict covers the setting; Hopper has no
- * inspection, so `check` names its doctor check instead.
+ * inspection, so `check` names its doctor check instead. Tools without
+ * either have no readiness badge.
  */
 export const PROVIDER_SETTINGS = [
   {
@@ -54,13 +56,56 @@ export const PROVIDER_SETTINGS = [
     kind: "file",
     inspection: "kuna",
   },
+  // Tools for other targets. rea doctor doesn't check these; REA reports
+  // them per session (binary_session's tool_availability).
+  { name: "REA_APKTOOL_COMMAND", label: "Apktool launcher", kind: "file" },
+  { name: "REA_WABT_BIN_DIRECTORY", label: "WABT bin folder", kind: "dir" },
+  { name: "REA_PWNTOOLS_PYTHON", label: "pwntools Python", kind: "file" },
+  { name: "REA_UNBLOB_COMMAND", label: "Unblob launcher", kind: "file" },
+  { name: "REA_MITMDUMP_COMMAND", label: "mitmdump", kind: "file" },
+  // The default analysis engine, chosen with the "What you use" switches.
+  {
+    name: "REA_ANALYSIS_PROVIDER",
+    label: "Default analysis engine",
+    kind: "choice",
+    values: ENGINES,
+  },
 ];
 const BY_NAME = new Map(PROVIDER_SETTINGS.map((entry) => [entry.name, entry]));
 
 export class SettingsError extends Error {}
 
+/** Checks one requested value; "" clears the saved value. */
+async function validate(name, value) {
+  const setting = BY_NAME.get(name);
+  if (!setting) throw new SettingsError(`${name} is not a provider setting.`);
+  if (typeof value !== "string" || value.includes("\0"))
+    throw new SettingsError(`${name} must be a string.`);
+  if (value === "") return;
+  if (setting.kind === "choice") {
+    if (!setting.values.includes(value))
+      throw new SettingsError(
+        `${setting.label}: choose one of ${setting.values.join(", ")}.`,
+      );
+    return;
+  }
+  if (!isAbsolute(value))
+    throw new SettingsError(`${setting.label}: use an absolute path.`);
+  let info;
+  try {
+    info = await stat(value);
+  } catch {
+    throw new SettingsError(`${setting.label}: ${value} does not exist.`);
+  }
+  if (setting.kind === "dir" && !info.isDirectory())
+    throw new SettingsError(`${setting.label}: choose a folder.`);
+  if (setting.kind === "file" && !info.isFile())
+    throw new SettingsError(`${setting.label}: choose a file.`);
+}
+
 export function createSettings(path) {
   let saved = {};
+  let use = {};
   let loadError;
 
   /** Reads the file. A file that can't be read applies nothing and is reported. */
@@ -80,27 +125,21 @@ export function createSettings(path) {
         ([name, value]) => BY_NAME.has(name) && typeof value === "string",
       ),
     );
+    use = cleanUse(parsed?.use);
   }
 
-  /** Checks one requested value; "" clears the saved path. */
-  async function validate(name, value) {
-    const setting = BY_NAME.get(name);
-    if (!setting) throw new SettingsError(`${name} is not a provider setting.`);
-    if (typeof value !== "string" || value.includes("\0"))
-      throw new SettingsError(`${name} must be a path.`);
-    if (value === "") return;
-    if (!isAbsolute(value))
-      throw new SettingsError(`${setting.label}: use an absolute path.`);
-    let info;
-    try {
-      info = await stat(value);
-    } catch {
-      throw new SettingsError(`${setting.label}: ${value} does not exist.`);
-    }
-    if (setting.kind === "dir" && !info.isDirectory())
-      throw new SettingsError(`${setting.label}: choose a folder.`);
-    if (setting.kind === "file" && !info.isFile())
-      throw new SettingsError(`${setting.label}: choose a file.`);
+  /** Writes environment and choices together, keeping the previous file. */
+  async function persist(environment, choices) {
+    if (existsSync(path)) await copyFile(path, `${path}.bak`);
+    await writeFile(
+      `${path}.tmp`,
+      `${JSON.stringify({ environment, use: choices }, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+    await rename(`${path}.tmp`, path);
+    saved = environment;
+    use = choices;
+    loadError = undefined;
   }
 
   return {
@@ -144,15 +183,21 @@ export function createSettings(path) {
         else next[name] = value;
       }
       if (JSON.stringify(next) === JSON.stringify(saved)) return false;
-      if (existsSync(path)) await copyFile(path, `${path}.bak`);
-      await writeFile(
-        `${path}.tmp`,
-        `${JSON.stringify({ environment: next }, null, 2)}\n`,
-        { mode: 0o600 },
-      );
-      await rename(`${path}.tmp`, path);
-      saved = next;
-      loadError = undefined;
+      await persist(next, use);
+      return true;
+    },
+
+    /** Which choices are on, saved over the defaults. */
+    use: () => effectiveUse(use),
+
+    /** Saves the switches; returns true if anything changed. */
+    async saveUse(changes) {
+      const next = { ...use, ...cleanUse(changes) };
+      if (
+        JSON.stringify(effectiveUse(next)) === JSON.stringify(effectiveUse(use))
+      )
+        return false;
+      await persist(saved, next);
       return true;
     },
   };

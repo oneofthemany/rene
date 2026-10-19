@@ -1,0 +1,42 @@
+#!/bin/bash
+# Runs this fork's REA inside the `rene` podman container. Agents and the
+# workbench are registered to run this file instead of scripts/rea.mjs:
+# `rea setup` sees REA_REGISTRATION_ENTRYPOINT and registers it.
+#
+# Provider settings (REA_*, JAVA_HOME, GHIDRA_INSTALL_DIR, ...) from the
+# caller's environment are forwarded; everything else comes from the image.
+# stdin/stdout pass through, so `rea mcp` works over stdio.
+set -euo pipefail
+
+self="$(readlink -f "${BASH_SOURCE[0]}")"
+here="$(dirname "$self")"
+repo="$(cd "$here/../.." && pwd)"
+name="${REA_CONTAINER_NAME:-rene}"
+
+state="$(podman container inspect --format '{{.State.Status}}' "$name" 2>/dev/null || echo missing)"
+case "$state" in
+  running) ;;
+  missing)
+    echo "REA container '$name' doesn't exist; run frontend/start.sh in $repo." >&2
+    exit 69
+    ;;
+  *) podman start "$name" >/dev/null ;;
+esac
+
+args=(exec --interactive --env "REA_REGISTRATION_ENTRYPOINT=$self")
+[ -t 0 ] && [ -t 1 ] && args+=(--tty)
+# The container mounts only the home folder; elsewhere, start from home.
+case "$PWD/" in
+  "$HOME"/*) args+=(--workdir "$PWD") ;;
+  *) args+=(--workdir "$HOME") ;;
+esac
+while IFS= read -r variable; do
+  case "$variable" in
+    REA_REGISTRATION_ENTRYPOINT) ;;
+    REA_* | GHIDRA_* | HOPPER_* | JAVA_HOME | NO_COLOR | FORCE_COLOR | XDG_CACHE_HOME | XDG_CONFIG_HOME | XDG_DATA_HOME)
+      args+=(--env "$variable=${!variable}")
+      ;;
+  esac
+done < <(compgen -e)
+
+exec podman "${args[@]}" "$name" node "$repo/scripts/rea.mjs" "$@"

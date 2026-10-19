@@ -56,10 +56,26 @@ const cacheRecordSchema = z.object({
   format: z.literal("rea-signed-hopper-release-v1"),
   family: z.enum(["deb", "rpm", "arch"]),
   release: z.unknown(),
+  feed_main_exe_hash: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/u)
+    .optional(),
 });
 
 export interface VerifiedLinuxHopperPackage {
+  /**
+   * The release row, with `main_exe_hash` naming the launcher inside the
+   * signed package. That is the launcher identity every later check uses.
+   */
   readonly release: LinuxHopperRelease;
+  /**
+   * The release row's own `main_exe_hash` when it names a different launcher
+   * than the signed RPM contains. Hopper's feed lists one digest for every
+   * Linux family (the .deb launcher), and RPM packaging changes the launcher
+   * bytes; the detached signature still binds the RPM, so that package
+   * defines the launcher and this mismatch is reported as a warning.
+   */
+  readonly feedLauncherSha256?: string;
   readonly family: LinuxPackageFamily;
   readonly packageSha256: string;
   readonly publicKey: string;
@@ -84,7 +100,13 @@ const pendingCleanup = new Set<ArtifactResourceScope>();
 /** Immutable cryptographic facts, bounded to eight packages for this process lifetime. */
 const packageProofs = new Map<
   string,
-  Pick<VerifiedLinuxHopperPackage, "primaryFingerprint" | "signingFingerprint">
+  Pick<
+    VerifiedLinuxHopperPackage,
+    "primaryFingerprint" | "signingFingerprint"
+  > & {
+    /** SHA-256 of the launcher inside the signed package. */
+    readonly launcherSha256: string;
+  }
 >();
 const liveLauncherProofs = new Map<string, VerifiedLinuxHopperLauncher>();
 const retainProof = <T>(cache: Map<string, T>, key: string, proof: T): void => {
@@ -244,14 +266,14 @@ export class LinuxHopperPublisher {
         .digest("hex");
       signal?.throwIfAborted();
       const existingProof = packageProofs.get(proofKey);
-      if (existingProof !== undefined)
-        return ok({
-          release,
-          family,
+      if (existingProof !== undefined) {
+        const { launcherSha256, ...fingerprints } = existingProof;
+        return signedPackageIdentity(release, family, launcherSha256, {
           packageSha256,
           publicKey,
-          ...existingProof,
+          ...fingerprints,
         });
+      }
       const verified = await verifyDetachedPgpSignature(
         bytes,
         Buffer.from(release.signature, "base64"),
@@ -283,21 +305,17 @@ export class LinuxHopperPublisher {
           );
         },
       );
-      if (mainExeHash !== release.main_exe_hash)
-        return err(
-          new HopperReleaseError(
-            "integrity",
-            `The signed ${family} package launcher SHA-256 ${mainExeHash} differs from the release main_exe_hash ${release.main_exe_hash}.`,
-          ),
-        );
-      retainProof(packageProofs, proofKey, verified.value);
-      return ok({
-        release,
-        family,
+      const identity = signedPackageIdentity(release, family, mainExeHash, {
         packageSha256,
         publicKey,
         ...verified.value,
       });
+      if (identity.ok)
+        retainProof(packageProofs, proofKey, {
+          ...verified.value,
+          launcherSha256: mainExeHash,
+        });
+      return identity;
     } catch (cause: unknown) {
       return err(releaseFailure(cause, signal, "verification_unavailable"));
     }
@@ -371,6 +389,9 @@ export class LinuxHopperPublisher {
                 format: "rea-signed-hopper-release-v1",
                 family: verified.family,
                 release: verified.release,
+                ...(verified.feedLauncherSha256 === undefined
+                  ? {}
+                  : { feed_main_exe_hash: verified.feedLauncherSha256 }),
               }) + "\n",
               { flag: "wx", mode: 0o600 },
             );
@@ -546,7 +567,9 @@ export class LinuxHopperPublisher {
         );
       const selected = await this.currentRelease(family, signal);
       if (!selected.ok) return selected;
-      if (selected.value.main_exe_hash !== observed.sha256)
+      // An RPM's launcher can differ from the feed's digest; its signed
+      // package decides below.
+      if (selected.value.main_exe_hash !== observed.sha256 && family !== "rpm")
         return err(
           new HopperReleaseError(
             "unsupported_hopper_build",
@@ -578,6 +601,13 @@ export class LinuxHopperPublisher {
           return verified.value;
         },
       );
+      if (verified.release.main_exe_hash !== observed.sha256)
+        return err(
+          new HopperReleaseError(
+            "unsupported_hopper_build",
+            "The selected Hopper launcher does not match an authenticated cached release or the official current Linux demo.",
+          ),
+        );
       if (
         (await this.#hashFileWithResources(path, signal, resources)).sha256 !==
         observed.sha256
@@ -1126,6 +1156,38 @@ const releaseFailure = (
     { cause },
   );
 };
+/**
+ * Binds a signed package to the launcher it contains. The feed digest must
+ * match, except for RPMs: Hopper's feed lists the .deb launcher digest for
+ * every Linux family and RPM packaging changes the launcher bytes, so the
+ * signed RPM's launcher is accepted and the feed digest kept as a warning.
+ */
+const signedPackageIdentity = (
+  release: LinuxHopperRelease,
+  family: LinuxPackageFamily,
+  launcherSha256: string,
+  proof: Omit<
+    VerifiedLinuxHopperPackage,
+    "release" | "family" | "feedLauncherSha256"
+  >,
+): Result<VerifiedLinuxHopperPackage, HopperReleaseError> => {
+  if (launcherSha256 === release.main_exe_hash)
+    return ok({ release, family, ...proof });
+  if (family !== "rpm")
+    return err(
+      new HopperReleaseError(
+        "integrity",
+        `The signed ${family} package launcher SHA-256 ${launcherSha256} differs from the release main_exe_hash ${release.main_exe_hash}.`,
+      ),
+    );
+  return ok({
+    release: { ...release, main_exe_hash: launcherSha256 },
+    feedLauncherSha256: release.main_exe_hash,
+    family,
+    ...proof,
+  });
+};
+
 const launcherIdentity = (
   verified: VerifiedLinuxHopperPackage,
   source: VerifiedLinuxHopperLauncher["source"],

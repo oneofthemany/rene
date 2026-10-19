@@ -162,6 +162,8 @@ export interface LinuxHopperInstallHost {
 export type LinuxHopperInstallResult =
   | ({ readonly status: "installed"; readonly launcherPath: string } & {
       readonly cleanupFailure?: LinuxHopperTemporaryCleanupFailure;
+      /** A non-fatal publisher-metadata discrepancy the operator should see. */
+      readonly warning?: string;
     })
   | ({
       readonly status: "failed";
@@ -360,9 +362,10 @@ export const installLinuxHopper = async (
           packageFailure: install.failure,
         };
       const launcherPath = "/opt/hopper/bin/Hopper";
+      // The verified package names the launcher it contains.
       const launcherStatus = await host.launcherStatus(
         launcherPath,
-        release.main_exe_hash,
+        verified.value.release.main_exe_hash,
       );
       // A layered package that could not be applied live appears after a
       // reboot; the verified archive is already retained for that check.
@@ -374,7 +377,15 @@ export const installLinuxHopper = async (
           reason:
             launcherStatus === "missing" ? "launcher_missing" : launcherStatus,
         };
-      return { status: "installed", launcherPath };
+      return {
+        status: "installed",
+        launcherPath,
+        ...(verified.value.feedLauncherSha256 === undefined
+          ? {}
+          : {
+              warning: `Hopper's release feed lists launcher SHA-256 ${verified.value.feedLauncherSha256}, but the publisher-signed ${distribution.packageFamily} package contains ${verified.value.release.main_exe_hash}; REA accepted the signed package's launcher.`,
+            }),
+      };
     })();
   } catch (cause: unknown) {
     result = {

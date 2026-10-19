@@ -16,8 +16,8 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { Client, ProtocolError } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
+import { CHOICES, checkOwner, ENGINES } from "./choices.mjs";
 import { createHistory } from "./history.mjs";
-import { hopperRoutes } from "./hopperSetup.mjs";
 import { createInstaller, defaultProvidersDir } from "./providerInstall.mjs";
 import { createSettings, SettingsError } from "./settings.mjs";
 
@@ -44,6 +44,15 @@ const { values: options } = parseArgs({
     "providers-dir": { type: "string", default: defaultProvidersDir() },
   },
 });
+
+/**
+ * How to run REA: a JavaScript entrypoint (the fork's scripts/rea.mjs) with
+ * this Node, anything else (the container launcher) directly.
+ */
+const reaCommand = (args) =>
+  /\.[cm]?js$/.test(options.rea)
+    ? { command: process.execPath, args: [options.rea, ...args] }
+    : { command: options.rea, args };
 
 const port = Number.parseInt(options.port, 10);
 const requestTimeoutMs = Number.parseInt(options["timeout-ms"], 10);
@@ -72,10 +81,10 @@ const MODULES = [
   "app.js",
   "browse.js",
   "calls.js",
+  "choices.js",
   "catalog.js",
   "doctor.js",
   "form.js",
-  "hopperPanel.js",
   "markdown.js",
   "installProviders.js",
   "providerPaths.js",
@@ -149,8 +158,7 @@ let starting;
 
 async function startMcp() {
   const transport = new StdioClientTransport({
-    command: process.execPath,
-    args: [options.rea, "mcp"],
+    ...reaCommand(["mcp"]),
     // REA reads provider configuration (REA_*, GHIDRA_*, PATH, ...) from its
     // environment: the bridge's environment as launched, plus saved paths.
     env: settings.environment(process.env),
@@ -280,8 +288,8 @@ function runReaJson(args, timeout) {
   const command = args[0];
   return new Promise((resolvePromise, reject) => {
     execFile(
-      process.execPath,
-      [options.rea, ...args],
+      reaCommand(args).command,
+      reaCommand(args).args,
       {
         timeout,
         maxBuffer: 16 * 1024 * 1024,
@@ -411,7 +419,19 @@ async function doctor(response) {
     .then((report) => ({ report, checkedAt: Date.now() }))
     .finally(() => (doctorRun = undefined));
   try {
-    return sendJson(response, 200, await doctorRun);
+    const { report, checkedAt } = await doctorRun;
+    // Checks for providers and tools the user turned off aren't "to fix".
+    const use = settings.use();
+    const unused = [
+      ...(report.checks ?? []),
+      ...(report.informational_checks ?? []),
+    ]
+      .filter((check) => {
+        const owner = checkOwner(check.name);
+        return owner !== undefined && !use[owner.id];
+      })
+      .map((check) => check.name);
+    return sendJson(response, 200, { report, checkedAt, unused });
   } catch (cause) {
     return sendJson(response, 502, { error: describeError(cause) });
   }
@@ -420,6 +440,9 @@ async function doctor(response) {
 // Readiness and provider paths work while the MCP child is down.
 const PROVIDER_ROUTES = {
   "GET /api/doctor": (_request, response) => doctor(response),
+  "GET /api/choices": (_request, response) =>
+    sendJson(response, 200, describeChoices()),
+  "POST /api/choices": saveChoices,
   "GET /api/settings": (_request, response) =>
     sendJson(response, 200, settings.describe(process.env)),
   "POST /api/settings": saveSettings,
@@ -433,16 +456,27 @@ const PROVIDER_ROUTES = {
   "GET /api/install/updates": async (_request, response) =>
     sendJson(response, 200, await availableUpdates()),
   "POST /api/install/update": updateProviders,
+  "GET /api/container": async (_request, response) =>
+    sendJson(response, 200, await containerStatus()),
   "POST /api/install/cancel": (_request, response) =>
     sendJson(response, 200, { cancelled: installer.cancel() }),
-  ...hopperRoutes({
-    runSetup,
-    planFingerprint,
-    exclusiveSetup,
-    readJsonBody,
-    sendJson,
-  }),
 };
+
+/** The REA container's image and container state, from container.sh. */
+async function containerStatus() {
+  const script = join(here, "container", "container.sh");
+  const ask = (command) =>
+    new Promise((resolvePromise) =>
+      execFile(script, [command], { timeout: 30_000 }, (error, stdout) =>
+        resolvePromise(error ? "unknown" : stdout.trim()),
+      ),
+    );
+  const status = await ask("status");
+  return {
+    image: await ask("image-state"),
+    container: /container \S+: (\S+)/.exec(status)?.[1] ?? "unknown",
+  };
+}
 
 /**
  * Downloads the chosen providers, saves their paths and restarts REA, as
@@ -460,7 +494,7 @@ async function installProviders(request, response) {
 async function availableUpdates() {
   const { components } = await installer.plan();
   const ours = new Set(
-    components.filter((c) => c.state === "ready").map((c) => c.id),
+    components.filter((c) => c.state === "ready" && c.used).map((c) => c.id),
   );
   const { updates, unchecked } = await installer.checkUpdates();
   return {
@@ -524,6 +558,51 @@ async function streamInstall(response, start) {
     write({ type: "error", error: describeError(cause) });
   }
   response.end();
+}
+
+const ENGINE_SETTING = "REA_ANALYSIS_PROVIDER";
+
+function describeChoices() {
+  const engine = settings
+    .describe(process.env)
+    .settings.find((setting) => setting.name === ENGINE_SETTING);
+  return {
+    choices: CHOICES.map(({ id, group, label, purpose, engine: isEngine }) => ({
+      id,
+      group,
+      label,
+      purpose,
+      engine: Boolean(isEngine),
+    })),
+    use: settings.use(),
+    engine: engine.effective || "auto",
+    engineSource: engine.saved ? "saved" : engine.shell ? "shell" : "default",
+  };
+}
+
+/**
+ * Saves the "What you use" switches and the default engine. The engine is
+ * part of REA's environment, so changing it restarts REA.
+ */
+async function saveChoices(request, response) {
+  const body = await readJsonBody(request);
+  const use = { ...settings.use(), ...body?.use };
+  const engine = body?.engine;
+  if (typeof engine !== "string" || !ENGINES.includes(engine))
+    return sendJson(response, 400, {
+      error: `Choose a default engine: ${ENGINES.join(", ")}.`,
+    });
+  if (engine !== "auto" && use[engine] !== true)
+    return sendJson(response, 400, {
+      error: `Turn ${engine} on before making it the default engine.`,
+    });
+  await settings.saveUse(body?.use ?? {});
+  const restart = await settings.save({ [ENGINE_SETTING]: engine });
+  if (restart) {
+    await stopMcp();
+    await ensureMcp();
+  }
+  return sendJson(response, 200, { restarted: restart, ...describeChoices() });
 }
 
 /** Saves provider paths, then restarts REA so it runs with them. */

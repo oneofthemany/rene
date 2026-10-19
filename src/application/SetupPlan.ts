@@ -22,7 +22,7 @@ import {
 import { redirectedWriteBlocker } from "./MsixPackageStorage.js";
 import type { DoctorReport } from "./Doctor.js";
 import { compareUnicodeCodePoints } from "../domain/unicodeCodePointOrder.js";
-import { CURRENT_ENTRYPOINT_PATH } from "../process/CurrentEntrypointPath.js";
+import { REGISTRATION_ENTRYPOINT_PATH } from "../process/CurrentEntrypointPath.js";
 
 /** Read-only setup facts shared by client selection and preflight. */
 export interface SetupDiscovery {
@@ -83,7 +83,7 @@ export const discoverSetupState = async (input: {
         ? undefined
         : classifyClientRegistrationCommand(
             registration.command,
-            CURRENT_ENTRYPOINT_PATH,
+            REGISTRATION_ENTRYPOINT_PATH,
           );
     const ownedRegistration =
       (registration?.state === "aligned" || registration?.state === "stale") &&
@@ -114,7 +114,7 @@ export const discoverSetupState = async (input: {
         (registration.state === "aligned" || registration.state === "stale") &&
         classifyClientRegistrationCommand(
           registration.command,
-          CURRENT_ENTRYPOINT_PATH,
+          REGISTRATION_ENTRYPOINT_PATH,
         ) === "owned",
     )
     .map(({ client }) => client);

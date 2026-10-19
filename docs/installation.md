@@ -565,6 +565,13 @@ that the signed package and installed launcher agree with `main_exe_hash`.
 Rotating signing subkeys remain bound to that primary identity.
 The feed row itself is not PGP-signed; doctor labels its display version as
 `reported_release_version`, separately from the authenticated launcher identity.
+Hopper 6.6.0's feed lists the `.deb` launcher digest for every Linux family,
+and RPM packaging changes the launcher bytes. For a signature-verified RPM,
+this fork therefore accepts the launcher inside that signed package as its
+identity, retains the feed's differing digest as `feed_main_exe_hash` in the
+evidence cache, and setup reports the discrepancy as a warning. A `.deb` or
+Arch package whose launcher differs from the feed still fails integrity
+verification.
 
 The approval plan includes the caller-selected cache location. Approved setup
 retains the signed archive, public key and release metadata under

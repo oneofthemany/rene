@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { promises as filesystem } from "node:fs";
+import { existsSync, promises as filesystem } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import {
   access,
@@ -45,6 +45,10 @@ const verifySignature = signatures.verifyDetachedPgpSignature;
 const sha256 = (bytes: Uint8Array) =>
   createHash("sha256").update(bytes).digest("hex");
 const linux = it.skipIf(process.platform !== "linux");
+const hasCommand = (name: string) =>
+  (process.env.PATH ?? "")
+    .split(":")
+    .some((directory) => directory !== "" && existsSync(join(directory, name)));
 const portableTar = it.skipIf(process.platform === "win32");
 
 afterEach(() => {
@@ -53,7 +57,7 @@ afterEach(() => {
 });
 
 /** Real native archives and cryptography; substitute only the test publisher identity. */
-const fixture = async (family: "deb" | "arch" = "deb") => {
+const fixture = async (family: "deb" | "arch" | "rpm" = "deb") => {
   const directory = await createTestTempDirectory("rea-linux-publisher-");
   const packageRoot = join(directory, "package-root");
   const launcher = join(packageRoot, "opt/hopper/bin/Hopper");
@@ -67,6 +71,29 @@ const fixture = async (family: "deb" | "arch" = "deb") => {
       "Package: hopper-fixture\nVersion: 1.0\nArchitecture: amd64\nMaintainer: Fixture\nDescription: Signature boundary fixture\n",
     );
     await run("dpkg-deb", ["--build", packageRoot, archive]);
+  } else if (family === "rpm") {
+    const top = join(directory, "rpmbuild");
+    const spec = join(directory, "hopper-fixture.spec");
+    await writeFile(
+      spec,
+      `Name: hopper-fixture\nVersion: 1.0\nRelease: 1\nSummary: Signature boundary fixture\nLicense: MIT\n%description\nFixture\n%install\nmkdir -p %{buildroot}/opt/hopper/bin\ncp ${launcher} %{buildroot}/opt/hopper/bin/Hopper\n%files\n/opt/hopper/bin/Hopper\n`,
+    );
+    // Without post-install processing the packaged launcher keeps its bytes.
+    await run("rpmbuild", [
+      "-bb",
+      "--define",
+      `_topdir ${top}`,
+      "--define",
+      "__os_install_post %{nil}",
+      "--define",
+      "debug_package %{nil}",
+      spec,
+    ]);
+    const built = (await readdir(join(top, "RPMS"), { recursive: true })).find(
+      (name) => name.endsWith(".rpm"),
+    );
+    if (built === undefined) throw new Error("rpmbuild produced no package");
+    await copyFile(join(top, "RPMS", built), archive);
   } else await run("tar", ["-cJf", archive, "-C", packageRoot, "opt"]);
   const bytes = await readFile(archive);
   const generated = await generateKey({
@@ -84,7 +111,7 @@ const fixture = async (family: "deb" | "arch" = "deb") => {
   });
   const release: LinuxHopperRelease = {
     version: "1.0",
-    filename: `https://www.hopperapp.com:443/downloader/public/Hopper-1.0-Linux-demo.${family === "deb" ? "deb" : "pkg.tar.xz"}`,
+    filename: `https://www.hopperapp.com:443/downloader/public/Hopper-1.0-Linux-demo.${family === "arch" ? "pkg.tar.xz" : family}`,
     file_length: String(bytes.length),
     file_hash: createHash("sha1").update(bytes).digest("hex"),
     main_exe_hash: sha256(await readFile(launcher)),
@@ -590,6 +617,52 @@ linux(
           f.publicKey,
         ),
       ).toMatchObject({ ok: false, error: { reason: "cancelled" } });
+    } finally {
+      await f.publisher.close();
+    }
+  },
+);
+
+it.skipIf(process.platform !== "linux" || !hasCommand("rpmbuild"))(
+  "accepts a signed RPM whose launcher differs from the feed digest",
+  async () => {
+    // Hopper's feed lists the .deb launcher digest for every Linux family;
+    // the signed RPM's own launcher then defines the identity.
+    const f = await fixture("rpm");
+    admitFixturePublisher(f.fingerprint);
+    const feedDigest = "a".repeat(64);
+    try {
+      expect(
+        await f.publisher.verifyArchive(
+          "rpm",
+          { ...f.release, main_exe_hash: feedDigest },
+          f.archive,
+          undefined,
+          f.publicKey,
+        ),
+      ).toMatchObject({
+        ok: true,
+        value: {
+          family: "rpm",
+          feedLauncherSha256: feedDigest,
+          release: { main_exe_hash: f.release.main_exe_hash },
+        },
+      });
+      // A matching feed digest records no discrepancy.
+      const matching = await f.publisher.verifyArchive(
+        "rpm",
+        f.release,
+        f.archive,
+        undefined,
+        f.publicKey,
+      );
+      expect(matching).toMatchObject({
+        ok: true,
+        value: { release: { main_exe_hash: f.release.main_exe_hash } },
+      });
+      expect(
+        matching.ok ? matching.value.feedLauncherSha256 : "failed",
+      ).toBeUndefined();
     } finally {
       await f.publisher.close();
     }

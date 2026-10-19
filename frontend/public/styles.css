@@ -1319,24 +1319,6 @@ progress {
   margin: 10px 0 0;
 }
 
-.hopper-panel {
-  margin-top: 22px;
-}
-
-.hopper-panel h4 {
-  margin: 0 0 4px;
-  font-size: 15px;
-}
-
-.hopper-plan ul {
-  margin: 4px 0 8px;
-  padding-left: 20px;
-}
-
-.hopper-plan code {
-  overflow-wrap: anywhere;
-}
-
 .provider-updates {
   margin-top: 10px;
 }
@@ -1349,4 +1331,51 @@ progress {
 .update-list .update-action {
   list-style: none;
   margin: 8px 0 0 -20px;
+}
+
+.install-manual h4 {
+  margin: 18px 0 4px;
+  font-size: 15px;
+}
+
+.choices {
+  margin: 20px 0 8px;
+  padding-top: 18px;
+  border-top: 1px solid var(--rule);
+}
+
+.choices h3 {
+  margin: 0 0 6px;
+  font-size: 16px;
+}
+
+.choice-group {
+  margin: 12px 0;
+  padding: 0;
+  border: 0;
+}
+
+.choice-group legend {
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+.choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 4px 0;
+}
+
+.choice input {
+  margin-top: 4px;
+}
+
+.choice label {
+  display: flex;
+  flex-direction: column;
+}
+
+.doctor-state-unused {
+  color: var(--muted);
 }

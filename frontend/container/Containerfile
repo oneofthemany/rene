@@ -1,0 +1,70 @@
+# REA workbench container: the system packages REA's providers and tools
+# need, on Fedora 44, so a read-only (rpm-ostree) host needs no layering.
+#
+# Built by frontend/container/container.sh with this checkout mounted at its
+# host path. REA itself is never copied in: the container runs the fork from
+# that mount, so a host rebuild takes effect without rebuilding the image.
+FROM registry.fedoraproject.org/fedora:44
+
+# Node.js matches .nvmrc. procps-ng provides the ps REA's process supervision
+# needs. Xvfb/xauth/libX11/libXtst/python3 are Hopper's demo runtime. The
+# rest are tools REA's guides name: binwalk 3.1, sigrok-cli 0.7.2, gdb (with
+# pwndbg below), Unblob's extractors, Chromium for web pages, adb and uv.
+RUN dnf -y install --setopt=install_weak_deps=False \
+      nodejs24 procps-ng util-linux which findutils tar xz zstd unzip gzip \
+      ca-certificates python3 uv git \
+      xorg-x11-server-Xvfb xorg-x11-xauth libX11 libXtst \
+      binwalk sigrok-cli gdb unar lz4 lziprecover erofs-utils partclone p7zip-plugins \
+      chromium android-tools \
+  && dnf clean all \
+  && if [ ! -e /usr/bin/node ]; then ln -s /usr/bin/node-24 /usr/bin/node; fi \
+  && node --version
+
+# pwndbg from its source release, with the environment its hash-locked
+# uv.lock describes, for this image's gdb (built with the system Python).
+ARG PWNDBG_VERSION=2026.09.15
+ARG PWNDBG_SHA256=40fbc8857cc4b7547babb60355b49672add10cb153185f04f55a293a82915018
+RUN curl -fsSL -o /tmp/pwndbg.tar.gz \
+      "https://github.com/pwndbg/pwndbg/archive/refs/tags/${PWNDBG_VERSION}.tar.gz" \
+  && echo "${PWNDBG_SHA256}  /tmp/pwndbg.tar.gz" | sha256sum -c - \
+  && mkdir -p /opt/pwndbg \
+  && tar -xzf /tmp/pwndbg.tar.gz -C /opt/pwndbg --strip-components=1 --no-same-owner \
+  && rm /tmp/pwndbg.tar.gz \
+  && python="python$(gdb -nx -batch -ex "pi import sysconfig; print(sysconfig.get_config_var('VERSION'))" | tail -1)" \
+  && uv venv --quiet --python "/usr/bin/${python}" /opt/pwndbg/.venv \
+  && cd /opt/pwndbg \
+  && UV_PROJECT_ENVIRONMENT=/opt/pwndbg/.venv uv sync --quiet --frozen --no-install-project --group build \
+  && UV_PROJECT_ENVIRONMENT=/opt/pwndbg/.venv uv sync --quiet --frozen --no-build-isolation-package pwndbg \
+  && PWNDBG_VENV_PATH=/opt/pwndbg/.venv PWNDBG_NO_AUTOUPDATE=1 gdb -nx -batch \
+       -ex "source /opt/pwndbg/gdbinit.py" -ex "pi import pwndbg; print('pwndbg', pwndbg.__version__)" \
+  && rm -rf /root/.cache
+
+# REA's recorded-crash debugger context. Paths in the user's saved workbench
+# settings take precedence, because the launcher forwards them.
+ENV REA_PWNDBG_GDB=/usr/bin/gdb \
+    REA_PWNDBG_GDBINIT=/opt/pwndbg/gdbinit.py \
+    REA_PWNDBG_VENV_PATH=/opt/pwndbg/.venv \
+    REA_BROWSER_EXECUTABLE=/usr/bin/chromium-browser
+
+# Hopper's official demo, downloaded and verified by this fork's own
+# installer (PGP signature, launcher identity), which then runs dnf. Its
+# evidence goes to the mounted ~/.cache/rea so `rea doctor` can authenticate
+# the launcher offline.
+ARG REA_REPO
+ARG REA_HOME
+RUN --mount=type=bind,source=hopper-install.mjs,target=/tmp/hopper-install.mjs \
+    HOME="${REA_HOME}" node /tmp/hopper-install.mjs "${REA_REPO}"
+
+# Packet captures (tshark, capinfos).
+RUN dnf -y install --setopt=install_weak_deps=False wireshark-cli \
+  && dnf clean all
+
+# REA finds these tools only through absolute paths. A path saved in the
+# workbench settings (forwarded by the launcher) takes precedence.
+ENV REA_BINWALK_COMMAND=/usr/bin/binwalk \
+    REA_SIGROK_COMMAND=/usr/bin/sigrok-cli \
+    REA_TSHARK_COMMAND=/usr/bin/tshark \
+    REA_CAPINFOS_COMMAND=/usr/bin/capinfos \
+    REA_ADB_PATH=/usr/bin/adb \
+    REA_GDB_COMMAND=/usr/bin/gdb \
+    REA_PYTHON_COMMAND=/usr/bin/python3

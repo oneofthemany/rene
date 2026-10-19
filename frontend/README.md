@@ -24,11 +24,12 @@ the new bridge exits with a "port in use" message.
 `packageManager`. It runs `npm ci` only when `scripts/check-dependency-install.mjs`
 reports that installed dependencies don't match `package-lock.json`, then runs
 `npm run build:cached`, offers to download missing analysis providers (see
-[Installing providers](#installing-providers)) and starts the bridge with
-`--open`. It never installs Node.js or npm; a mismatch stops the script with
+[Installing providers](#installing-providers)), builds and starts the REA
+container (see [The REA container](#the-rea-container)) and starts the bridge
+with `--open`. It never installs Node.js or npm; a mismatch stops the script with
 instructions. Use `--dry-run` to see the plan first, `--install-providers` to
 download without asking, and `--no-install`, `--no-build`, `--no-providers`,
-`--no-hopper` or `--no-open` to skip steps. Anything after `--` is passed to the
+`--no-container` or `--no-open` to skip steps. Anything after `--` is passed to the
 bridge:
 
 ```sh
@@ -70,6 +71,21 @@ checkout ends up fully usable:
 | jadx-headless-mcp | 0.7.1 (the JAR REA pins)         | 41 MiB   | `REA_JADX_MCP_JAR`   |
 | Kuna              | 1.833 (the release REA verified) | 21 MiB   | `REA_KUNA_COMMAND`   |
 
+It also installs the tools REA's guides name for other kinds of targets, at
+the versions they name:
+
+| Tool      | Release                                | Sets                     |
+| --------- | -------------------------------------- | ------------------------ |
+| Apktool   | 3.0.3 JAR, run with the Java above     | `REA_APKTOOL_COMMAND`    |
+| WABT      | 1.0.42                                 | `REA_WABT_BIN_DIRECTORY` |
+| pwntools  | 4.15.0, pyelftools 0.33, Unicorn 2.1.2 | `REA_PWNTOOLS_PYTHON`    |
+| Unblob    | 26.6.4, with sasquatch for SquashFS    | `REA_UNBLOB_COMMAND`     |
+| mitmproxy | 12.2.3 (mitmdump)                      | `REA_MITMDUMP_COMMAND`   |
+
+The Python tools are built with your `uv` into relocatable environments from
+pinned versions (uv checks PyPI's hashes), with a uv-managed Python 3.13 kept
+in `<providers-dir>/python`. Every install ends with a version check.
+
 Each release, its URL and its SHA-256 are pinned in `providerReleases.mjs` for
 Linux x64 and arm64. A download that differs in size or digest is discarded.
 Archives are unpacked with `tar`/`unzip` into a staging folder and published by
@@ -94,6 +110,19 @@ finds somewhere else is left alone unless you pick it. Choosing Ghidra or JADX
 also chooses Java when REA has no `JAVA_HOME`. Running it again downloads
 nothing for providers already installed.
 
+### What you use
+
+The Providers page starts with **What you use**: a switch for each engine and
+tool (`choices.mjs` lists them), and the **Default analysis engine**. A tool
+that is off isn't offered by the installer or `start.sh`, and its `rea doctor`
+checks show as "Not used" rather than counting as something to fix; nothing
+is uninstalled. Everything starts on except IDA, which needs your own licence.
+The default engine is saved as `REA_ANALYSIS_PROVIDER` ("Let REA choose" is
+`auto`, which asks when several engines can open a program); only engines
+that are on can be chosen. Agents get it the next time you run Agent setup,
+which records it in their registration. Both are kept in the `--settings`
+file, with its `.bak`.
+
 ### Updates
 
 After installing, the terminal installer checks for newer releases REA accepts
@@ -108,27 +137,47 @@ removed. A pin only ever moves a provider forward from the built-in release.
 Use `--no-updates` to skip the check; a check that can't reach upstream says
 so instead of reporting "up to date".
 
-### Hopper
+### The REA container
 
-`rea setup --install-hopper` owns Hopper: it downloads the official demo
-package, checks its PGP signature, keeps the evidence `rea doctor` later uses
-to accept the launcher, and runs the system package manager, which asks for
-your password in its own prompt. The workbench never handles the password.
-`start.sh` runs `frontend/install-hopper.mjs`, which asks whether to start
-that setup (skip with `--no-hopper`); the Providers page shows setup's plan
-under **Hopper** and installs after **Install Hopper**. Setup also refreshes
-REA's registration in agents it already configured.
+REA itself runs in a podman container, `rene`, built from
+`frontend/container/Containerfile` on Fedora 44. The image carries what can't
+go in a home folder on a read-only (rpm-ostree) host, so the host itself never
+changes:
 
-On rpm-ostree systems such as Fedora Silverblue, this fork's setup layers
-Hopper and Xvfb with `rpm-ostree install` instead of `dnf`, then tries
-`rpm-ostree apply-live`. When the packages can't be applied live (for example
-while an OS update is staged), setup reports `reboot_required`, and the page
-and `install-hopper.mjs` say Hopper appears after a restart.
+- Node.js 24 (`.nvmrc`), and `ps` for REA's process supervision
+- Hopper's official demo with Xvfb, installed by this fork's own Linux
+  installer (publisher PGP signature, launcher identity); its evidence goes to
+  `~/.cache/rea/hopper-releases` so `rea doctor` accepts the launcher offline
+- binwalk 3.1, sigrok-cli 0.7.2, gdb with pwndbg 2026.09.15 (from its
+  source release and hash-locked `uv.lock`), tshark/capinfos, Unblob's
+  extractors, Chromium and adb, with the `REA_*` paths REA needs set in the
+  image
+
+The container runs as your user ID with your home folder mounted at the same
+path and the host's network, so file paths, the settings file and the tools
+installed under `~/.local/share` work unchanged. Files outside your home
+folder are not visible to it. REA runs from this checkout through the mount,
+so `npm run build:cached` takes effect without rebuilding the image.
+
+`frontend/container/rea` is the launcher: it starts the container if needed,
+forwards provider settings (`REA_*`, `JAVA_HOME`, `GHIDRA_*`, `HOPPER_*`) and
+runs `scripts/rea.mjs` inside it over stdio. The workbench bridge uses it, and
+it sets `REA_REGISTRATION_ENTRYPOINT`, so `rea setup` (the Agent setup page)
+registers agents to run the launcher. Agents registered earlier still run REA
+on the host; `rea doctor` reports them as `registration:<client>` until you
+register them again.
+
+`start.sh` builds the image when its recipe changed (it asks first; about
+2 GB), starts the container and points the bridge at the launcher.
+`--rebuild-container` rebuilds anyway (for Fedora updates or a newer Hopper),
+`--no-container` runs REA on the host. `frontend/container/container.sh`
+also has `status`, `stop` and `shell`.
 
 ### IDA
 
 IDA isn't installed: it is commercial Hex-Rays software, and even IDA Free
-needs a Hex-Rays account and license file. Once you have IDA and an IDA MCP
+needs a Hex-Rays account and license file. An IDA MCP server must be reachable
+from the container. Once you have IDA and an IDA MCP
 server installed, choose its registration file under **Provider paths**.
 
 Upstream REA's installers deliberately don't install Java or Ghidra (see
@@ -255,12 +304,13 @@ To change a built-in release, edit its version, URL, size and SHA-256 in
 server.mjs          bridge: MCP child owner, call queue, HTTP boundary
 history.mjs         stored call history: summaries, results, pruning
 settings.mjs        saved provider paths added to REA's environment
+choices.mjs            what the user uses, and the default analysis engine
 providerReleases.mjs   built-in provider releases, pinned per host
 providerInstall.mjs    download, verify, unpack, save paths
 providerUpdates.mjs    update checks and approved pins
-hopperSetup.mjs        Hopper through rea setup: plan, install, reboot state
+providerBuild.mjs      download, unpack, uv environments, launchers, checks
+container/             Containerfile, container.sh, rea launcher, Hopper step
 install-providers.mjs  terminal provider installer used by start.sh
-install-hopper.mjs     terminal Hopper offer used by start.sh
 start.sh            stop previous, toolchain check, install/build when needed, launch
 public/index.html   shell
 public/api.js       token + bridge client + NDJSON reader
@@ -276,8 +326,8 @@ public/browse.js    host path picker over the bridge's directory listing
 public/setup.js     agent registration through rea setup's plan and apply
 public/doctor.js    provider readiness from rea doctor
 public/providerPaths.js  provider path fields, save and restart
+public/choices.js      "What you use" switches and default engine
 public/installProviders.js  provider downloads, progress and updates
-public/hopperPanel.js  Hopper plan review and install
 ```
 
 There's no build step and no dependencies beyond REA's own
