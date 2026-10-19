@@ -70,6 +70,7 @@ function apply(entry, event) {
   switch (event.type) {
     case "accepted":
       entry.callId = event.id;
+      entry.historyId = event.historyId;
       if (entry.cancelRequested) void cancelCall(entry);
       break;
     case "queued":
@@ -114,4 +115,30 @@ export function liveStatus(entry) {
     progress.message ??
     `Progress ${progress.value}${progress.total ? ` of ${progress.total}` : ""}`
   );
+}
+
+/** Calls the bridge stored before this page loaded, newest first. */
+export async function loadStoredHistory() {
+  const { entries } = await apiJson("/api/history").catch(() => ({
+    entries: [],
+  }));
+  return entries.map((stored) => ({
+    ...stored,
+    key: ++nextKey,
+    historyId: stored.id,
+    stored: true,
+  }));
+}
+
+/** Restored entries carry only a summary until one is opened. */
+export async function loadStoredResult(entry) {
+  if (!entry.stored || entry.result || entry.resultOmitted) return;
+  if (entry.resultBytes === undefined) return;
+  try {
+    ({ result: entry.result } = await apiJson(
+      `/api/history/${encodeURIComponent(entry.historyId)}`,
+    ));
+  } catch (cause) {
+    entry.failure = `The stored result could not be read: ${cause.message}`;
+  }
 }

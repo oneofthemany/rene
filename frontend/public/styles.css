@@ -713,9 +713,22 @@ progress {
 
 /* ---- History ----------------------------------------------------------- */
 
+.history-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+
+.history-head button.quiet {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
 .history h2 {
   font-size: 13px;
-  margin: 0 0 8px;
+  margin: 0;
   color: var(--muted);
   font-weight: 600;
 }
@@ -1227,4 +1240,24 @@ progress {
 
 .picker-actions {
   margin-top: 12px;
+}
+
+/* ---- Providers ---------------------------------------------------------- */
+
+#open-providers[data-ready="none"] {
+  border-color: var(--accent);
+}
+
+.doctor-state-ready {
+  color: var(--derived);
+  font-weight: 600;
+}
+
+.doctor-state-problem {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.doctor-fix {
+  max-width: 46ch;
 }

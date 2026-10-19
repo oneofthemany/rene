@@ -1,12 +1,21 @@
 import {
+  api,
   apiJson,
   getToken,
+  ndjson,
   onTokenRejected,
   readToken,
   setToken,
 } from "./api.js";
-import { cancelCall, isLive, startCall } from "./calls.js";
+import {
+  cancelCall,
+  isLive,
+  loadStoredHistory,
+  loadStoredResult,
+  startCall,
+} from "./calls.js";
 import { effectBadge, renderCatalog as drawCatalog } from "./catalog.js";
+import { refreshDoctor, showProviders } from "./doctor.js";
 import { createForm, matchingArgs } from "./form.js";
 import { h, renderError } from "./render.js";
 import {
@@ -54,7 +63,6 @@ document.getElementById("token-form").addEventListener("submit", (event) => {
 // ---------------------------------------------------------------------------
 // Server status
 
-let loadedCatalog;
 async function refreshStatus() {
   const dot = document.querySelector("#server-status .dot");
   const text = document.querySelector("#server-status .server-text");
@@ -69,10 +77,6 @@ async function refreshStatus() {
           : "Starting REA…";
     document.getElementById("server-log").textContent =
       status.stderrTail || "No server output yet.";
-    // A restart or a list_changed notification gives REA a new catalog.
-    const catalog = `${status.startedAt}:${status.catalogVersion}`;
-    if (status.state === "ready" && loadedCatalog && catalog !== loadedCatalog)
-      void loadTools();
     return status;
   } catch (cause) {
     dot.dataset.state = "failed";
@@ -90,6 +94,14 @@ document
     if (!log.hidden) await refreshStatus();
   });
 
+document.getElementById("open-providers").addEventListener("click", () => {
+  state.selected = { kind: "providers" };
+  state.view = undefined;
+  renderCatalog();
+  document.getElementById("result-view").replaceChildren();
+  void showProviders(document.getElementById("tool-view"));
+});
+
 document.getElementById("open-setup").addEventListener("click", () => {
   state.selected = { kind: "setup" };
   state.view = undefined;
@@ -102,8 +114,8 @@ document.getElementById("restart").addEventListener("click", async (event) => {
   button.disabled = true;
   button.textContent = "Restarting…";
   try {
+    // The catalog event for the new server reloads the catalog.
     await apiJson("/api/restart", { method: "POST" });
-    await loadTools();
   } finally {
     button.disabled = false;
     button.textContent = "Restart server";
@@ -114,9 +126,31 @@ document.getElementById("restart").addEventListener("click", async (event) => {
 // ---------------------------------------------------------------------------
 // Catalog
 
+let loadedCatalog;
+/**
+ * Follows the bridge's catalog events. A restart or REA's list_changed
+ * notification changes the stamp, and the page reloads its catalog.
+ */
+async function followCatalog() {
+  for (;;) {
+    try {
+      const response = await api("/api/events");
+      for await (const event of ndjson(response.body)) {
+        const stamp = `${event.startedAt}:${event.catalogVersion}`;
+        if (event.type !== "catalog" || stamp === loadedCatalog) continue;
+        loadedCatalog = stamp;
+        await loadTools();
+        void refreshStatus();
+      }
+    } catch {
+      // The bridge restarted or the network dropped; reconnect below.
+    }
+    if (!getToken()) return;
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+}
+
 async function loadTools() {
-  const status = await apiJson("/api/status");
-  loadedCatalog = `${status.startedAt}:${status.catalogVersion}`;
   const [{ tools }, { prompts }] = await Promise.all([
     apiJson("/api/tools"),
     apiJson("/api/prompts"),
@@ -469,16 +503,57 @@ function openEvidence(evidenceId) {
   document.getElementById("result-view").replaceChildren();
 }
 
-const renderHistory = () =>
+const renderHistory = () => {
+  document.getElementById("clear-history").hidden = !state.history.some(
+    (entry) => !isLive(entry),
+  );
   drawHistory(state.history, {
     shown: state.shown,
     onCancel: cancelCall,
     onSelect: async (entry) => {
       state.shown = entry;
-      await selectTool(entry.name, entry.args);
+      await Promise.all([
+        selectTool(entry.name, entry.args),
+        loadStoredResult(entry),
+      ]);
       renderShown(true);
       renderHistory();
     },
+  });
+};
+
+async function loadHistory() {
+  const known = new Set(state.history.map((entry) => entry.historyId));
+  const stored = await loadStoredHistory();
+  state.history.push(...stored.filter((entry) => !known.has(entry.historyId)));
+  renderHistory();
+}
+
+let confirmClear;
+document
+  .getElementById("clear-history")
+  .addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    // Stored history is removed for good, so it takes a second click.
+    if (!confirmClear) {
+      button.textContent = "Confirm clear";
+      confirmClear = setTimeout(() => {
+        confirmClear = undefined;
+        button.textContent = "Clear";
+      }, 4000);
+      return;
+    }
+    clearTimeout(confirmClear);
+    confirmClear = undefined;
+    button.textContent = "Clear";
+    await apiJson("/api/history", { method: "DELETE" });
+    state.history = state.history.filter(isLive);
+    if (state.shown && !isLive(state.shown)) {
+      state.shown = undefined;
+      document.getElementById("result-view").replaceChildren();
+    }
+    renderHistory();
+    renderWorkflow();
   });
 
 // ---------------------------------------------------------------------------
@@ -497,7 +572,10 @@ async function boot() {
     if (status.state === "failed") return;
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
-  await loadTools();
+  // The first catalog event loads the catalog; later ones reload it.
+  void followCatalog();
+  await loadHistory();
+  void refreshDoctor().catch(() => {});
 }
 
 onTokenRejected(showTokenGate);

@@ -39,14 +39,15 @@ To start the bridge directly:
 node frontend/server.mjs       # prints http://127.0.0.1:4417/#token=...
 ```
 
-| Flag               | Default              | Purpose                                    |
-| ------------------ | -------------------- | ------------------------------------------ |
-| `--port`           | `4417`               | Loopback port (`0` picks a free one)       |
-| `--rea`            | `../scripts/rea.mjs` | REA dispatcher to run as `<rea> mcp`       |
-| `--timeout-ms`     | `600000`             | Per-call timeout; resets on each progress  |
-| `--max-concurrent` | `4`                  | Calls sent to REA at once; the rest queue  |
-| `--open`           | off                  | Open the UI in the default browser         |
-| `--pid-file`       | none                 | Remove this pid file on exit if it is ours |
+| Flag               | Default                | Purpose                                    |
+| ------------------ | ---------------------- | ------------------------------------------ |
+| `--port`           | `4417`                 | Loopback port (`0` picks a free one)       |
+| `--rea`            | `../scripts/rea.mjs`   | REA dispatcher to run as `<rea> mcp`       |
+| `--timeout-ms`     | `600000`               | Per-call timeout; resets on each progress  |
+| `--max-concurrent` | `4`                    | Calls sent to REA at once; the rest queue  |
+| `--open`           | off                    | Open the UI in the default browser         |
+| `--pid-file`       | none                   | Remove this pid file on exit if it is ours |
+| `--history-dir`    | `./.workbench-history` | Where settled calls are stored             |
 
 REA reads provider configuration (`REA_*`, Ghidra/IDA paths and similar) from
 its environment, so start the bridge from a shell where those are set.
@@ -65,7 +66,12 @@ its environment, so start the bridge from a shell where those are set.
   run since the workflow started. **Copy as agent prompt** copies the brief
   REA produced, unchanged.
 - **Catalog.** Lists every advertised tool, grouped by family, with effect
-  badges taken from MCP annotations (`changes`, `read`, `live`).
+  badges taken from MCP annotations (`changes`, `read`, `live`). When REA
+  sends `notifications/tools/list_changed` or `prompts/list_changed`, the SDK
+  refetches the list and the bridge pushes a catalog event to every open page
+  (`GET /api/events`), which reloads its catalog. A server restart does the
+  same. An open tool form is left as it is; reopen it to load a changed
+  definition.
 - **Forms built from each tool's input schema.** Empty fields are left out of
   the call so REA applies its own defaults. Booleans have three states:
   omit/true/false. Shapes the form can't represent faithfully fall back to a
@@ -81,7 +87,19 @@ its environment, so start the bridge from a shell where those are set.
   second click before they run.
 - **History.** Shows calls in progress and settled calls. Selecting one shows
   its live status or result and restores its arguments. A call that finishes
-  in the background doesn't take over the view you're reading.
+  in the background doesn't take over the view you're reading. The bridge
+  stores every settled call in `--history-dir`, so history survives page
+  reloads and workbench restarts. Stored entries load as summaries, and a
+  result is fetched when you open it. The newest 500 calls and 200 MB of
+  results are kept. A result over 8 MB is not stored; its entry records the
+  size and says to run the call again. **Clear** removes stored history after
+  a second click. Reloading the page still cancels calls that are running,
+  because each call belongs to the request that started it.
+- **Providers.** Runs `rea doctor` in the bridge's environment, which is also
+  the environment REA's MCP child runs in, and shows each check with its state,
+  detail and REA's remediation. The header button counts the checks that need
+  attention. **Check again** reruns it. Changing a provider setting means
+  setting it in your shell and running `frontend/start.sh` again.
 - **Results.** Evidence records get a provenance panel: the
   observed/derived/inferred scale, subject digest, provider, authority,
   locations, limitations and linked Evidence. Clicking an Evidence ID opens
@@ -115,13 +133,19 @@ its environment, so start the bridge from a shell where those are set.
 - Static pages are served with a strict CSP (`'self'` only, no inline
   script/style). Strings from the analysis target are always rendered as text.
 - The token is stored in `sessionStorage`. The last arguments used for each
-  tool are kept in `localStorage` as a per-browser convenience. Results are
-  never persisted by the page.
+  tool are kept in `localStorage` as a per-browser convenience.
+- Call history is stored by the bridge as plain JSON in `--history-dir`
+  (mode `0700`, files `0600`), with arguments as you entered them and results
+  as REA returned them. REA redacts transport credentials and explicitly
+  marked values in its results; the workbench doesn't redact anything else.
+  Clear history, or delete the directory, after working with anything you
+  don't want kept on disk. The directory is ignored by git.
 
 ## Layout
 
 ```
 server.mjs          bridge: MCP child owner, call queue, HTTP boundary
+history.mjs         stored call history: summaries, results, pruning
 start.sh            stop previous, toolchain check, install/build when needed, launch
 public/index.html   shell
 public/api.js       token + bridge client + NDJSON reader
@@ -135,6 +159,7 @@ public/calls.js     call lifecycle: start, queue/progress events, cancel
 public/app.js       state, tool view, render scheduling
 public/browse.js    host path picker over the bridge's directory listing
 public/setup.js     agent registration through rea setup's plan and apply
+public/doctor.js    provider readiness from rea doctor
 ```
 
 There's no build step and no dependencies beyond REA's own

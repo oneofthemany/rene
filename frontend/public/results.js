@@ -30,7 +30,7 @@ function runLine(entry, actions) {
       outcomeLabel,
     ),
     h("span", {}, elapsed),
-    entry.result?._meta?.provenance?.untrusted_content
+    (entry.result?._meta?.provenance?.untrusted_content ?? entry.untrusted)
       ? h(
           "span",
           {
@@ -96,13 +96,19 @@ export function showEntry(entry, onEvidenceLink) {
   if (!entry.result) {
     resultView.replaceChildren(
       line,
-      entry.cancelled
+      entry.resultOmitted
         ? h(
             "p",
             { class: "hint" },
-            "You cancelled this call before it returned a result.",
+            `This result was ${formatBytes(entry.resultBytes)}, more than history keeps for one call. Run the call again to see it.`,
           )
-        : renderError(undefined, entry.failure),
+        : entry.cancelled
+          ? h(
+              "p",
+              { class: "hint" },
+              "You cancelled this call before it returned a result.",
+            )
+          : renderError(undefined, entry.failure),
     );
     return;
   }
@@ -166,6 +172,12 @@ export function showEntry(entry, onEvidenceLink) {
   });
 }
 
+export function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
 function download(entry, value) {
   const blob = new Blob([JSON.stringify(value, null, 2)], {
     type: "application/json",
@@ -209,6 +221,14 @@ export function showLive(entry, onCancel) {
   );
 }
 
+/** Time for today's calls; date and time for older ones. */
+function startedLabel(startedAt) {
+  const started = new Date(startedAt);
+  return started.toDateString() === new Date().toDateString()
+    ? started.toLocaleTimeString()
+    : started.toLocaleString();
+}
+
 /** Renders call history; onSelect shows an entry, onCancel stops a live one. */
 export function renderHistory(history, { onSelect, onCancel, shown }) {
   const live = history.filter(isLive).length;
@@ -239,7 +259,7 @@ export function renderHistory(history, { onSelect, onCancel, shown }) {
             isLive(entry)
               ? liveStatus(entry)
               : [
-                  new Date(entry.startedAt).toLocaleTimeString(),
+                  startedLabel(entry.startedAt),
                   entry.elapsedMs === undefined
                     ? ""
                     : `, ${(entry.elapsedMs / 1000).toFixed(1)} s`,

@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { Client, ProtocolError } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
+import { createHistory } from "./history.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const publicRoot = join(here, "public");
@@ -28,6 +29,10 @@ const { values: options } = parseArgs({
     open: { type: "boolean", default: false },
     // Written by start.sh before it execs this process; removed on clean exit.
     "pid-file": { type: "string" },
+    "history-dir": {
+      type: "string",
+      default: join(here, ".workbench-history"),
+    },
   },
 });
 
@@ -41,6 +46,11 @@ const token = randomBytes(24).toString("base64url");
 const tokenBytes = Buffer.from(token);
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
 const STDERR_TAIL_BYTES = 16 * 1024;
+const history = createHistory(options["history-dir"], {
+  maxEntries: 500,
+  maxEntryBytes: 8 * 1024 * 1024,
+  maxTotalBytes: 200 * 1024 * 1024,
+});
 
 const MODULES = [
   "api.js",
@@ -48,6 +58,7 @@ const MODULES = [
   "browse.js",
   "calls.js",
   "catalog.js",
+  "doctor.js",
   "form.js",
   "markdown.js",
   "render.js",
@@ -135,6 +146,7 @@ async function startMcp() {
     if (error || !items || mcp !== record) return;
     record[key] = items;
     record.catalogVersion++;
+    broadcast({ type: "catalog", ...catalogStamp() });
   };
   const client = new Client(
     { name: "rea-frontend", version: "0.1.0" },
@@ -182,10 +194,35 @@ async function startMcp() {
     record.prompts = prompts;
     record.serverVersion = client.getServerVersion();
     record.state = "ready";
+    broadcast({ type: "catalog", ...catalogStamp() });
   } catch (cause) {
     record.state = "failed";
     record.failure = describeError(cause);
   }
+}
+
+// Pages listening for catalog changes, as open NDJSON responses.
+const listeners = new Set();
+
+const catalogStamp = () => ({
+  startedAt: mcp.startedAt,
+  catalogVersion: mcp.catalogVersion,
+});
+
+function broadcast(event) {
+  const line = `${JSON.stringify(event)}\n`;
+  for (const listener of listeners) listener.write(line);
+}
+
+/** Streams catalog events until the page goes away; starts with the current stamp. */
+function events(request, response) {
+  response.writeHead(200, {
+    "content-type": "application/x-ndjson; charset=utf-8",
+    "cache-control": "no-store",
+  });
+  listeners.add(response);
+  response.on("close", () => listeners.delete(response));
+  response.write(`${JSON.stringify({ type: "catalog", ...catalogStamp() })}\n`);
 }
 
 async function stopMcp() {
@@ -215,13 +252,22 @@ const CLIENT_ID = /^[a-z][a-z0-9_]{0,40}$/;
 let setupBusy = false;
 
 /** Runs `rea setup` with JSON output; resolves to its parsed report. */
-function runSetup(args) {
+const runSetup = (args) =>
+  runReaJson(["setup", "--format", "json", ...args], SETUP_TIMEOUT_MS);
+
+/**
+ * Runs one short-lived rea command whose stdout is a JSON report. A failing
+ * exit still resolves when the report parses: setup and doctor report refusals
+ * and unhealthy checks that way.
+ */
+function runReaJson(args, timeout) {
+  const command = args[0];
   return new Promise((resolvePromise, reject) => {
     execFile(
       process.execPath,
-      [options.rea, "setup", "--format", "json", ...args],
+      [options.rea, ...args],
       {
-        timeout: SETUP_TIMEOUT_MS,
+        timeout,
         maxBuffer: 16 * 1024 * 1024,
         // The registered server inherits provider settings setup reads from here.
         env: process.env,
@@ -233,11 +279,10 @@ function runSetup(args) {
         } catch {
           return reject(
             new Error(
-              `rea setup did not return JSON${error ? `: ${error.message}` : ""}. ${stderr.slice(-2000)}`.trim(),
+              `rea ${command} did not return JSON${error ? `: ${error.message}` : ""}. ${stderr.slice(-2000)}`.trim(),
             ),
           );
         }
-        // A refused plan still reports why as JSON.
         resolvePromise(report);
       },
     ).stdin?.end();
@@ -333,6 +378,27 @@ async function setupApply(request, response) {
     const report = await runSetup(["--yes", ...clientArgs(clients)]);
     return sendJson(response, 200, { report });
   });
+}
+
+// ---------------------------------------------------------------------------
+// Provider readiness
+//
+// `rea doctor` owns the checks and their remediation. It runs in this
+// bridge's environment, which the MCP child inherits, so its answer is about
+// the REA the workbench is using. Concurrent requests share one run.
+
+const DOCTOR_TIMEOUT_MS = 120_000;
+let doctorRun;
+
+async function doctor(response) {
+  doctorRun ??= runReaJson(["doctor", "--format", "json"], DOCTOR_TIMEOUT_MS)
+    .then((report) => ({ report, checkedAt: Date.now() }))
+    .finally(() => (doctorRun = undefined));
+  try {
+    return sendJson(response, 200, await doctorRun);
+  } catch (cause) {
+    return sendJson(response, 502, { error: describeError(cause) });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -482,7 +548,10 @@ async function routeApi(request, response, url) {
   if (route === "POST /api/setup/plan") return setupPlan(request, response);
   if (route === "POST /api/setup/apply") return setupApply(request, response);
   if (route === "POST /api/fs/list") return listDirectory(request, response);
-
+  if (route === "GET /api/doctor") return doctor(response);
+  if (route === "GET /api/events") return events(request, response);
+  if (url.pathname.startsWith("/api/history"))
+    return routeHistory(request, response, url);
   await ensureMcp();
   if (route === "GET /api/tools") {
     return sendJson(response, 200, {
@@ -517,6 +586,26 @@ async function routeApi(request, response, url) {
   return sendJson(response, 404, { error: "Not found." });
 }
 
+/** Stored call history: summaries, one stored result, or clearing it all. */
+async function routeHistory(request, response, url) {
+  const route = `${request.method} ${url.pathname}`;
+  if (route === "GET /api/history")
+    return sendJson(response, 200, { entries: await history.list() });
+  if (route === "DELETE /api/history") {
+    await history.clear();
+    return sendJson(response, 200, { cleared: true });
+  }
+  const stored = /^\/api\/history\/([\w-]+)$/.exec(url.pathname);
+  if (request.method === "GET" && stored) {
+    const result = await history.result(stored[1]);
+    return result === undefined
+      ? sendJson(response, 404, { error: "No stored result for this call." })
+      : sendJson(response, 200, { result });
+  }
+
+  return sendJson(response, 404, { error: "Not found." });
+}
+
 /** Streams one tools/call as NDJSON: started, progress*, then result or error. */
 async function callTool(request, response) {
   const body = await readJsonBody(request);
@@ -540,11 +629,13 @@ async function callTool(request, response) {
   }
 
   const id = nextCallId++;
+  const acceptedAt = Date.now();
+  const historyId = history.newId(acceptedAt);
   const controller = new AbortController();
   const call = {
     controller,
     name: body.name,
-    acceptedAt: Date.now(),
+    acceptedAt,
     state: "queued",
   };
   calls.set(id, call);
@@ -558,9 +649,10 @@ async function callTool(request, response) {
     if (!response.writableFinished) controller.abort();
   });
 
-  write({ type: "accepted", id });
+  write({ type: "accepted", id, historyId });
   let acquired = false;
   let startedAt = Date.now();
+  let settled;
   try {
     await acquireSlot(id, controller.signal, (position) =>
       write({ type: "queued", position }),
@@ -578,20 +670,43 @@ async function callTool(request, response) {
         onprogress: (progress) => write({ type: "progress", ...progress }),
       },
     );
-    write({ type: "result", result, elapsedMs: Date.now() - startedAt });
+    const elapsedMs = Date.now() - startedAt;
+    write({ type: "result", result, elapsedMs });
+    settled = { outcome: result.isError ? "error" : "ok", elapsedMs, result };
   } catch (cause) {
-    write({
+    const event = {
       type: "error",
       cancelled: controller.signal.aborted,
       code: cause instanceof ProtocolError ? cause.code : undefined,
       message: describeError(cause),
       elapsedMs: Date.now() - startedAt,
-    });
+    };
+    write(event);
+    settled = {
+      outcome: "error",
+      elapsedMs: event.elapsedMs,
+      cancelled: event.cancelled,
+      failure: event.message,
+    };
   } finally {
     if (acquired) releaseSlot();
     calls.delete(id);
     response.end();
   }
+  // Recorded after the response ends, so storage never delays the result.
+  await history
+    .record({
+      id: historyId,
+      name: body.name,
+      args: body.arguments ?? {},
+      startedAt: acceptedAt,
+      ...settled,
+    })
+    .catch((cause) =>
+      process.stderr.write(
+        `Could not store call history: ${describeError(cause)}\n`,
+      ),
+    );
 }
 
 /** prompts/get: REA renders the workflow brief from caller-selected arguments. */
@@ -757,6 +872,7 @@ let shuttingDown = false;
 async function shutdown(exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
+  for (const listener of listeners) listener.end();
   server.close();
   await stopMcp();
   await releasePidFile();
