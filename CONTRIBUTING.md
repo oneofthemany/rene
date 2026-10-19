@@ -268,7 +268,7 @@ README editions and website editions have separate translation sources:
 - Find the language's `readme` path in the
   [language inventory](website/locales/languages.json) and edit that file.
   Locale codes and README suffixes can differ. Use the
-  [English README](README.md) to check commands, requirements, and analysis claims.
+  [English README](REA_README.md) to check commands, requirements, and analysis claims.
 - Edit `msgstr` values in `website/locales/<language>/messages.po` for website
   text. Follow the [website translation guide](website/locales/README.md) for
   the Python environment, catalog validation, and local preview. Preserve source

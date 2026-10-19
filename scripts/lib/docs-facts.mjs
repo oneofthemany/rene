@@ -106,7 +106,7 @@ export const documentationFactIssues = async (root, catalog) => {
     if (cause?.code !== "ENOENT") throw cause;
   }
   const readmePaths = [
-    "README.md",
+    "REA_README.md",
     ...translatedNames
       .filter((name) => /^README_[A-Za-z0-9-]+\.md$/u.test(name))
       .map((name) => `docs/readme/${name}`),
@@ -116,7 +116,7 @@ export const documentationFactIssues = async (root, catalog) => {
     const content = await readFile(join(root, path), "utf8");
     readmes.set(path, content);
     requireText(issues, path, content, "MCP-tool_catalog");
-    if (path === "README.md") {
+    if (path === "REA_README.md") {
       requireText(
         issues,
         path,
@@ -134,8 +134,8 @@ export const documentationFactIssues = async (root, catalog) => {
   }
   const canonicalLinks = readmeLinkTargets(
     root,
-    "README.md",
-    readmes.get("README.md") ?? "",
+    "REA_README.md",
+    readmes.get("REA_README.md") ?? "",
   );
   const languageInventory = JSON.parse(
     await readFile(join(root, "website/locales/languages.json"), "utf8"),
@@ -143,7 +143,7 @@ export const documentationFactIssues = async (root, catalog) => {
   const readmeLanguages = new Map(
     languageInventory.map(({ readme, code }) => [readme, code]),
   );
-  for (const path of readmePaths.filter((path) => path !== "README.md"))
+  for (const path of readmePaths.filter((path) => path !== "REA_README.md"))
     if (
       JSON.stringify(
         readmeLinkTargets(
@@ -154,7 +154,7 @@ export const documentationFactIssues = async (root, catalog) => {
         ),
       ) !== JSON.stringify(canonicalLinks)
     )
-      issues.push(`${path}: documentation links differ from README.md`);
+      issues.push(`${path}: documentation links differ from REA_README.md`);
 
   const installationPath = "docs/installation.md";
   const installation = await readFile(join(root, installationPath), "utf8");
