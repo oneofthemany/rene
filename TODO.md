@@ -7,11 +7,10 @@
   repos (CodeGraph itself only reads git), so they fail inside agent
   sessions; the task that runs them should drop the inherited `GIT_CONFIG_*`
   for that child only.
-- **Trim rene's CodeGraph copy, stage 3.** Done: no git-hook installs, no
-  update check, no agent installer (`install`/`uninstall`/`upgrade`/
-  `prompt-hook`, `src/installer/`, `src/upgrade/`, `install.sh`/`.ps1`).
-  Next: the viewer (`ui` command, `src/ui-server/`, the `ui/` workspace and
-  `build:ui`). Then candidates: release tooling (`scripts/build-bundle.sh`,
+- **Trim rene's CodeGraph copy.** Done: no git-hook installs, no update
+  check, no agent installer (`install`/`uninstall`/`upgrade`/`prompt-hook`,
+  `src/installer/`, `src/upgrade/`, `install.sh`/`.ps1`). The viewer stays
+  (see the next item). Remaining candidates: release tooling (`scripts/build-bundle.sh`,
   `pack-npm.sh`, `npm-shim.js`, `local-install.sh`), the docs site (`site/`)
   and the hosted telemetry backends (`telemetry-worker/`,
   `telemetry-dashboard/`). Known failing before the trim:

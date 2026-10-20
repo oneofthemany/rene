@@ -1049,15 +1049,6 @@ function pageReport(event, extra = {}) {
   }).catch(() => {});
 }
 
-// Frames Chrome drew since the last beat: tells a page Chrome stopped
-// drawing (0 while visible) from one it draws grey (frames keep coming).
-let framesSinceBeat = 0;
-function countFrame() {
-  framesSinceBeat += 1;
-  requestAnimationFrame(countFrame);
-}
-requestAnimationFrame(countFrame);
-
 function heartbeat() {
   const memory = performance.memory;
   const beat = {
@@ -1068,9 +1059,7 @@ function heartbeat() {
     visibility: document.visibilityState,
     view: state.selected?.kind ?? null,
     uptimeMs: Math.round(performance.now() - pageStartedAt),
-    frames: framesSinceBeat,
   };
-  framesSinceBeat = 0;
   try {
     sessionStorage.setItem(
       BEAT_KEY,
