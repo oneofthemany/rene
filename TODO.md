@@ -1,15 +1,18 @@
 ## Now
 
-- **Last scratch checks into the test suite.** The topic tree
-  (`frontend/topics.mjs`, `history-topics.mjs`) and the Objective-C and
-  Solidity indexing check (`objc-sol-e2e.mjs`) are still only in
-  `~/.cache/rene-scratch/`.
+- **Run CodeGraph's own tests in rene's checks.** `packages/codegraph`
+  has its own suite (Objective-C, Solidity and extraction: 770 tests pass),
+  but no rene script runs it. Decide where it belongs (`check:pr`, a turbo
+  task) given its run time. Its git-using tests fail inside agent sessions
+  unless the inherited `GIT_CONFIG_*` variables are dropped.
 - **Assessment summary from queries.** `summarize` (the Tools used table and
   pathways) and the topic tree still read every summary; give the store
   aggregate queries for them.
 - **Turn attribution.** `frontend/topics.mjs` files a turn under the last
   topic it declares. File calls under the topic in force when they were
   made, and list a turn under every topic it declared.
+  `tests/boundary/workbenchTopics.test.ts` pins today's last-declared rule;
+  change it with the fix.
 - **Feed Evidence links.** Pathways and Evidence links stay empty because no
   call names Evidence. Add an `evidence` field to `record_topic` so a
   topic's conclusion cites the Evidence it rests on.
