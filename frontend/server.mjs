@@ -125,10 +125,10 @@ const installer = createInstaller({
   root: options["providers-dir"],
   settings,
 });
+// History keeps every call (history.mjs); only a result above this size is
+// left out, with its size recorded.
 const HISTORY_LIMITS = {
-  maxEntries: 500,
   maxEntryBytes: 8 * 1024 * 1024,
-  maxTotalBytes: 200 * 1024 * 1024,
 };
 // Calls made with no project chosen.
 const history = createHistory(options["history-dir"], HISTORY_LIMITS);
@@ -1861,6 +1861,8 @@ async function shutdown(exitCode = 0) {
   terminal.close();
   server.close();
   await stopMcp();
+  // History stores close their databases once nothing more will be recorded.
+  await Promise.allSettled([history.close(), projects.close()]);
   await releasePidFile();
   process.exit(exitCode);
 }

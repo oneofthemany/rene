@@ -302,6 +302,7 @@
     "artifacts:mcp-catalog": "node scripts/generate-mcp-tool-catalog.mjs",
     "artifacts:skills": "node scripts/generate-skill-metadata.mjs",
     "codegraph:build": "node scripts/build-codegraph.mjs",
+    "history-store:build": "node scripts/build-history-store.mjs",
     "artifacts:product-catalog": "node scripts/generate-product-catalog.mjs",
     "artifacts:managed-evidence": "node scripts/generate-completion-ledger.mjs",
     "artifacts:error-schema": "node scripts/generate-error-schema.mjs",

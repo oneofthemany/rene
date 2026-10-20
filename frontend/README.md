@@ -495,13 +495,32 @@ API it is reachable only on loopback with the per-launch token.
 - **History.** Shows calls in progress and settled calls. Selecting one shows
   its live status or result and restores its arguments. A call that finishes
   in the background doesn't take over the view you're reading. The bridge
-  stores every settled call in `--history-dir`, so history survives page
-  reloads and workbench restarts. Stored entries load as summaries, and a
-  result is fetched when you open it. The newest 500 calls and 200 MB of
-  results are kept. A result over 8 MB is not stored; its entry records the
-  size and says to run the call again. **Clear** removes stored history after
-  a second click. Reloading the page still cancels calls that are running,
+  stores every settled call in a DuckDB file (`<--history-dir>.duckdb`, and
+  `history.duckdb` in each project's store), so history survives page reloads
+  and workbench restarts. Stored entries load as summaries, and a result is
+  fetched when you open it. Every call is kept, with no count or age limit. A
+  result over 8 MB is not stored; its entry records the size and says to run
+  the call again. **Clear** removes stored history after a second click.
+
+  The file belongs to `rene-history` (`packages/history-store`), a small Rust
+  program the bridge starts on first use and talks to over JSON lines. It is
+  the file's only writer, and the bridge starts it again if it stops. Build it
+  with `npm run history-store:build` (part of `npm run build:cached`). As in
+  sherloq, a fingerprint of its sources, the Rust toolchain and how DuckDB is
+  linked decides whether the built program is reused. DuckDB's compiled
+  static library is cached in
+  `${RENE_DUCKDB_CACHE:-~/.cache/rene/duckdb/<version>}` and linked when
+  present (seconds); otherwise DuckDB compiles from source once (a few
+  minutes) and fills that cache. Crates come from cargo's local cache, and
+  nothing is downloaded. Without Rust installed, a program already built from
+  the same sources is reused.
+
+  History kept as JSON files by earlier versions (`<id>.json` and
+  `<id>.result.json`) is imported on first use. Entries already in the
+  database are kept, and once every entry is confirmed the folder is renamed
+  to `history.json-imported` rather than deleted. Reloading the page still cancels calls that are running,
   because each call belongs to the request that started it.
+
 - **Providers.** Offers to download missing providers (see
   [Installing providers](#installing-providers)), runs `rea doctor` in the bridge's environment, which is also
   the environment REA's MCP child runs in, and shows each check with its state,

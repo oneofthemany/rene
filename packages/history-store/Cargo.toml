@@ -1,0 +1,25 @@
+[package]
+name = "rene-history"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "The REA workbench's call history in one DuckDB file, served to the bridge over JSON lines"
+
+[[bin]]
+name = "rene-history"
+path = "src/main.rs"
+
+[dependencies]
+# Exact: the cached static DuckDB library (scripts/build-history-store.mjs) is
+# keyed by this version, and its pregenerated bindings must match it.
+duckdb = { version = "=1.10505.0", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+
+[features]
+# Compile DuckDB from source instead of linking the cached library.
+bundled = ["duckdb/bundled"]
+
+[profile.release]
+strip = "symbols"

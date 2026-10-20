@@ -71,7 +71,7 @@ function sameFolder(manifest, identity) {
 
 /**
  * @param {string} root
- * @param {{ maxEntries: number, maxEntryBytes: number, maxTotalBytes: number }} historyLimits
+ * @param {{ maxEntryBytes: number }} historyLimits
  */
 export function createProjects(root, historyLimits) {
   const ready = mkdir(root, { recursive: true, mode: 0o700 });
@@ -203,6 +203,13 @@ export function createProjects(root, historyLimits) {
         entry.manifest = manifest;
         return manifest;
       }),
+
+    /** Closes every opened project's history store. */
+    async close() {
+      await Promise.allSettled(
+        [...open.values()].map((entry) => entry.history.close()),
+      );
+    },
 
     /** The project's folder still has the identity it was recorded with. */
     async verify(entry) {

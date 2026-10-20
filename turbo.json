@@ -208,8 +208,18 @@
       ],
       "outputs": ["packages/codegraph/dist/**"]
     },
+    "history-store:build": {
+      "inputs": [
+        "scripts/build-history-store.mjs",
+        "packages/history-store/Cargo.toml",
+        "packages/history-store/Cargo.lock",
+        "packages/history-store/build.rs",
+        "packages/history-store/src/**"
+      ],
+      "outputs": ["packages/history-store/dist/**"]
+    },
     "artifacts:skills": {
-      "dependsOn": ["compile", "codegraph:build"],
+      "dependsOn": ["compile", "codegraph:build", "history-store:build"],
       "inputs": [
         "package.json",
         "package-lock.json",
