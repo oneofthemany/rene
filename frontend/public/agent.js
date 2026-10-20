@@ -229,6 +229,20 @@ export async function initAgent({ host, getProject, onState, onStarted }) {
   term.onData((data) => {
     if (ui.running) send(data);
   });
+  // Shift+Enter starts a new line in the prompt instead of sending it, as in
+  // an IDE. The agent gets Meta+Enter (ESC then CR), which terminal agents
+  // such as Claude Code read as a line break; a plain Enter still sends.
+  term.attachCustomKeyEventHandler((event) => {
+    const shiftEnter =
+      event.key === "Enter" &&
+      event.shiftKey &&
+      !event.ctrlKey &&
+      !event.altKey &&
+      !event.metaKey;
+    if (!shiftEnter) return true;
+    if (event.type === "keydown" && ui.running) send("\x1b\r");
+    return false;
+  });
   const resize = sizeKeeper(term, fit, screen, ui);
   new ResizeObserver(resize).observe(screen);
 

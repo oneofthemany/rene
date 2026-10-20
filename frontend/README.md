@@ -238,14 +238,18 @@ recorded yet.
 ### Conversations and audit trail
 
 Claude Code writes every conversation run in a folder to
-`${CLAUDE_CONFIG_DIR:-~/.claude}/projects/<folder>/<id>.jsonl`; a resumed
-conversation keeps its own file and `/clear` starts a new one. The bridge
-follows the project folder's transcripts and keeps, per project, the prompts,
-the agent's reasoning (as Claude Code records it) and replies, its tool uses
-and the results it saw, with a cursor so a restart neither loses nor repeats
-anything; transcripts written while the bridge was down are caught up when
-the project is opened. Copilot CLI and agents that use their registration
-aren't captured yet.
+`${CLAUDE_CONFIG_DIR:-~/.claude}/projects/<folder>/<id>.jsonl` (a resumed
+conversation keeps its own file and `/clear` starts a new one), and GitHub
+Copilot CLI writes each session to `~/.copilot/session-state/<id>/`, with the
+folder it ran in as `cwd` in its `workspace.yaml`. rene owns reading both
+(the same code behind its `list_agent_conversations` and
+`read_agent_conversation` tools). The bridge follows every conversation rene
+finds for the project folder and keeps, per project, the prompts, the agent's
+reasoning (as the agent records it) and replies, its tool uses and the
+results it saw, with a cursor so a restart neither loses nor repeats
+anything; conversations written while the bridge was down are caught up when
+the project is opened. Agents that use their registration (Codex, Gemini CLI
+and others) aren't captured yet.
 
 Each rene call in a transcript is tied to the call the relay recorded by
 timestamp and identity: the same tool with identical arguments, recorded just
@@ -393,7 +397,9 @@ is told to read it first, follow its Rules, keep the other sections current
 
 The project bar also picks the **Agent** and starts or stops it; it always
 starts in the active project's folder, and while it runs the project can't be
-changed. **Agent terminal** in the header shows its terminal. Pick it under
+changed. **Agent terminal** in the header shows its terminal; Shift+Enter
+there sends ESC+Enter, which agents such as Claude Code take as a new line
+rather than a submit. Pick it under
 **Agent**: installed agents (found on the workbench's `PATH`)
 come first, the rest are listed as not installed. Each is the same CLI you run
 in a terminal, with your login, settings, skills and other MCP servers, and

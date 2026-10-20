@@ -242,6 +242,13 @@ folder, or `REA_TOOLBOX_ROOTS`), resolved through symbolic links.
 | Browser automation  | `start_browser_session` · `browser_session_status` · `close_browser_session` and REA's capture tools | owned Chromium with a private profile      |
 | —                   | `survey_project_directory`                                                                           | structure, file types, applicable tools    |
 | —                   | `record_topic`                                                                                       | declares what a piece of work is about     |
+| —                   | `list_agent_conversations` · `read_agent_conversation`                                               | what other agents did in the folder        |
+
+Agents can read each other's work: `list_agent_conversations` finds every
+conversation Claude Code or Copilot CLI ran in a project folder (from their
+own transcripts), and `read_agent_conversation` pages through one, with its
+requests, replies, tool calls and, on request, reasoning and tool results.
+Claude Code can pick up where Copilot left off, and the other way round.
 
 What's still planned is listed in [docs/agent-toolbox.md](docs/agent-toolbox.md).
 

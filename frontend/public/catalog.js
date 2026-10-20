@@ -4,7 +4,7 @@ import { h } from "./render.js";
 const GROUPS = [
   [
     "Toolbox",
-    /^(read_file|write_file|edit_file|find_files|search_text|run_command|record_topic|survey_project_directory)$/,
+    /^(read_file|write_file|edit_file|find_files|search_text|run_command|record_topic|survey_project_directory|list_agent_conversations|read_agent_conversation)$/,
   ],
   [
     "Source code (CodeGraph)",

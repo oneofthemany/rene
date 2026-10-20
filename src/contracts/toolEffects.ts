@@ -643,6 +643,8 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
   survey_project_directory: effects(),
   read_file: effects(),
   record_topic: effects(),
+  list_agent_conversations: effects(),
+  read_agent_conversation: effects(),
   // The project's CodeGraph server is a REA-owned child kept up between calls.
   explore_source_graph: sourceGraphQuery,
   search_source_symbols: sourceGraphQuery,

@@ -46,8 +46,7 @@ import {
 import {
   auditFor,
   conversationTurns,
-  claudeTranscriptFolder,
-  followTranscriptFolder,
+  followConversations,
 } from "./conversations.mjs";
 import { createHistory } from "./history.mjs";
 import { currentTopics, topicTree } from "./topics.mjs";
@@ -584,7 +583,7 @@ const TERMINAL_ROUTES = {
       try {
         const started = await terminal.start(body, link);
         link.relay.agent = started.label;
-        await startFollowing(link, started.label);
+        await startFollowing(link);
         return started;
       } catch (cause) {
         relaySessions.delete(link.relayToken);
@@ -1537,23 +1536,21 @@ async function agentSession(cwd, agentId) {
 const following = new Map();
 
 /**
- * Follows the Claude Code transcripts of the agent's folder while it runs:
- * the conversation it starts, or one the user resumes or begins with /clear.
+ * Follows the conversations agents run in the project folder while an agent
+ * runs: the one it starts, one the user resumes or begins with /clear, and
+ * Copilot CLI sessions alike.
  */
-async function startFollowing(link, label) {
-  if (!link.conversationId) return;
+async function startFollowing(link) {
+  if (!link.project) return;
   const project = await projects.get(link.project);
   following.set(link.session, {
     project,
-    follower: followTranscriptFolder({
+    follower: followConversations({
       store: project.conversations,
-      folder: claudeTranscriptFolder(
-        settings.environment(process.env),
-        project.manifest.path,
-      ),
+      environment: settings.environment(process.env),
+      folder: project.manifest.path,
       // A second's slack: the agent may write before this call returns.
       since: Date.now() - 1000,
-      agent: label,
       onEvents: () => conversationChanged(project, link.session),
     }),
   });
@@ -1577,14 +1574,11 @@ function conversationChanged(project, session) {
  * transcript changed since the project was first opened.
  */
 async function catchUpConversations(project) {
-  await followTranscriptFolder({
+  await followConversations({
     store: project.conversations,
-    folder: claudeTranscriptFolder(
-      settings.environment(process.env),
-      project.manifest.path,
-    ),
+    environment: settings.environment(process.env),
+    folder: project.manifest.path,
     since: project.manifest.createdAt,
-    agent: "Claude Code",
     onEvents: () => conversationChanged(project, null),
   }).stop();
 }

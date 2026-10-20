@@ -268,6 +268,8 @@ export const MCP_TOOLS_WITHOUT_DEDICATED_CLI = Object.freeze([
   "search_text",
   "run_command",
   "record_topic",
+  "list_agent_conversations",
+  "read_agent_conversation",
   "explore_source_graph",
   "search_source_symbols",
   "read_source_node",

@@ -299,6 +299,120 @@ export const recordTopicResultSchema = z.strictObject({
   created: z.boolean(),
 });
 
+/**
+ * Agent conversations: the conversations coding agents (Claude Code, GitHub
+ * Copilot CLI) ran in a project folder, read from their own transcripts, so
+ * an agent can see what another asked, found and did there.
+ */
+export const CONVERSATION_AGENTS = ["claude-code", "copilot-cli"] as const;
+
+export const listAgentConversationsInputSchema = z.strictObject({
+  project_path: absolutePath.describe(
+    "The project folder the conversations ran in.",
+  ),
+  agent: z
+    .enum(["all", ...CONVERSATION_AGENTS])
+    .default("all")
+    .describe("Whose conversations to list."),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(200)
+    .default(20)
+    .describe("The most recently written conversations listed."),
+});
+
+export const listAgentConversationsResultSchema = z.strictObject({
+  project_path: z.string(),
+  conversations: z.array(
+    z.strictObject({
+      agent: z.enum(CONVERSATION_AGENTS),
+      agent_label: z.string(),
+      conversation_id: z.string(),
+      transcript: z.string(),
+      started_at: z.string().nullable(),
+      updated_at: z.string().nullable(),
+      turns: z.number().int().nonnegative(),
+      first_prompt: z.string().nullable(),
+      last_prompt: z.string().nullable(),
+    }),
+  ),
+  total: z.number().int().nonnegative(),
+  truncated: z.boolean(),
+});
+
+export const readAgentConversationInputSchema = z.strictObject({
+  project_path: absolutePath.describe(
+    "The project folder the conversation ran in.",
+  ),
+  agent: z.enum(CONVERSATION_AGENTS),
+  conversation_id: z
+    .string()
+    .regex(/^[\w-]{1,120}$/u)
+    .describe("From list_agent_conversations."),
+  from_turn: z
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe(
+      "First turn returned, counting from 1; omit for the latest turns.",
+    ),
+  max_turns: z.number().int().min(1).max(50).default(5),
+  include_reasoning: z
+    .boolean()
+    .default(false)
+    .describe("Include the agent's recorded reasoning."),
+  include_tool_results: z
+    .boolean()
+    .default(false)
+    .describe("Include what each tool returned, not only that it was called."),
+  max_text_chars: z
+    .number()
+    .int()
+    .min(200)
+    .max(20_000)
+    .default(2000)
+    .describe("Each prompt, reply, reasoning or result is cut to this length."),
+});
+
+const conversationEntry = z.strictObject({
+  kind: z.enum(["reasoning", "reply", "tool_use", "tool_result"]),
+  at: z.string().nullable(),
+  text: z.string().optional(),
+  tool: z.string().optional(),
+  rene: z.boolean().optional(),
+  args: z.string().optional(),
+  is_error: z.boolean().optional(),
+  truncated: z.boolean(),
+});
+
+export const readAgentConversationResultSchema = z.strictObject({
+  project_path: z.string(),
+  agent: z.enum(CONVERSATION_AGENTS),
+  agent_label: z.string(),
+  conversation_id: z.string(),
+  turn_count: z.number().int().nonnegative(),
+  from_turn: z.number().int().nonnegative(),
+  to_turn: z.number().int().nonnegative(),
+  turns: z.array(
+    z.strictObject({
+      index: z.number().int().positive(),
+      at: z.string().nullable(),
+      prompt: z.string(),
+      prompt_truncated: z.boolean(),
+      entries: z.array(conversationEntry),
+    }),
+  ),
+});
+
+export type ListAgentConversationsInput = z.infer<
+  typeof listAgentConversationsInputSchema
+>;
+export type ReadAgentConversationInput = z.infer<
+  typeof readAgentConversationInputSchema
+>;
 export type RecordTopicInput = z.infer<typeof recordTopicInputSchema>;
 export type ReadFileInput = z.infer<typeof readFileInputSchema>;
 export type WriteFileInput = z.infer<typeof writeFileInputSchema>;

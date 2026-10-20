@@ -1,14 +1,16 @@
 // Agent conversations: what was asked, what the agent said and reasoned, and
 // which tool calls it made, kept per project next to the call history.
 //
-// Claude Code writes every conversation run in a folder to
-// <config>/projects/<folder with non-alphanumerics as "->/<id>.jsonl, one
-// timestamped record per line. A resumed conversation keeps its own file, and
-// /clear starts a new one, so the bridge follows the whole folder: every
-// transcript that changes while the project is in use is copied into the
-// project's store as events (prompts, reasoning, replies, tool uses and tool
-// results), keyed by its id, with a cursor so following resumes after a
-// restart and nothing is read twice.
+// rene owns reading agents' transcripts (src/toolbox/AgentConversations.ts,
+// also behind its list_agent_conversations and read_agent_conversation
+// tools): which conversations Claude Code and GitHub Copilot CLI ran in a
+// folder, and how each agent's records become events (prompts, reasoning,
+// replies, tool uses and tool results). The bridge follows every transcript
+// rene finds for the project folder and copies what each gains into the
+// project's store, keyed by its id, with a cursor so following resumes after
+// a restart and nothing is read twice. A resumed Claude Code conversation
+// keeps its own file and /clear starts a new one; each Copilot session is its
+// own conversation.
 //
 // A tool use in the transcript is tied to the call the relay recorded by its
 // timestamp and identity, not by similarity: the same tool with identical
@@ -27,15 +29,19 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join } from "node:path";
+
+import {
+  AGENT_LABELS,
+  claudeEvents,
+  copilotEvents,
+  findConversations,
+} from "../dist/toolbox/AgentConversations.js";
 
 const SESSION = /^[\w-]{1,120}$/;
 const MAX_TEXT = 4000;
 const MAX_RESULT_TEXT = 2000;
 const FOLLOW_MS = 2000;
-// rene's tools as Claude Code names them.
-const REA_TOOL = /^mcp__rea__(.+)$/;
 
 const clip = (text, limit = MAX_TEXT) =>
   text.length > limit
@@ -53,79 +59,43 @@ export const canonical = (value) =>
           .join(",")}}`
       : JSON.stringify(value ?? null);
 
-/** Text a person typed, not a command echo or a harness reminder. */
-const isPrompt = (text) =>
-  text.trim() !== "" &&
-  !/^\s*<(?:local-command|command-|system-reminder|bash-|task-notification)/u.test(
-    text,
-  );
+/** Each agent's record parser, from rene. */
+const PARSERS = { "claude-code": claudeEvents, "copilot-cli": copilotEvents };
 
-const blockText = (content) =>
-  typeof content === "string"
-    ? content
-    : Array.isArray(content)
-      ? content
-          .map((part) => (part?.type === "text" ? part.text : ""))
-          .filter(Boolean)
-          .join("\n")
-      : "";
-
-/** Events from one Claude Code transcript record. Unknown records give none. */
-export function eventsFromRecord(record) {
-  const at = record?.timestamp;
-  const sidechain = record?.isSidechain === true;
-  const content = record?.message?.content;
-  const events = [];
-  if (record?.type === "user" && record.isMeta !== true) {
-    if (typeof content === "string") {
-      if (isPrompt(content))
-        events.push({ kind: "prompt", at, text: clip(content), sidechain });
-    } else if (Array.isArray(content)) {
-      for (const part of content) {
-        if (part?.type === "tool_result")
-          events.push({
-            kind: "tool_result",
-            at,
-            toolUseId: part.tool_use_id,
-            isError: part.is_error === true,
-            text: clip(blockText(part.content), MAX_RESULT_TEXT),
-            sidechain,
-          });
-        else if (part?.type === "text" && isPrompt(part.text))
-          events.push({ kind: "prompt", at, text: clip(part.text), sidechain });
-      }
-    }
-  } else if (record?.type === "assistant" && Array.isArray(content)) {
-    for (const part of content) {
-      if (part?.type === "thinking" && part.thinking)
-        events.push({
-          kind: "reasoning",
-          at,
-          text: clip(part.thinking),
-          sidechain,
-        });
-      else if (part?.type === "text" && part.text?.trim())
-        events.push({ kind: "reply", at, text: clip(part.text), sidechain });
-      else if (part?.type === "tool_use") {
-        const rea = REA_TOOL.exec(part.name ?? "");
-        events.push({
-          kind: "tool_use",
-          at,
-          toolUseId: part.id,
-          tool: rea ? rea[1] : part.name,
-          rea: rea !== null,
-          args: rea ? (part.input ?? {}) : undefined,
-          sidechain,
-        });
-      }
-    }
+/**
+ * The store's event for one of rene's parsed events: texts clipped, and only
+ * rene tools' arguments kept (they are what links a tool use to its recorded
+ * call; other tools' arguments can be large and aren't needed here).
+ */
+export const storedEvent = (event) => {
+  switch (event.kind) {
+    case "prompt":
+    case "reasoning":
+    case "reply":
+      return { kind: event.kind, at: event.at, text: clip(event.text) };
+    case "tool_use":
+      return {
+        kind: "tool_use",
+        at: event.at,
+        toolUseId: event.id,
+        tool: event.tool,
+        rea: event.rene,
+        args: event.rene ? (event.args ?? {}) : undefined,
+      };
+    case "tool_result":
+      return {
+        kind: "tool_result",
+        at: event.at,
+        toolUseId: event.id,
+        isError: event.is_error,
+        text: clip(event.text, MAX_RESULT_TEXT),
+      };
   }
-  return events;
-}
+};
 
-/** Where Claude Code keeps transcripts (CLAUDE_CONFIG_DIR, else ~/.claude). */
-const claudeProjects = (env) =>
-  join(env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "projects");
+/** Store events from one transcript record of an agent's format. */
+export const eventsFromRecord = (record, format = "claude-code") =>
+  (PARSERS[format] ?? claudeEvents)(record).map(storedEvent);
 
 /**
  * One project's conversation store: <dir>/<session>.jsonl holds events,
@@ -197,15 +167,6 @@ export function createConversationStore(directory) {
   };
 }
 
-/**
- * The folder where Claude Code keeps the transcripts of conversations run in
- * `cwd`: its path with every character other than a letter or digit turned
- * into "-" (/home/a/my.repo -> -home-a-my-repo).
- */
-export const claudeTranscriptFolder = (env, cwd) =>
-  join(claudeProjects(env), cwd.replace(/[^A-Za-z0-9]/g, "-"));
-
-const TRANSCRIPT = /^([\w-]{1,120})\.jsonl$/;
 // Read in slices, so a long transcript (tens of MB) never sits in one buffer.
 const READ_SLICE = 8 * 1024 * 1024;
 
@@ -254,7 +215,7 @@ async function ingestFrom(store, meta) {
       const events = [];
       for (const line of buffer.subarray(0, end).toString("utf8").split("\n")) {
         try {
-          events.push(...eventsFromRecord(JSON.parse(line)));
+          events.push(...eventsFromRecord(JSON.parse(line), meta.format));
         } catch {
           // A line that isn't JSON carries nothing we keep.
         }
@@ -271,17 +232,17 @@ async function ingestFrom(store, meta) {
 }
 
 /**
- * Follows every Claude Code transcript in a project's transcript folder that
- * changed at or after `since`, until stopped. Each transcript is one
- * conversation, stored under its own id with its own cursor, so a resumed
- * conversation, a /clear or a new conversation in the same agent session are
- * all kept. Calls onEvents after new events land.
+ * Follows every conversation an agent ran in the project folder (Claude Code
+ * transcripts and Copilot CLI sessions, as rene finds them) that changed at
+ * or after `since`, until stopped. Each is stored under its own id with its
+ * own cursor and its agent's format, so a resumed conversation, a /clear or a
+ * new session are all kept. Calls onEvents after new events land.
  */
-export function followTranscriptFolder({
+export function followConversations({
   store,
+  environment,
   folder,
   since,
-  agent,
   onEvents,
 }) {
   let stopped = false;
@@ -289,32 +250,24 @@ export function followTranscriptFolder({
   const readOnce = () =>
     (reading = reading
       .then(async () => {
-        let names;
-        try {
-          names = await readdir(folder);
-        } catch {
-          return;
-        }
         let added = 0;
-        for (const name of names) {
-          const id = TRANSCRIPT.exec(name)?.[1];
-          if (!id) continue;
-          const transcript = join(folder, name);
-          const known = await store.meta(id);
+        for (const source of await findConversations(environment, folder)) {
+          const known = await store.meta(source.id);
           if (!known) {
-            const info = await stat(transcript).catch(() => undefined);
+            const info = await stat(source.transcript).catch(() => undefined);
             if (!info || info.mtimeMs < since) continue;
           }
           const meta = known ?? {
-            session: id,
-            conversationId: id,
-            agent,
-            transcript,
+            session: source.id,
+            conversationId: source.id,
+            agent: AGENT_LABELS[source.agent],
+            format: source.agent,
+            transcript: source.transcript,
             startedAt: Date.now(),
             offset: 0,
           };
           if (!known) await store.writeMeta(meta);
-          added += await ingestTranscript(store, id);
+          added += await ingestTranscript(store, source.id);
         }
         if (added) onEvents?.();
       })
