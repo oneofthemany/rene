@@ -81,3 +81,7 @@ website/.i18n-*/
 
 # CodeGraph indexes (index_source_graph)
 .codegraph/
+/bridge/bridge.iml
+/packages/packages.iml
+/tests/tests.iml
+/rene.iml
