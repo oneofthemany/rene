@@ -59,7 +59,6 @@ import {
   findAllSymbols,
   resolveNamedSymbolFlow,
 } from '../graph/named-symbol-flow';
-import { getUpdateNotice } from '../upgrade/update-check';
 import { measurePendingChanges } from './index-freshness';
 import { validateAnswerFiles, type AnswerFile } from './answer-freshness';
 import { ExploreDiagnostics } from './explore-diagnostics';
@@ -8037,14 +8036,6 @@ export class ToolHandler {
         `**Journal mode:** ⚠ ${journalMode || 'unknown'} — WAL not active, so reads ` +
         `can block on a concurrent write (WAL appears unsupported on this filesystem)`
       );
-    }
-
-    // A newer release exists (#1243) — status is where users and agents look
-    // when something seems off, so surface the drift here too. Cheap memoized
-    // cache read; absent entirely when up to date or opted out.
-    const updateNotice = getUpdateNotice();
-    if (updateNotice) {
-      lines.push(`**Update available:** ${updateNotice}`);
     }
 
     // Non-zero at rest means a resolution pass was interrupted mid-run, so

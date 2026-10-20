@@ -1,16 +1,15 @@
 /**
- * Git Sync Hooks
+ * Git Sync Hooks (removal only)
  *
- * When the live file watcher is disabled (e.g. on WSL2 `/mnt/*` drives,
- * see watch-policy.ts), the CodeGraph index would otherwise go stale until
- * the user runs `codegraph sync` by hand. As an opt-in alternative, we can
- * install git hooks that refresh the index after the operations that change
- * files on disk: commit, merge (covers `git pull`), and checkout.
+ * Earlier versions could install git hooks (post-commit, post-merge,
+ * post-checkout) that ran `codegraph sync` when the live file watcher was
+ * off. This copy never installs git hooks: it doesn't write into anyone's
+ * hooks directory, whether the repository's or one set for a session (an
+ * agent's guard hooks, say). Keep the index fresh with `codegraph sync`, the
+ * watcher, or the tool driving CodeGraph (rene syncs before each query).
  *
- * The hooks run `codegraph sync` in the background so they never block git,
- * and are guarded by `command -v codegraph` so they no-op cleanly when the
- * CLI isn't on PATH. Our snippet is delimited by marker comments so install
- * is idempotent and removal preserves any user-authored hook content.
+ * What remains removes the hooks an earlier version installed: only the
+ * block between our marker comments, keeping any user-authored hook content.
  */
 
 import * as fs from 'fs';
@@ -22,12 +21,12 @@ const MARKER_END = '# <<< codegraph sync hook <<<';
 
 export type GitHookName = 'post-commit' | 'post-merge' | 'post-checkout';
 
-/** Hooks installed by default: commit, merge (git pull), and checkout. */
-export const DEFAULT_SYNC_HOOKS: GitHookName[] = ['post-commit', 'post-merge', 'post-checkout'];
+/** The hooks earlier versions installed: commit, merge (git pull), checkout. */
+export const LEGACY_SYNC_HOOKS: GitHookName[] = ['post-commit', 'post-merge', 'post-checkout'];
 
-export interface GitHookResult {
-  /** Hook names that were created or updated. */
-  installed: GitHookName[];
+export interface GitHookRemoval {
+  /** Hook names our block was removed from. */
+  removed: GitHookName[];
   /** Resolved hooks directory, or null when not a git repo. */
   hooksDir: string | null;
   /** Reason nothing happened (e.g. not a git repository). */
@@ -53,6 +52,22 @@ export function isGitRepo(projectRoot: string): boolean {
   }
 }
 
+/** The scope of `core.hooksPath` (`command`, `local`, ...), or null when unset. */
+function hooksPathScope(projectRoot: string): string | null {
+  try {
+    const out = execFileSync('git', ['config', '--show-scope', '--get', 'core.hooksPath'], {
+      cwd: projectRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+      timeout: 5000,
+    }).trim();
+    return out.split('\t')[0] || null;
+  } catch {
+    return null; // unset (git exits 1) or git unavailable
+  }
+}
+
 /**
  * Resolve the git hooks directory for a project, honoring `core.hooksPath`
  * and git worktrees. Returns an absolute path, or null when not a repo.
@@ -71,20 +86,6 @@ function gitHooksDir(projectRoot: string): string | null {
   } catch {
     return null;
   }
-}
-
-/** The shell snippet (between markers) injected into each hook. */
-function markerBlock(): string {
-  return [
-    MARKER_BEGIN,
-    '# Keeps the CodeGraph index fresh while the live file watcher is off',
-    '# (e.g. WSL2 /mnt drives). Runs in the background so it never blocks git.',
-    '# Managed by codegraph; remove with `codegraph uninit` or delete this block.',
-    'if command -v codegraph >/dev/null 2>&1; then',
-    '  ( codegraph sync >/dev/null 2>&1 & ) >/dev/null 2>&1',
-    'fi',
-    MARKER_END,
-  ].join('\n');
 }
 
 /** Remove our marker block (and the marker lines) from hook content. */
@@ -118,62 +119,26 @@ function chmodExecutable(file: string): void {
 }
 
 /**
- * Install (or update) the CodeGraph sync hooks in a git repository.
- * Idempotent: re-running replaces our marker block rather than duplicating
- * it, and any user-authored hook content is preserved.
- */
-export function installGitSyncHook(
-  projectRoot: string,
-  hooks: GitHookName[] = DEFAULT_SYNC_HOOKS,
-): GitHookResult {
-  const hooksDir = gitHooksDir(projectRoot);
-  if (!hooksDir) {
-    return { installed: [], hooksDir: null, skipped: 'not a git repository' };
-  }
-
-  try {
-    fs.mkdirSync(hooksDir, { recursive: true });
-  } catch {
-    return { installed: [], hooksDir, skipped: 'could not access the git hooks directory' };
-  }
-
-  const block = markerBlock();
-  const installed: GitHookName[] = [];
-
-  for (const hook of hooks) {
-    const file = path.join(hooksDir, hook);
-    let content: string;
-
-    if (fs.existsSync(file)) {
-      // Strip any prior block, then re-append the current one.
-      const base = stripMarkerBlock(fs.readFileSync(file, 'utf8')).replace(/\s*$/, '');
-      content = base.length > 0
-        ? `${base}\n\n${block}\n`
-        : `#!/bin/sh\n${block}\n`;
-    } else {
-      content = `#!/bin/sh\n${block}\n`;
-    }
-
-    fs.writeFileSync(file, content);
-    chmodExecutable(file);
-    installed.push(hook);
-  }
-
-  return { installed, hooksDir };
-}
-
-/**
- * Remove the CodeGraph sync hooks. Strips only our marker block; deletes the
- * hook file entirely when nothing but a shebang remains, otherwise rewrites
- * the user's content untouched.
+ * Remove the sync hooks an earlier version installed. Strips only our marker
+ * block; deletes the hook file entirely when nothing but a shebang remains,
+ * otherwise rewrites the user's content untouched. A hooks directory set for
+ * the session (`core.hooksPath` from `git -c` or GIT_CONFIG_* in the
+ * environment) isn't the repository's, so it is left alone.
  */
 export function removeGitSyncHook(
   projectRoot: string,
-  hooks: GitHookName[] = DEFAULT_SYNC_HOOKS,
-): GitHookResult {
+  hooks: GitHookName[] = LEGACY_SYNC_HOOKS,
+): GitHookRemoval {
   const hooksDir = gitHooksDir(projectRoot);
   if (!hooksDir) {
-    return { installed: [], hooksDir: null, skipped: 'not a git repository' };
+    return { removed: [], hooksDir: null, skipped: 'not a git repository' };
+  }
+  if (hooksPathScope(projectRoot) === 'command') {
+    return {
+      removed: [],
+      hooksDir,
+      skipped: 'core.hooksPath is set for this session (git -c or GIT_CONFIG_* in the environment), not by the repository',
+    };
   }
 
   const removed: GitHookName[] = [];
@@ -195,18 +160,5 @@ export function removeGitSyncHook(
     removed.push(hook);
   }
 
-  return { installed: removed, hooksDir };
-}
-
-/** Whether any CodeGraph sync hook is currently installed. */
-export function isSyncHookInstalled(
-  projectRoot: string,
-  hooks: GitHookName[] = DEFAULT_SYNC_HOOKS,
-): boolean {
-  const hooksDir = gitHooksDir(projectRoot);
-  if (!hooksDir) return false;
-  return hooks.some((hook) => {
-    const file = path.join(hooksDir, hook);
-    return fs.existsSync(file) && fs.readFileSync(file, 'utf8').includes(MARKER_BEGIN);
-  });
+  return { removed, hooksDir };
 }

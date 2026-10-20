@@ -26,8 +26,6 @@ import type { AgentTarget, Location, TargetId } from './targets/types';
 // Import the lightweight submodules directly (not the ../sync barrel, which
 // re-exports FileWatcher and would transitively pull in ../extraction — the
 // installer must stay importable even when native modules can't load).
-import { watchDisabledReason } from '../sync/watch-policy';
-import { isGitRepo, isSyncHookInstalled, installGitSyncHook } from '../sync/git-hooks';
 import { getCodeGraphDir } from '../directory';
 import { getTelemetry, TELEMETRY_DOCS } from '../telemetry';
 import { maybeOfferBetaSignup } from './beta-signup';
@@ -648,76 +646,4 @@ async function resolveTargets(
   return choice
     .map((id) => getTarget(id))
     .filter((t): t is AgentTarget => t !== undefined);
-}
-
-
-/**
- * When the live file watcher will be disabled for this project (e.g. WSL2
- * /mnt drives, or CODEGRAPH_NO_WATCH), the index would silently go stale.
- * Explain that, and offer to keep it fresh automatically via git hooks
- * (commit / pull / checkout) instead of manual `codegraph sync`.
- *
- * No-op on environments where the watcher runs normally, so it's safe to
- * call unconditionally after init.
- */
-export async function offerWatchFallback(
-  clack: typeof import('@clack/prompts'),
-  projectPath: string,
-  opts: { yes?: boolean } = {},
-): Promise<void> {
-  const reason = watchDisabledReason(projectPath);
-  if (!reason) return; // Watcher runs normally — nothing to set up.
-
-  clack.log.warn(`Live file watching is disabled here — ${reason}.`);
-  clack.log.info('Until you re-sync, the CodeGraph index stays frozen — it will not pick up edits on its own.');
-
-  // No git repo → the commit-hook path doesn't apply; point at manual sync.
-  if (!isGitRepo(projectPath)) {
-    clack.log.info('Run `codegraph sync` after changing files to refresh the index.');
-    return;
-  }
-
-  // Already wired up on a previous run — confirm and move on without nagging.
-  if (isSyncHookInstalled(projectPath)) {
-    clack.log.info('Git sync hooks are already installed — the index refreshes after commit / pull / checkout.');
-    return;
-  }
-
-  let choice: 'hook' | 'manual';
-  if (opts.yes) {
-    choice = 'hook';
-  } else {
-    const sel = await clack.select({
-      message: 'How should CodeGraph keep its index fresh?',
-      options: [
-        { value: 'hook' as const, label: 'Sync on git commit / pull / checkout', hint: 'installs git hooks (recommended)' },
-        { value: 'manual' as const, label: 'I\'ll run `codegraph sync` myself', hint: 'fully manual' },
-      ],
-      initialValue: 'hook' as const,
-    });
-    if (clack.isCancel(sel)) {
-      clack.log.info('Skipped — run `codegraph sync` after changes to refresh the index.');
-      return;
-    }
-    choice = sel;
-  }
-
-  if (choice === 'manual') {
-    clack.log.info('Run `codegraph sync` after changing files to refresh the index.');
-    return;
-  }
-
-  const result = installGitSyncHook(projectPath);
-  if (result.installed.length > 0) {
-    clack.log.success(
-      `Installed git ${result.installed.join(', ')} hook${result.installed.length > 1 ? 's' : ''} — ` +
-      'the index refreshes in the background after each.',
-    );
-    clack.log.info('Run `codegraph sync` anytime to refresh immediately.');
-  } else {
-    clack.log.warn(
-      `Could not install git hooks${result.skipped ? ` (${result.skipped})` : ''}. ` +
-      'Run `codegraph sync` after changes instead.',
-    );
-  }
 }

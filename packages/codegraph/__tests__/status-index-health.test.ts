@@ -33,7 +33,6 @@ function spawn(cwd: string, args: string[]) {
       ...process.env,
       CODEGRAPH_NO_DAEMON: '1',
       CODEGRAPH_TELEMETRY: '0',
-      CODEGRAPH_NO_UPDATE_CHECK: '1',
       NO_COLOR: '1',
     },
   });

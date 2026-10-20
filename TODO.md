@@ -3,8 +3,21 @@
 - **Run CodeGraph's own tests in rene's checks.** `packages/codegraph`
   has its own suite (Objective-C, Solidity and extraction: 770 tests pass),
   but no rene script runs it. Decide where it belongs (`check:pr`, a turbo
-  task) given its run time. Its git-using tests fail inside agent sessions
-  unless the inherited `GIT_CONFIG_*` variables are dropped.
+  task) given its run time. 13 of its test files commit in throwaway temp
+  repos (CodeGraph itself only reads git), so they fail inside agent
+  sessions; the task that runs them should drop the inherited `GIT_CONFIG_*`
+  for that child only.
+- **Trim rene's CodeGraph copy, stages 2 and 3.** Done: CodeGraph never
+  installs git hooks (removal of old ones only, never in a session's hooks
+  folder) and has no update check. Next: the agent installer
+  (`src/installer/`, the `install`/`uninstall`/`upgrade`/`prompt-hook`
+  commands, `src/upgrade/`, `preuninstall`, `install.sh`/`install.ps1`),
+  then the viewer (`ui` command, `src/ui-server/`, the `ui/` workspace and
+  `build:ui`).
+- **CodeGraph's tests inside agent sessions.** Its 13 commit tests see the
+  session's agent hooks, so they fail there. Decide whether the suite's
+  sandbox (`__tests__/setup-home-sandbox.ts`) should drop the inherited
+  `GIT_CONFIG_*` for its throwaway repos.
 - **Assessment summary from queries.** `summarize` (the Tools used table and
   pathways) and the topic tree still read every summary; give the store
   aggregate queries for them.

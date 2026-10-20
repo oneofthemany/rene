@@ -82,7 +82,7 @@ const SCOPED_SYNC_MAX_PENDING = 500;
 /** Actionable degrade message; both exhaustion paths share it verbatim. */
 const EXHAUSTION_REASON =
   'OS watch/file limit exhausted; auto-sync disabled. Run `codegraph sync` ' +
-  '(or install git sync hooks) to refresh the graph after changes.';
+  'to refresh the graph after changes.';
 
 /**
  * Actionable, NON-fatal warning for Linux inotify watch-count exhaustion.
@@ -95,7 +95,7 @@ const INOTIFY_LIMIT_REASON =
   'watching now covers only part of the project, so edits in unwatched ' +
   'directories will not auto-sync. Raise the limit (e.g. `sudo sysctl ' +
   'fs.inotify.max_user_watches=1048576`, persisted in /etc/sysctl.d) and ' +
-  'restart, or run `codegraph sync` (or install git sync hooks) to refresh.';
+  'restart, or run `codegraph sync` to refresh.';
 
 /**
  * True when an error is OS watch/file-descriptor exhaustion (EMFILE/ENFILE).
@@ -404,7 +404,7 @@ export class FileWatcher {
     // Some environments make filesystem watching unusable — most notably
     // WSL2 /mnt/ drives, where the underlying fs.watch calls block long
     // enough to break MCP startup handshakes (issue #199). Skip watching
-    // there; callers fall back to manual `codegraph sync` or git sync hooks.
+    // there; callers fall back to manual `codegraph sync`.
     const disabledReason = watchDisabledReason(this.projectRoot);
     if (disabledReason) {
       logDebug('File watcher disabled', { reason: disabledReason, projectRoot: this.projectRoot });
@@ -1052,7 +1052,7 @@ export class FileWatcher {
           this.degrade(
             'CodeGraph file lock held by another process past the retry budget; ' +
               'auto-sync disabled. Run `codegraph sync` once the other writer finishes ' +
-              '(or install git sync hooks) to refresh the graph.',
+              'to refresh the graph.',
             { pendingFiles: this.pendingFiles.size, retryCount: this.lockRetryCount },
             true
           );
@@ -1077,7 +1077,7 @@ export class FileWatcher {
         if (this.syncFailureRetryCount > MAX_SYNC_FAILURE_RETRIES) {
           this.degrade(
             `CodeGraph auto-sync failed ${this.syncFailureRetryCount} times in a row; ` +
-              'auto-sync disabled. Run `codegraph sync` (or install git sync hooks) to ' +
+              'auto-sync disabled. Run `codegraph sync` to ' +
               `refresh the graph after changes. Last error: ${error.message}`,
             { error: error.message, retryCount: this.syncFailureRetryCount }
           );

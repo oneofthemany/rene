@@ -677,6 +677,24 @@ async function recordIndexTelemetry(
  * blocks on a prompt. An unsafe root sets `process.exitCode = 1` and returns
  * (no `--force` is implied by any caller); an index failure exits 1.
  */
+/**
+ * When the live file watcher will be disabled for this project (e.g. WSL2
+ * /mnt drives, or CODEGRAPH_NO_WATCH), the index would silently go stale:
+ * say so, and that `codegraph sync` refreshes it. No-op where the watcher
+ * runs normally, so it's safe to call unconditionally after init.
+ */
+async function explainWatchFallback(
+  clack: typeof import('@clack/prompts'),
+  projectPath: string,
+): Promise<void> {
+  const { watchDisabledReason } = await import('../sync/watch-policy');
+  const reason = watchDisabledReason(projectPath);
+  if (!reason) return;
+  clack.log.warn(`Live file watching is disabled here — ${reason}.`);
+  clack.log.info('Until you re-sync, the CodeGraph index stays frozen — it will not pick up edits on its own.');
+  clack.log.info('Run `codegraph sync` after changing files to refresh the index.');
+}
+
 async function runInit(
   projectPath: string,
   options: { index?: boolean; force?: boolean; verbose?: boolean; yes?: boolean },
@@ -702,8 +720,7 @@ async function runInit(
       clack.log.warn(`Already initialized in ${projectPath}`);
       clack.log.info('Use "codegraph index" to re-index or "codegraph sync" to update');
       try {
-        const { offerWatchFallback } = await import('../installer');
-        await offerWatchFallback(clack, projectPath, { yes: options.yes });
+        await explainWatchFallback(clack, projectPath);
       } catch { /* non-fatal */ }
       clack.outro('');
       return;
@@ -771,8 +788,7 @@ async function runInit(
     }
 
     try {
-      const { offerWatchFallback } = await import('../installer');
-      await offerWatchFallback(clack, projectPath, { yes: options.yes });
+      await explainWatchFallback(clack, projectPath);
     } catch { /* non-fatal */ }
 
     clack.outro('Done');
@@ -835,12 +851,13 @@ program
       const cg = CodeGraph.openSync(projectPath);
       cg.uninitialize();
 
-      // Clean up any git sync hooks we installed (no-op if none / not a repo).
+      // Clean up git sync hooks an earlier version installed (no-op if none /
+      // not a repo).
       try {
         const { removeGitSyncHook } = await import('../sync/git-hooks');
-        const removed = removeGitSyncHook(projectPath);
-        if (removed.installed.length > 0) {
-          info(`Removed git ${removed.installed.join(', ')} sync hook${removed.installed.length > 1 ? 's' : ''}`);
+        const { removed } = removeGitSyncHook(projectPath);
+        if (removed.length > 0) {
+          info(`Removed git ${removed.join(', ')} sync hook${removed.length > 1 ? 's' : ''}`);
         }
       } catch { /* non-fatal */ }
 
