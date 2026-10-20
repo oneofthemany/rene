@@ -963,6 +963,7 @@ const PAGE_LOG_FIELDS = new Set([
   "visibility",
   "view",
   "uptimeMs",
+  "frames",
   "message",
 ]);
 let pageLogWrites = Promise.resolve();
