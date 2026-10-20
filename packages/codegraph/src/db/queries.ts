@@ -776,7 +776,7 @@ export class QueryBuilder {
   }
 
   // ===========================================================================
-  // Name-segment vocabulary (prompt-hook graph-derived gate)
+  // Name-segment vocabulary (identifier segments for search)
   // ===========================================================================
 
   /** Wipe the segment vocabulary. A full index calls this at its start; the

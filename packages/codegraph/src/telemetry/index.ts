@@ -2,8 +2,11 @@
  * Anonymous usage telemetry — client side.
  *
  * The contract for what may be collected lives in docs/design/telemetry.md
- * (and user-facing TELEMETRY.md); the ingest endpoint that enforces it is
- * public at telemetry-worker/. This module honors four invariants:
+ * (and user-facing TELEMETRY.md). rene's copy sends to the user's own
+ * telemetry journal on this machine (sherloQ's `POST /ingest/<topic>`), never
+ * to CodeGraph's servers; CODEGRAPH_TELEMETRY_ENDPOINT overrides where. Each
+ * event is one journal record carrying the machine/version envelope. This
+ * module honors four invariants:
  *
  * 1. Recording rechecks the small consent file, then increments in memory. Disk writes are
  *    a tiny synchronous append at process exit (works under `process.exit()`,
@@ -27,8 +30,9 @@ import * as path from 'path';
 import * as os from 'os';
 import { randomUUID } from 'crypto';
 
-export const TELEMETRY_ENDPOINT = 'https://telemetry.getcodegraph.com/v1/events';
-export const TELEMETRY_DOCS = 'https://github.com/colbymchenry/codegraph/blob/main/TELEMETRY.md';
+/** The user's telemetry journal on this machine, topic `codegraph`. */
+export const TELEMETRY_ENDPOINT = 'http://127.0.0.1:5007/ingest/codegraph';
+export const TELEMETRY_DOCS = 'packages/codegraph/TELEMETRY.md in rene';
 
 // v2: dropped the `sqlite_backend` field from the `index` event — node:sqlite is
 // now the only backend (the better-sqlite3-native / wasm-fallback split is gone),
@@ -459,7 +463,8 @@ export class Telemetry {
     // choice stays off for every other process. It does not need a new notice.
     if (config?.first_run_notice_shown) return;
     this.writeStderr(
-      `codegraph collects anonymous usage stats (no code, paths, or names) — ` +
+      `codegraph records anonymous usage stats (no code, paths, or names) in your ` +
+      `local telemetry journal (${this.env.CODEGRAPH_TELEMETRY_ENDPOINT || TELEMETRY_ENDPOINT}) — ` +
       `"codegraph telemetry off" or CODEGRAPH_TELEMETRY=0 disables. Details: ${TELEMETRY_DOCS}\n`,
     );
   }
@@ -578,7 +583,8 @@ export class Telemetry {
     for (let i = 0; i < events.length; i += MAX_EVENTS_PER_REQUEST) {
       if (!this.canUseIdentity(identity)) return [];
       const chunk = events.slice(i, i + MAX_EVENTS_PER_REQUEST);
-      const body = JSON.stringify({ ...envelope, events: chunk });
+      // The journal's batch shape: one flat record per event.
+      const body = JSON.stringify({ records: chunk.map((event) => ({ ...envelope, ...event })) });
       this.debug(`POST ${endpoint} (${chunk.length} events)`);
       try {
         // Any response — 204, 4xx, anything — is final. No retries.

@@ -733,7 +733,7 @@ export class CodeGraph {
         }
 
         // Stamp the index with the engine that built it, so `codegraph status`
-        // and `codegraph upgrade` can recommend a re-index when the running
+        // can recommend a re-index when the running
         // engine produces richer extraction than the one on disk. Only on a
         // real full index — a sync touches a subset, so it must NOT advance the
         // extraction stamp (the bulk would still be stale). See extraction-version.ts.
@@ -1559,7 +1559,7 @@ export class CodeGraph {
    * older than the one now running — i.e. a re-index would add data a migration
    * can't backfill. False when there's no index yet (nothing to refresh) or the
    * stamp is current. This is the signal behind `codegraph status`'s re-index
-   * hint and `codegraph upgrade`'s reminder.
+   * hint.
    */
   isIndexStale(): boolean {
     if (this.queries.getLastIndexedAt() == null) return false;
@@ -2106,42 +2106,9 @@ export class CodeGraph {
   }
 
   /**
-   * One-shot upgrade heal for callers that open the graph WITHOUT syncing —
-   * concretely the prompt hook, whose MEDIUM tier reads the segment
-   * vocabulary: a database migrated from before the vocab table existed
-   * starts with it empty, and the only other backfill lives inside `sync()`,
-   * which such callers never run (#1142). Returns true when the vocab is
-   * usable (already populated — the overwhelmingly common one-SELECT case —
-   * or healed here); false when it isn't (empty graph, or another process
-   * holds the index lock — that process's own sync heals it).
-   */
-  async healSegmentVocabIfEmpty(): Promise<boolean> {
-    const empty = (() => {
-      try { return this.queries.isNameSegmentVocabEmpty(); } catch { return false; }
-    })();
-    if (!empty) return true;
-    if (this.queries.getNodeAndEdgeCount().nodes === 0) return false;
-    return this.indexMutex.withLock(async () => {
-      try {
-        this.fileLock.acquire();
-      } catch {
-        return false; // an index/sync is running — it backfills the vocab itself
-      }
-      try {
-        if (!this.queries.isNameSegmentVocabEmpty()) return true; // raced: healed meanwhile
-        await this.rebuildNameSegmentVocab();
-        return true;
-      } finally {
-        this.fileLock.release();
-      }
-    });
-  }
-
-  /**
    * Rebuild the segment vocabulary from the current graph, batched and
    * yielding — the upgrade-heal path for indexes built before the vocab table
-   * existed. Runs inside the index mutex/lock (sync and
-   * healSegmentVocabIfEmpty hold them).
+   * existed. Runs inside the index mutex/lock (sync holds them).
    */
   private async rebuildNameSegmentVocab(): Promise<void> {
     const maybeYield = createYielder();

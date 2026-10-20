@@ -12,13 +12,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { Telemetry, getTelemetry, TELEMETRY_ENDPOINT } from '../src/telemetry';
+import { fromJournalBatch } from './telemetry-journal-batch';
 
 type FetchCall = { url: string; body: Record<string, unknown> };
 
 function mockFetch(calls: FetchCall[], opts: { fail?: boolean } = {}) {
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     if (opts.fail) throw new Error('network down');
-    calls.push({ url: String(input), body: JSON.parse(String(init?.body)) as Record<string, unknown> });
+    calls.push({ url: String(input), body: fromJournalBatch(String(init?.body)) });
     return new Response(null, { status: 204 });
   }) as unknown as typeof globalThis.fetch;
 }
@@ -229,7 +230,8 @@ describe('Telemetry', () => {
       expect(events[0]).toMatchObject({ event: 'install', props: { scope: 'local', kind: 'fresh' } });
     });
 
-    it('uses the production endpoint by default and honors the env override', async () => {
+    it('sends to the local journal by default and honors the env override', async () => {
+      expect(TELEMETRY_ENDPOINT).toBe('http://127.0.0.1:5007/ingest/codegraph');
       const t = make();
       t.recordLifecycle('uninstall', {});
       await t.flushNow();

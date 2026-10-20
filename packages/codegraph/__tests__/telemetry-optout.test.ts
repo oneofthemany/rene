@@ -3,13 +3,14 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { Telemetry } from '../src/telemetry';
+import { fromJournalBatch } from './telemetry-journal-batch';
 
 describe('telemetry opt-out across running instances (#1869)', () => {
   let dir: string;
   let now: Date;
   let sends: any[];
   const make = (env = {}, fetchImpl: typeof fetch = async (_url, init) => {
-    sends.push(JSON.parse(String(init?.body)));
+    sends.push(fromJournalBatch(String(init?.body)));
     return new Response(null, { status: 204 });
   }) => new Telemetry({ dir, env, fetchImpl, now: () => now, stderr: () => {}, installExitHook: false });
   const queued = () => fs.readdirSync(dir).filter(n => n.startsWith('telemetry-queue'));

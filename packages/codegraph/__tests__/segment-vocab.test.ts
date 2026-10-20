@@ -142,22 +142,6 @@ export function writeConfig(): void {}
     expect(cg.getSegmentMatches(['checkout']).map((m) => m.name)).toContain('CheckoutService');
   });
 
-  it('healSegmentVocabIfEmpty backfills WITHOUT a sync — the prompt-hook open path (#1142)', async () => {
-    // The hook opens the graph without syncing, and a database migrated from
-    // before the vocab table existed starts with it empty — sync's backfill
-    // never runs on that path, leaving the MEDIUM tier permanently dormant.
-    const queries = (cg as unknown as {
-      queries: { clearNameSegmentVocab(): void; isNameSegmentVocabEmpty(): boolean };
-    }).queries;
-    queries.clearNameSegmentVocab();
-    expect(queries.isNameSegmentVocabEmpty()).toBe(true);
-    await expect(cg.healSegmentVocabIfEmpty()).resolves.toBe(true);
-    expect(queries.isNameSegmentVocabEmpty()).toBe(false);
-    expect(cg.getSegmentMatches(['state', 'machine']).map((m) => m.name)).toContain('OrderStateMachine');
-    // Populated vocab: the fast path (one SELECT) still reports usable.
-    await expect(cg.healSegmentVocabIfEmpty()).resolves.toBe(true);
-  });
-
   it('a rename through updateNode reaches the vocab — the framework post-extract path (#1141)', () => {
     // Framework resolvers rewrite node names after extraction (NestJS route
     // prefixing) via updateNode. The new name must become prose-searchable;

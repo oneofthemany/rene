@@ -127,13 +127,12 @@ export function extractProseCandidates(prompt: string): string[] {
 }
 
 /**
- * Words to look up in the segment vocabulary for a SEARCH query (as opposed
- * to a prompt-hook gate): the query's prose candidates PLUS the segments of
- * its identifier-shaped tokens. An agent's query names concepts both ways —
- * "auto-scroll to bottom" (prose) and "atBottom tracking" (camel) — and the
- * camel token must still reach the segment "bottom" even though the whole
- * token matches no name. Same stopword/length rules as the hook path, since
- * both feeds run through {@link extractProseCandidates}.
+ * Words to look up in the segment vocabulary for a SEARCH query: the query's
+ * prose candidates PLUS the segments of its identifier-shaped tokens. An
+ * agent's query names concepts both ways — "auto-scroll to bottom" (prose)
+ * and "atBottom tracking" (camel) — and the camel token must still reach the
+ * segment "bottom" even though the whole token matches no name. Prose words
+ * follow {@link extractProseCandidates}'s stopword/length rules.
  */
 export function extractSegmentSearchWords(query: string): string[] {
   if (!query) return [];

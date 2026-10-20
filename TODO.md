@@ -7,13 +7,32 @@
   repos (CodeGraph itself only reads git), so they fail inside agent
   sessions; the task that runs them should drop the inherited `GIT_CONFIG_*`
   for that child only.
-- **Trim rene's CodeGraph copy, stages 2 and 3.** Done: CodeGraph never
-  installs git hooks (removal of old ones only, never in a session's hooks
-  folder) and has no update check. Next: the agent installer
-  (`src/installer/`, the `install`/`uninstall`/`upgrade`/`prompt-hook`
-  commands, `src/upgrade/`, `preuninstall`, `install.sh`/`install.ps1`),
-  then the viewer (`ui` command, `src/ui-server/`, the `ui/` workspace and
-  `build:ui`).
+- **Trim rene's CodeGraph copy, stage 3.** Done: no git-hook installs, no
+  update check, no agent installer (`install`/`uninstall`/`upgrade`/
+  `prompt-hook`, `src/installer/`, `src/upgrade/`, `install.sh`/`.ps1`).
+  Next: the viewer (`ui` command, `src/ui-server/`, the `ui/` workspace and
+  `build:ui`). Then candidates: release tooling (`scripts/build-bundle.sh`,
+  `pack-npm.sh`, `npm-shim.js`, `local-install.sh`), the docs site (`site/`)
+  and the hosted telemetry backends (`telemetry-worker/`,
+  `telemetry-dashboard/`). Known failing before the trim:
+  `explore-cross-call-dedup` (re-sends lines on a second call) and
+  `bundle-launcher` (needs `zip`).
+- **Telemetry for all of rene, into the journal (placeholder).** Every part
+  of rene reports to the user's telemetry journal (sherloQ,
+  `http://127.0.0.1:5007`), never off the machine. CodeGraph already does:
+  `POST /ingest/codegraph`, one record per event. To design before code:
+  - **One owner.** A rene telemetry module the parts share: the record
+    shape, the journal sink (`POST /ingest/<topic>` with `{"records": [...]}`;
+    loopback needs no token), fail-silent and never blocking a call.
+  - **Topics, one per part:** `rene-mcp` (tool name, duration, outcome,
+    provider; never arguments, paths or results), `rene-workbench` (bridge
+    and agent-session events), `rene-history` (store start, crash, query
+    timings), `rene-source-graph` (index builds, auto-sync timings),
+    `rene-setup` (provider installs), and `codegraph`.
+  - **Questions:** on by default or opt-in? One switch for all of rene
+    (e.g. `REA_TELEMETRY_ENDPOINT`), and should rene's own CodeGraph
+    processes stop forcing CodeGraph telemetry off? Who enables each new
+    topic in the journal (it holds unknown topics until enabled)?
 - **CodeGraph's tests inside agent sessions.** Its 13 commit tests see the
   session's agent hooks, so they fail there. Decide whether the suite's
   sandbox (`__tests__/setup-home-sandbox.ts`) should drop the inherited

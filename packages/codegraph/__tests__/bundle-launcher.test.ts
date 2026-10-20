@@ -81,7 +81,7 @@ describe('bundled launchers (#1278)', () => {
     checkForwarding(stage().bundle);
   });
 
-  it.runIf(windows)('runs the real CLI and prompt hook in Git Bash, and keeps cmd and PowerShell working', () => {
+  it.runIf(windows)('runs the real CLI in Git Bash, and keeps cmd and PowerShell working', () => {
     const { bundle } = stage();
     fs.rmSync(path.join(bundle, 'lib/dist'), { recursive: true });
     fs.symlinkSync(path.resolve('dist'), path.join(bundle, 'lib/dist'), 'junction');
@@ -89,8 +89,6 @@ describe('bundled launchers (#1278)', () => {
     const result = invoke(bundle, 'codegraph --version');
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout.trim()).toBe(version);
-    const hook = invoke(bundle, 'codegraph prompt-hook', [], {}, '{"prompt":"test"}\n');
-    expect(hook.status, hook.stderr).toBe(0);
     const bin = path.join(bundle, 'bin');
     for (const [exe, args] of [
       ['cmd.exe', ['/d', '/s', '/c', 'codegraph --version']],

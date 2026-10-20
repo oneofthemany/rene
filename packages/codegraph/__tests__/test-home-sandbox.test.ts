@@ -9,7 +9,6 @@ import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { claudeTarget } from '../src/installer/targets/claude';
 import { getRegistryDir } from '../src/mcp/daemon-registry';
 import setupHomeSandboxRun from './global-setup-home-sandbox';
 
@@ -30,10 +29,9 @@ describe('test home sandbox', () => {
     expect(home).not.toBe(os.userInfo().homedir);
   });
 
-  it('the global Claude profile and the daemon registry resolve inside it', () => {
+  it('the daemon registry resolves inside it, with no agent config override', () => {
     const home = sandboxHome();
     expect(process.env.CLAUDE_CONFIG_DIR).toBeUndefined();
-    expect(under(claudeTarget.detect('global').configPath, home)).toBe(true);
     expect(under(getRegistryDir(), home)).toBe(true);
   });
 
