@@ -100,4 +100,8 @@ export const codeGraphEnvironment = (
   CODEGRAPH_TELEMETRY: "0",
   CODEGRAPH_NO_DAEMON: "1",
   CODEGRAPH_NO_WATCH: "1",
+  // Query servers only read (rene's CodeGraph): no writer lock and no
+  // catch-up sync, so the bridge and every agent can query one project at
+  // once. The index changes only through index_source_graph.
+  CODEGRAPH_READ_ONLY: "1",
 });

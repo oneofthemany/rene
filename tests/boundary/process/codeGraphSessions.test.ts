@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -85,6 +85,23 @@ it("keeps one server per project across calls and stops it on closeProject", asy
   expect(alive(first)).toBe(false);
   const next = await pidOf(sessions);
   expect(next).not.toBe(first);
+});
+
+it("replaces a warm server when another process rebuilt the index database", async () => {
+  const database = join(folder, ".codegraph", "codegraph.db");
+  await mkdir(join(folder, ".codegraph"));
+  await writeFile(database, "first");
+  const first = await pidOf(sessions);
+  // A sync writes into the same file: the warm server keeps serving.
+  await writeFile(database, "synced");
+  expect(await pidOf(sessions)).toBe(first);
+  // A build replaces the file (a new inode): the old server would read the
+  // deleted index, so the next call gets a fresh one.
+  await rm(database);
+  await writeFile(database, "rebuilt");
+  const next = await pidOf(sessions);
+  expect(next).not.toBe(first);
+  expect(alive(first)).toBe(false);
 });
 
 it("stops the server when a call is cancelled, and starts a fresh one for the next call", async () => {

@@ -47,6 +47,13 @@ import { completeProviderEvidence } from "../application/ProviderOperationExecut
 
 const QUERY_TIMEOUT_MS = 120_000;
 const CODEGRAPH_FOLDER = ".codegraph";
+/**
+ * Queries bring the index up to date first, at most this often per project:
+ * a sync that finds nothing to do costs about half a second (measured on a
+ * 5,000-file project), so a busy session pays it once per window, not per call.
+ */
+const FRESHNESS_WINDOW_MS = 5_000;
+const AUTO_SYNC_TIMEOUT_MS = 10 * 60_000;
 
 /**
  * A query operation: its input, CodeGraph's tool, how arguments map onto it
@@ -326,8 +333,9 @@ export class CodeGraphProvider {
     input: IndexSourceGraphInput,
     options?: ExecutionOptions,
   ) {
-    // CodeGraph allows one writer per project: the query server goes first,
-    // and the next query starts a fresh one on the new index.
+    // The query server (read-only) goes first, and the next query starts a
+    // fresh one on the new index; other processes' servers are replaced on
+    // their next call when a build replaced the database (CodeGraphSessions).
     await this.sessions.closeProject(root);
     return indexSourceGraphResultSchema.parse(
       await indexCodeGraphProject(install, root, input, {

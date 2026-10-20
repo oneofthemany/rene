@@ -348,9 +348,17 @@ flowchart LR
   answer.
 - **The other query tools** search symbols, read a symbol or file with its
   callers and callees, list callers or callees, follow the impact of a
-  change, list the indexed files, and report the index's state.
+  change, list the indexed files, report the index's state, and map the
+  project (`map_source_graph`: the most depended-on files and most-called
+  symbols, which the assessment's Code map shows).
 - **`index_source_graph`** builds or syncs the index. It writes only
-  `.codegraph/`, never agent settings.
+  `.codegraph/`, never agent settings, and it is the only thing that changes
+  the index.
+- **Read-only query servers:** each REA process (the workbench bridge, every
+  agent) runs its own CodeGraph server per project, read-only, so they don't
+  contend for CodeGraph's one-writer lock and can query the same project at
+  once. A server opened before another process rebuilt the index is replaced
+  on its next call.
 - **Speed:** after the first call a project's server stays warm, so most
   queries answer in milliseconds. Indexing rene itself takes about
   half a minute.

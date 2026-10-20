@@ -1,4 +1,6 @@
 import { Client } from "@modelcontextprotocol/client";
+import { statSync } from "node:fs";
+import { join } from "node:path";
 
 import {
   OwnedMcpTransport,
@@ -19,9 +21,25 @@ export interface CodeGraphReply {
   readonly isError: boolean;
 }
 
+/**
+ * The identity (device and inode) of a project's index database, or
+ * undefined when it can't be read. A build replaces the file, so a changed
+ * identity means a server opened before it reads the old, deleted index.
+ */
+const databaseIdentity = (root: string): string | undefined => {
+  try {
+    const stats = statSync(join(root, ".codegraph", "codegraph.db"));
+    return `${stats.dev}:${stats.ino}`;
+  } catch {
+    return undefined;
+  }
+};
+
 interface Session {
   readonly root: string;
   readonly install: CodeGraphInstall;
+  /** The index database the server opened (databaseIdentity at its start). */
+  readonly database: string | undefined;
   readonly transport: OwnedMcpTransport;
   readonly client: Client;
   connected: boolean;
@@ -52,10 +70,12 @@ const replyText = (response: unknown): CodeGraphReply => {
 
 /**
  * One warm CodeGraph MCP server per project folder, run as a REA-owned child
- * (`codegraph serve --mcp --path <root>` in direct mode: no shared daemon, no
- * file watcher). A server starts on its project's first call, answers its
- * calls one at a time, and stops after CODEGRAPH_IDLE_MS without calls, when
- * the project is re-indexed, or when REA closes. A cancelled call stops its
+ * (`codegraph serve --mcp --path <root>` in direct, read-only mode: no shared
+ * daemon, no file watcher, no writer lock, so other REA processes can query
+ * the same project at once). A server starts on its project's first call,
+ * answers its calls one at a time, and stops after CODEGRAPH_IDLE_MS without
+ * calls, when the project is re-indexed (here, or by another process that
+ * rebuilt its database), or when REA closes. A cancelled call stops its
  * server, so the next call starts a fresh one. A server whose cleanup
  * couldn't be confirmed is kept and stopped again on the next close.
  */
@@ -106,11 +126,15 @@ export class CodeGraphSessions {
 
   #session(install: CodeGraphInstall, root: string): Session {
     const existing = this.#sessions.get(root);
-    // A server started from another install is replaced, not reused.
+    const database = databaseIdentity(root);
+    // A server started from another install, or on an index another process
+    // has since rebuilt (servers are read-only and never see that), is
+    // replaced, not reused.
     if (
       existing !== undefined &&
       existing.closing === undefined &&
-      existing.install.cli === install.cli
+      existing.install.cli === install.cli &&
+      existing.database === database
     )
       return existing;
     if (existing !== undefined) void this.#close(existing).catch(() => {});
@@ -134,6 +158,7 @@ export class CodeGraphSessions {
     const session: Session = {
       root,
       install,
+      database,
       transport,
       client: new Client({ name: "rea-codegraph-adapter", version: "1" }),
       connected: false,

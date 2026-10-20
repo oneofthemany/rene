@@ -532,9 +532,15 @@ export class MCPServer {
       process.stderr.write(`[CodeGraph MCP] Direct mode: ${reason}.\n`);
     }
 
+    // CODEGRAPH_READ_ONLY=1 (how REA runs its query servers): serve reads only,
+    // as the #1963 fallback does — no writer lock, no catch-up sync — so any
+    // number of these can serve a project beside its one writer, and the index
+    // changes only through an explicit index or sync.
+    const readOnly = process.env.CODEGRAPH_READ_ONLY === '1';
+
     // #1740: refuse a second direct writer on an initialized project. Daemon
     // mode multiplexes clients; direct mode is single-writer-per-project.
-    const writerRoot = resolveDaemonRoot(this.projectPath);
+    const writerRoot = readOnly ? null : resolveDaemonRoot(this.projectPath);
     if (writerRoot) {
       assertNoRebuild(writerRoot);
       const writer = tryAcquireWriterLock(writerRoot, 'direct');
@@ -546,7 +552,9 @@ export class MCPServer {
       this.writerLockRoot = writerRoot;
     }
 
-    this.engine = new MCPEngine({ queryPool: true, queryPoolDefaultMax: DIRECT_QUERY_POOL_MAX });
+    this.engine = readOnly
+      ? new MCPEngine({ readOnly: true })
+      : new MCPEngine({ queryPool: true, queryPoolDefaultMax: DIRECT_QUERY_POOL_MAX });
     const transport = new StdioTransport({ exitOnClose: false, onClose: () => { void this.stop(); } });
     this.session = new MCPSession(transport, this.engine, {
       explicitProjectPath: this.projectPath,
