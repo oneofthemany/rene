@@ -53,6 +53,23 @@ describe('test home sandbox', () => {
     expect(name).toBe('CodeGraph Test');
   });
 
+  it('no git config is inherited from the environment (e.g. an agent session)', () => {
+    const inherited = Object.keys(process.env).filter((key) =>
+      /^GIT_CONFIG_(PARAMETERS|COUNT|KEY_\d+|VALUE_\d+)$/.test(key),
+    );
+    expect(inherited).toEqual([]);
+    let hooksPath = '';
+    try {
+      hooksPath = execFileSync('git', ['config', '--show-scope', '--get', 'core.hooksPath'], {
+        encoding: 'utf-8',
+        windowsHide: true,
+      });
+    } catch {
+      // Unset: git exits 1, which is the expected outcome.
+    }
+    expect(hooksPath).not.toMatch(/^command/);
+  });
+
   // os.homedir() reads USERPROFILE there, and git falls back to
   // HOMEDRIVE+HOMEPATH — a HOME-only sandbox would not hold.
   it.runIf(process.platform === 'win32')('covers the Windows home variables', () => {

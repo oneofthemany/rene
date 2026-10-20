@@ -64,6 +64,16 @@ const gitConfig = path.join(home, '.gitconfig');
 fs.writeFileSync(gitConfig, '[user]\n\tname = CodeGraph Test\n\temail = test@codegraph.invalid\n');
 process.env.GIT_CONFIG_GLOBAL = gitConfig;
 
+// Configuration the environment hands every git (`git -c` as
+// GIT_CONFIG_PARAMETERS, and GIT_CONFIG_COUNT with its KEY_n/VALUE_n pairs)
+// outranks every config file, including the one above. An agent session sets
+// it to point git at guard hooks that refuse commits, so a suite run from one
+// would fail its throwaway-repo commits. The suite's repos are its own; it
+// sees no session's config, just as it sees no developer's.
+for (const name of Object.keys(process.env)) {
+  if (/^GIT_CONFIG_(PARAMETERS|COUNT|KEY_\d+|VALUE_\d+)$/.test(name)) delete process.env[name];
+}
+
 afterAll(() => {
   try {
     fs.rmSync(home, { recursive: true, force: true, maxRetries: 3 });

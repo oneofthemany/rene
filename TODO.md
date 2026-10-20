@@ -46,6 +46,10 @@
   session's agent hooks, so they fail there. Decide whether the suite's
   sandbox (`__tests__/setup-home-sandbox.ts`) should drop the inherited
   `GIT_CONFIG_*` for its throwaway repos.
+- **Tool popularity in the sidebar.** Show next to each tool in the sidebar
+  how many times it has been called (and when last), from the history store,
+  so popular and unused tools stand out. Needs the same aggregate query as
+  the next item (counts by tool name, not reading every summary).
 - **Assessment summary from queries.** `summarize` (the Tools used table and
   pathways) and the topic tree still read every summary; give the store
   aggregate queries for them.
