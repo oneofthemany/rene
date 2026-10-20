@@ -379,6 +379,14 @@ settling, with:
 
 - **Folder structure, File types, Applicable tools, Coverage:** from the
   latest survey in the project's history, with its entry id.
+- **Code map:** from the latest `map_source_graph` call, with its entry id
+  and when the index was built: files per language, the files the most other
+  files depend on and the symbols called from the most places, as places to
+  start. The bridge runs `map_source_graph` itself (recorded like the
+  survey) when a project with a CodeGraph index (`.codegraph/`) is opened and
+  its last map is over an hour old, and right after an `index_source_graph`
+  call succeeds. It never builds an index: that is `index_source_graph`,
+  which the agent or you run.
 - **Pathways:** chains of calls joined by confirmed Evidence links (up to 6
   steps), counted by tool sequence, with how many ended successfully and
   example entry ids.
@@ -390,7 +398,10 @@ If you remove the markers, the section isn't put back. An edit saved while the
 bridge is rewriting wins; the bridge's version is dropped until the next call.
 A Claude Code or Copilot CLI session started in a project with an assessment
 is told to read it first, follow its Rules, keep the other sections current
-(citing history entry ids) and leave the generated section alone. Your own
+(citing history entry ids) and leave the generated section alone. Every
+session is also told to ask the source graph (`explore_source_graph` and the
+other source-graph tools) before searching text or reading files one by one,
+and to build the index with `index_source_graph` when there is none. Your own
 `CLAUDE.md` and `AGENTS.md` aren't touched.
 
 ## Agents in the workbench
@@ -502,9 +513,17 @@ API it is reachable only on loopback with the per-launch token.
   result over 8 MB is not stored; its entry records the size and says to run
   the call again. **Clear** removes stored history after a second click.
 
+  The list shows the newest 200 calls (and the conversation turns in the same
+  span); **Load older calls** fetches the next 200 (`GET /api/history?limit=&before=`).
+
   The file belongs to `rene-history` (`packages/history-store`), a small Rust
   program the bridge starts on first use and talks to over JSON lines. It is
-  the file's only writer, and the bridge starts it again if it stops. Build it
+  the file's only writer, and the bridge starts it again if it stops. The
+  bridge launches and stops it through rene's owned-process supervision
+  (`src/process/ProviderProcess.ts`): its own process group, a run id, and a
+  verified stop after it has closed the database. Lookups ask it for just
+  what they need (a tool's calls, the newest survey, the calls that issued an
+  Evidence id) instead of reading every entry. Build it
   with `npm run history-store:build` (part of `npm run build:cached`). As in
   sherloq, a fingerprint of its sources, the Rust toolchain and how DuckDB is
   linked decides whether the built program is reused. DuckDB's compiled

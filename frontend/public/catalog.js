@@ -8,7 +8,7 @@ const GROUPS = [
   ],
   [
     "Source code (CodeGraph)",
-    /^(explore_source_graph|search_source_symbols|read_source_node|find_source_callers|find_source_callees|analyze_source_impact|list_source_files|source_graph_status|index_source_graph)$/,
+    /^(explore_source_graph|search_source_symbols|read_source_node|find_source_callers|find_source_callees|analyze_source_impact|list_source_files|source_graph_status|map_source_graph|index_source_graph)$/,
   ],
   [
     "Sessions & Evidence",

@@ -111,6 +111,8 @@ function savedView() {
 
 /** The active project's history load in progress, if any. */
 let historyLoading;
+/** Where the next, older page of history starts; undefined when none remain. */
+let olderHistory;
 let catalogLoaded;
 const catalogReady = new Promise((resolve) => (catalogLoaded = resolve));
 
@@ -811,6 +813,8 @@ const renderHistory = () => {
   const topics = state.source === "topics";
   document.getElementById("topics-view").hidden = !topics;
   document.getElementById("history-list").hidden = topics;
+  document.getElementById("history-older").hidden =
+    topics || olderHistory === undefined;
   document.getElementById("history-empty").hidden =
     topics || state.history.length > 0;
   if (topics) {
@@ -862,8 +866,9 @@ function setSource(source) {
 /** Loads the active project's history, keeping this page's calls in flight. */
 async function loadHistory() {
   const project = activeProject()?.id;
-  const stored = await loadStoredHistory(project);
+  const { entries: stored, next } = await loadStoredHistory(project);
   if (project !== activeProject()?.id) return;
+  olderHistory = next;
   const live = state.history.filter(
     (entry) => !entry.stored && isLive(entry) && entry.project === project,
   );
@@ -880,6 +885,27 @@ async function loadHistory() {
   renderWorkflow();
   reloadTopics();
 }
+
+/** Appends the next, older page of history to the list. */
+async function loadOlderHistory() {
+  const project = activeProject()?.id;
+  const page = olderHistory;
+  if (!page) return;
+  const { entries, next } = await loadStoredHistory(project, page);
+  if (project !== activeProject()?.id || page !== olderHistory) return;
+  olderHistory = next;
+  const known = new Set(state.history.map((entry) => entry.historyId));
+  state.history = [
+    ...state.history,
+    ...entries.filter((entry) => !known.has(entry.historyId)),
+  ].sort((a, b) => b.startedAt - a.startedAt);
+  renderHistory();
+  reloadTopics();
+}
+
+document
+  .getElementById("history-older")
+  .addEventListener("click", () => void loadOlderHistory());
 
 /**
  * A call the bridge recorded or an agent started. This page's own calls

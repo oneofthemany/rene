@@ -35,6 +35,8 @@ import { CHOICES, checkOwner, ENGINES } from "./choices.mjs";
 import {
   ASSESSMENT_FILE,
   earlierCalls,
+  latestCodeMap,
+  MAP_TOOL,
   findLinks,
   latestSurvey,
   SURVEY_TOOL,
@@ -130,6 +132,9 @@ const installer = createInstaller({
 const HISTORY_LIMITS = {
   maxEntryBytes: 8 * 1024 * 1024,
 };
+// The most summaries one GET /api/history page returns.
+const MAX_HISTORY_PAGE = 1000;
+const HISTORY_ID = /^\d{13}-[0-9a-f]{8}$/;
 // Calls made with no project chosen.
 const history = createHistory(options["history-dir"], HISTORY_LIMITS);
 const projects = createProjects(options["projects-dir"], HISTORY_LIMITS);
@@ -1053,17 +1058,50 @@ async function routeApi(request, response, url) {
  * Stored call history of one project (?project=<id>), or of calls made with
  * no project: summaries, one stored result, or clearing it all.
  */
+/**
+ * A page of history summaries, newest first: `limit` of them (all when
+ * absent), older than the entry id `before` when given. Reports whether older
+ * entries remain, or the error a malformed parameter makes.
+ */
+async function historyPage(store, params) {
+  const limitText = params.get("limit");
+  const before = params.get("before");
+  const limit = limitText === null ? undefined : Number(limitText);
+  const limitOk =
+    limit === undefined ||
+    (Number.isInteger(limit) && limit >= 1 && limit <= MAX_HISTORY_PAGE);
+  if (!limitOk || (before !== null && !HISTORY_ID.test(before)))
+    return {
+      error: `limit must be 1–${MAX_HISTORY_PAGE} and before an entry id.`,
+    };
+  const filter = {};
+  if (limit !== undefined) filter.limit = limit + 1;
+  if (before !== null) filter.beforeId = before;
+  const entries = await store.list(filter);
+  if (limit === undefined) return { entries, more: false, newest: !before };
+  return {
+    entries: entries.slice(0, limit),
+    more: entries.length > limit,
+    newest: before === null,
+  };
+}
+
 async function routeHistory(request, response, url) {
   const route = `${request.method} ${url.pathname}`;
   const project = url.searchParams.get("project");
   const store = project ? (await projects.get(project))?.history : history;
   if (!store) return sendJson(response, 404, { error: "Unknown project." });
-  if (route === "GET /api/history")
+  if (route === "GET /api/history") {
+    const page = await historyPage(store, url.searchParams);
+    if (page.error) return sendJson(response, 400, { error: page.error });
     return sendJson(response, 200, {
-      entries: await store.list(),
-      // Agent calls still running, which history only has once they settle.
-      live: project ? liveAgentCalls(project) : [],
+      entries: page.entries,
+      more: page.more,
+      // Agent calls still running, which history only has once they settle;
+      // they belong to the newest page.
+      live: project && page.newest ? liveAgentCalls(project) : [],
     });
+  }
   if (route === "DELETE /api/history") {
     await store.clear();
     return sendJson(response, 200, { cleared: true });
@@ -1207,7 +1245,7 @@ async function recordCall(project, entry) {
   try {
     const links = findLinks(
       entry.args,
-      await earlierCalls(store, entry.startedAt),
+      await earlierCalls(store, entry.startedAt, entry.args),
     );
     if (links.length) entry.links = links;
   } catch (cause) {
@@ -1233,8 +1271,12 @@ async function recordCall(project, entry) {
   });
   if (project) {
     scheduleAssessment(project);
-    // A survey's own record doesn't call for another survey.
-    if (entry.name !== SURVEY_TOOL) scheduleSurvey(project);
+    // The bridge's own survey and map records don't call for another survey.
+    if (entry.name !== SURVEY_TOOL && entry.name !== MAP_TOOL)
+      scheduleSurvey(project);
+    // A new or synced index gets a fresh map.
+    if (entry.name === "index_source_graph" && entry.outcome === "ok")
+      backgroundCodeMap(project);
   }
 }
 
@@ -1252,31 +1294,35 @@ const surveying = new Map();
 const surveyTimers = new Map();
 const lastSurveyAt = new Map();
 
-/** Runs the survey for a project now; concurrent requests share one run. */
-function runSurvey(project) {
+/**
+ * Runs one rene tool for a project through the bridge's MCP connection and
+ * records it in the project's history as a workbench call. `argsFor` gets
+ * the project's verified folder. Concurrent runs of the same tool for the
+ * same project share one call (`running` holds them). Resolves to the outcome.
+ */
+function runWorkbenchCall(project, name, argsFor, running) {
   const id = project.manifest.id;
-  const running = surveying.get(id);
-  if (running) return running;
+  const current = running.get(id);
+  if (current) return current;
   const run = (async () => {
     const folder = await projects.verify(project);
     if (mcp.state !== "ready" || !mcp.client)
       throw new Error(mcp.failure ?? "The REA MCP server is not ready.");
     const startedAt = Date.now();
-    const args = { path: folder };
+    const args = argsFor(folder);
     let settled;
     try {
       const result = await mcp.client.callTool(
-        { name: SURVEY_TOOL, arguments: args },
+        { name, arguments: args },
         { timeout: requestTimeoutMs, resetTimeoutOnProgress: true },
       );
       settled = { outcome: result.isError ? "error" : "ok", result };
     } catch (cause) {
       settled = { outcome: "error", failure: describeError(cause) };
     }
-    lastSurveyAt.set(id, Date.now());
     await recordCall(project, {
       id: history.newId(startedAt),
-      name: SURVEY_TOOL,
+      name,
       args,
       startedAt,
       elapsedMs: Date.now() - startedAt,
@@ -1285,10 +1331,19 @@ function runSurvey(project) {
       ...settled,
     });
     return settled.outcome;
-  })().finally(() => surveying.delete(id));
-  surveying.set(id, run);
+  })().finally(() => running.delete(id));
+  running.set(id, run);
   return run;
 }
+
+/** Runs the survey for a project now; concurrent requests share one run. */
+const runSurvey = (project) =>
+  runWorkbenchCall(
+    project,
+    SURVEY_TOOL,
+    (folder) => ({ path: folder }),
+    surveying,
+  ).finally(() => lastSurveyAt.set(project.manifest.id, Date.now()));
 
 const backgroundSurvey = (project) =>
   void runSurvey(project).catch((cause) =>
@@ -1316,9 +1371,39 @@ function scheduleSurvey(project) {
 
 /** Surveys a project that was just opened unless its last survey is recent. */
 async function surveyIfStale(project) {
+  void codeMapIfStale(project);
   const latest = await latestSurvey(project.history).catch(() => undefined);
   if (latest && Date.now() - latest.entry.startedAt < SURVEY_FRESH_MS) return;
   backgroundSurvey(project);
+}
+
+// The code map: rene's map_source_graph over the project's CodeGraph index,
+// run by the bridge and recorded like the survey, for the assessment's Code
+// map section. It never builds an index (that is index_source_graph, which
+// is heavy and the agent's or user's call): it runs when a project with an
+// index is opened and its last map is older than CODE_MAP_FRESH_MS, and
+// right after an index_source_graph call succeeds.
+const CODE_MAP_FRESH_MS = 60 * 60_000;
+const mapping = new Map();
+
+const backgroundCodeMap = (project) =>
+  void runWorkbenchCall(
+    project,
+    MAP_TOOL,
+    (folder) => ({ project_path: folder }),
+    mapping,
+  ).catch((cause) =>
+    process.stderr.write(
+      `Could not map ${project.manifest.path}: ${describeError(cause)}\n`,
+    ),
+  );
+
+/** Maps an opened project's index unless it has none or its map is recent. */
+async function codeMapIfStale(project) {
+  if (!existsSync(join(project.manifest.path, ".codegraph"))) return;
+  const latest = await latestCodeMap(project.history).catch(() => undefined);
+  if (latest && Date.now() - latest.entry.startedAt < CODE_MAP_FRESH_MS) return;
+  backgroundCodeMap(project);
 }
 
 const ASSESSMENT_DELAY_MS = 1500;
@@ -1344,14 +1429,13 @@ function scheduleAssessment(project) {
 
 async function refreshAssessment(project) {
   const folder = await projects.verify(project);
-  const outcome = await writeAssessment(
-    folder,
-    project.manifest.name,
-    summarize(await project.history.list()),
-    await latestSurvey(project.history),
-    (await projectTurns(project)).map(turnSummary),
-    await projectTopics(project),
-  );
+  const outcome = await writeAssessment(folder, project.manifest.name, {
+    summary: summarize(await project.history.list()),
+    survey: await latestSurvey(project.history),
+    codeMap: await latestCodeMap(project.history),
+    turns: (await projectTurns(project)).map(turnSummary),
+    topics: await projectTopics(project),
+  });
   // Pages reread the file only when it changed.
   if (outcome === "created" || outcome === "updated")
     broadcast({ type: "assessment", project: project.manifest.id, outcome });

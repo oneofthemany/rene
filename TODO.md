@@ -1,13 +1,11 @@
 ## Now
 
-- **Switch to the DuckDB history.** Built and tested (`rene-history`,
-  `packages/history-store`). Stop the workbench, run
-  `node ~/.cache/rene-scratch/import-history-backup.mjs` to import the live
-  JSON history and the 2026-10-20 backup, then start it again. Until then the
-  old store keeps deleting the oldest calls past 500.
-- **History queries.** `list` still returns every summary; add paging and
-  filters (by tool, topic, time) so the page and the assessment ask for what
-  they show.
+- **Restart the workbench for history queries.** The store's protocol changed
+  (`list` became `query`), so the running bridge and the rebuilt
+  `rene-history` must restart together.
+- **Assessment summary from queries.** `summarize` (the Tools used table and
+  pathways) and the topic tree still read every summary; give the store
+  aggregate queries for them.
 - **Turn attribution.** `frontend/topics.mjs` files a turn under the last
   topic it declares. File calls under the topic in force when they were
   made, and list a turn under every topic it declared.
@@ -15,7 +13,18 @@
   call names Evidence. Add an `evidence` field to `record_topic` so a
   topic's conclusion cites the Evidence it rests on.
 
+- **Measure the source-graph instruction.** Agents are now told to ask the
+  source graph first. Compare tool calls, tokens and time on one real code
+  question with and without it.
+
 ## Roadmap
+
+- **Link topics to code.** Map the files a topic's calls touched to source
+  graph symbols, and show an open topic's blast radius
+  (`analyze_source_impact`). The links come from graph ids, not similarity.
+- **Index freshness.** The code map shows when the index was built; also say
+  how many files changed since (CodeGraph's status counts them), and sync
+  automatically when that grows.
 
 - **File the turns from before topics existed.** A declaration that names
   turns by their recorded identity (session and turn index), so the 59

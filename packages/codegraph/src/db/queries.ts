@@ -102,6 +102,13 @@ export type NodeIdentity = Pick<
   'id' | 'kind' | 'name' | 'qualifiedName' | 'signature' | 'startLine' | 'startColumn'
 >;
 
+/** An orientation map of an index ({@link QueryBuilder.getCodeMap}). */
+export interface CodeMap {
+  languages: Array<{ language: string; files: number; symbols: number }>;
+  mostDependedOnFiles: Array<{ file: string; dependents: number }>;
+  mostCalledSymbols: Array<{ name: string; kind: string; file: string; line: number; callers: number }>;
+}
+
 /**
  * Database row types (snake_case from SQLite)
  */
@@ -1174,6 +1181,61 @@ export class QueryBuilder {
       filePath: filtered[0]!.file_path,
       edgeCount: filtered[0]!.edge_count,
       nextEdgeCount: filtered[1]?.edge_count ?? 0,
+    };
+  }
+
+  /**
+   * An orientation map of the index: files and symbols per language, the
+   * files the most other files depend on (distinct dependent files over any
+   * edge kind), and the symbols called from the most places (distinct calling
+   * symbols over `calls` edges). Test and generated files are left out of the
+   * two rankings, as for {@link getDominantFile}. Scans every edge, so it is
+   * meant for an occasional overview, not per-query use.
+   */
+  getCodeMap(limit: number): CodeMap {
+    const languages = this.db.prepare(`
+      SELECT language, COUNT(*) AS files, COALESCE(SUM(node_count), 0) AS symbols
+      FROM files
+      GROUP BY language
+      ORDER BY files DESC, language
+    `).all() as Array<{ language: string; files: number; symbols: number }>;
+    // Over-fetch so the test/generated filter still leaves `limit` entries.
+    const fileRows = this.db.prepare(`
+      SELECT m.file_path AS file_path, COUNT(DISTINCT n.file_path) AS dependents
+      FROM edges e
+      JOIN nodes n ON e.source = n.id
+      JOIN nodes m ON e.target = m.id
+      WHERE n.file_path <> m.file_path
+      GROUP BY m.file_path
+      ORDER BY dependents DESC, m.file_path
+      LIMIT ?
+    `).all(limit * 4) as Array<{ file_path: string; dependents: number }>;
+    const symbolRows = this.db.prepare(`
+      SELECT m.name AS name, m.kind AS kind, m.file_path AS file_path,
+             m.start_line AS line, COUNT(DISTINCT e.source) AS callers
+      FROM edges e
+      JOIN nodes m ON e.target = m.id
+      WHERE e.kind = 'calls'
+      GROUP BY m.id
+      ORDER BY callers DESC, m.file_path, m.start_line
+      LIMIT ?
+    `).all(limit * 4) as Array<{
+      name: string; kind: string; file_path: string; line: number; callers: number;
+    }>;
+    const generated = this.getGeneratedPathsAmong([
+      ...new Set([...fileRows, ...symbolRows].map(r => r.file_path)),
+    ]);
+    const kept = (filePath: string) => !isLowValueFile(filePath, generated);
+    return {
+      languages,
+      mostDependedOnFiles: fileRows
+        .filter(r => kept(r.file_path))
+        .slice(0, limit)
+        .map(r => ({ file: r.file_path, dependents: r.dependents })),
+      mostCalledSymbols: symbolRows
+        .filter(r => kept(r.file_path))
+        .slice(0, limit)
+        .map(r => ({ name: r.name, kind: r.kind, file: r.file_path, line: r.line, callers: r.callers })),
     };
   }
 

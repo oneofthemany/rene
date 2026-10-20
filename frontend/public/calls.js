@@ -139,16 +139,37 @@ export const fromBridge = (summary, project) => ({
   stored: true,
 });
 
-/** The project's stored calls and agent calls in progress, newest first. */
-export async function loadStoredHistory(project) {
-  const [{ entries, live = [] }, turns] = await Promise.all([
-    apiJson(historyPath(project)).catch(() => ({ entries: [] })),
+/** Stored calls per History page. */
+const HISTORY_PAGE = 200;
+
+/**
+ * One page of the project's history, newest first: stored calls (older than
+ * the entry id `before` when given), agent calls in progress on the newest
+ * page, and the conversation turns in the same span of time. `until` is the
+ * start of the page already shown, so its turns aren't repeated. Returns the
+ * entries, whether older calls remain, and where the next page starts.
+ */
+export async function loadStoredHistory(project, { before, until } = {}) {
+  const query = new URLSearchParams({ limit: String(HISTORY_PAGE) });
+  if (project) query.set("project", project);
+  if (before) query.set("before", before);
+  const [{ entries = [], live = [], more = false }, turns] = await Promise.all([
+    apiJson(`/api/history?${query}`).catch(() => ({ entries: [] })),
     loadTurns(project),
   ]);
-  return [
-    ...[...live, ...entries].map((summary) => fromBridge(summary, project)),
-    ...turns,
-  ].sort((a, b) => b.startedAt - a.startedAt);
+  // While older calls remain, the page spans its oldest call onwards; turns
+  // before that come with the page that holds their calls.
+  const from = more ? entries.at(-1).startedAt : -Infinity;
+  const inSpan = (turn) =>
+    turn.startedAt >= from && (until === undefined || turn.startedAt < until);
+  return {
+    entries: [
+      ...[...live, ...entries].map((summary) => fromBridge(summary, project)),
+      ...turns.filter(inSpan),
+    ].sort((a, b) => b.startedAt - a.startedAt),
+    more,
+    next: more ? { before: entries.at(-1).id, until: from } : undefined,
+  };
 }
 
 /**

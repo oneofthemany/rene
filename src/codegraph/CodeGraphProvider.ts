@@ -20,6 +20,8 @@ import {
   indexSourceGraphInputSchema,
   indexSourceGraphResultSchema,
   listSourceFilesInputSchema,
+  mapSourceGraphInputSchema,
+  parseSourceGraphMap,
   readSourceNodeInputSchema,
   searchSourceSymbolsInputSchema,
   sourceChangeImpactInputSchema,
@@ -46,11 +48,16 @@ import { completeProviderEvidence } from "../application/ProviderOperationExecut
 const QUERY_TIMEOUT_MS = 120_000;
 const CODEGRAPH_FOLDER = ".codegraph";
 
-/** A query operation: its input, CodeGraph's tool and how arguments map onto it. */
+/**
+ * A query operation: its input, CodeGraph's tool, how arguments map onto it
+ * and, for a tool that answers in JSON, the parser that owns its result
+ * (otherwise the answer is kept as CodeGraph's text).
+ */
 interface QuerySpec {
   readonly input: z.ZodType;
   readonly upstream: string;
   readonly args: (input: Record<string, unknown>) => Record<string, unknown>;
+  readonly parse?: (projectPath: string, text: string) => object;
 }
 
 /** CodeGraph's argument names for rene's, leaving out what wasn't given. */
@@ -117,6 +124,12 @@ const QUERIES = {
     input: sourceGraphStatusInputSchema,
     upstream: "codegraph_status",
     args: () => ({}),
+  },
+  map_source_graph: {
+    input: mapSourceGraphInputSchema,
+    upstream: "codegraph_map",
+    args: rename({ limit: "limit" }),
+    parse: parseSourceGraphMap,
   },
 } as const satisfies Readonly<Record<string, QuerySpec>>;
 
@@ -289,6 +302,17 @@ export class CodeGraphProvider {
           reason: reply.text,
         },
       });
+    if (spec.parse) {
+      try {
+        return spec.parse(root, reply.text) as Record<string, unknown>;
+      } catch (cause) {
+        throw new ProviderAdapterError("codegraph", operation, {
+          cause,
+          userMessage: `CodeGraph's ${spec.upstream} answer was not the expected JSON; is rene's CodeGraph built (npm run codegraph:build)?`,
+          diagnostics: { project_path: root, upstream_tool: spec.upstream },
+        });
+      }
+    }
     return sourceGraphQueryResultSchema.parse({
       project_path: root,
       upstream_tool: spec.upstream,

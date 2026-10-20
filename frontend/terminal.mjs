@@ -36,6 +36,12 @@ const BASE_INSTRUCTIONS = [
   "write git history; leave changes in the working tree, say what is ready, and ask the user to commit.",
   "Other agents (Claude Code, GitHub Copilot CLI) may have worked in this folder before you: see what they",
   "asked and did with rene's list_agent_conversations and read_agent_conversation before picking up their work.",
+  "To understand source code (how something works, where it lives, what an edit would touch), ask rene's",
+  "source graph before searching text or reading files one by one: explore_source_graph returns the relevant",
+  "symbols' source, the call paths between them and what depends on them in one call; follow up with",
+  "read_source_node, find_source_callers, find_source_callees or analyze_source_impact. They need the",
+  "project's CodeGraph index (.codegraph/): when there is none and the code is more than a handful of files,",
+  "build it with index_source_graph (mode build), and bring it up to date with mode sync after large changes.",
 ];
 
 /**
@@ -51,13 +57,15 @@ export const agentInstructions = (assessment) =>
           "As you learn, keep its Target, Rules, Findings and Open questions sections current, citing the",
           "history entry ids a finding rests on when you know them. Leave the text between the",
           "rene:generated markers alone; the workbench rewrites it from the recorded tool calls.",
-          "Its Topics section lists the conversation threads and topics with their ids.",
+          "Its Code map section names the most depended-on files and most-called symbols, from the source",
+          "graph, as places to start; its Topics section lists the conversation threads and topics with their ids.",
         ]
       : []),
     "When a request begins, declare it with the rene record_topic tool: a new feature, question, bug,",
     "investigation and so on goes under the thread it belongs to (declare a thread first when none fits),",
     "and you update the topic with status done or abandoned, and a summary of what was found or decided,",
-    "when it ends. The workbench files your turns and tool calls under the topic in force.",
+    "when it ends. The workbench files your turns and tool calls under the topic in force; when a turn",
+    "also updates other topics, declare its own topic last.",
   ].join(" ");
 
 /**

@@ -1759,6 +1759,22 @@ export const tools: ToolDefinition[] = [
     annotations: READ_ONLY_ANNOTATIONS,
   },
   {
+    name: 'codegraph_map',
+    description: 'Orientation map of the indexed project, as JSON: index totals and last indexed time, files and symbols per language, the files the most other files depend on, and the symbols called from the most places (test and generated files left out of the rankings).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: {
+          type: 'number',
+          description: 'Entries in each ranking (default 15, max 50)',
+          default: 15,
+        },
+        projectPath: projectPathProperty,
+      },
+    },
+    annotations: READ_ONLY_ANNOTATIONS,
+  },
+  {
     name: 'codegraph_files',
     description: 'Indexed file tree with language + symbol counts. Faster than Glob for project layout.',
     inputSchema: {
@@ -3012,6 +3028,7 @@ export class ToolHandler {
       case 'codegraph_explore': return await this.handleExplore(args);
       case 'codegraph_node': return await this.handleNode(args);
       case 'codegraph_files': return await this.handleFiles(args);
+      case 'codegraph_map': return await this.handleMap(args);
       default: return this.errorResult(`Unknown tool: ${toolName}`);
     }
   }
@@ -8096,6 +8113,22 @@ export class ToolHandler {
   /**
    * Handle codegraph_files - get project file structure from the index
    */
+  /**
+   * Handle codegraph_map - an orientation map of the index, as JSON
+   */
+  private async handleMap(args: Record<string, unknown>): Promise<ToolResult> {
+    const cg = this.getCodeGraph(args.projectPath as string | undefined);
+    const limit = args.limit != null ? clamp(args.limit as number, 1, 50) : 15;
+    const stats = cg.getStats();
+    return this.textResult(JSON.stringify({
+      files: stats.fileCount,
+      symbols: stats.nodeCount,
+      links: stats.edgeCount,
+      lastIndexedAt: cg.getLastIndexedAt(),
+      ...cg.getCodeMap(limit),
+    }));
+  }
+
   private async handleFiles(args: Record<string, unknown>): Promise<ToolResult> {
     const cg = this.getCodeGraph(args.projectPath as string | undefined);
     const pathFilter = args.path as string | undefined;

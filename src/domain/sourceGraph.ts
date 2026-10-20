@@ -167,6 +167,99 @@ export const sourceGraphStatusInputSchema = z.strictObject({
   project_path: projectPath,
 });
 
+export const mapSourceGraphInputSchema = z.strictObject({
+  project_path: projectPath,
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(50)
+    .default(15)
+    .describe("Entries in each ranking."),
+});
+
+const count = z.number().int().nonnegative();
+
+/**
+ * An orientation map of a project's index, parsed from CodeGraph's
+ * codegraph_map: totals, files and symbols per language, the files the most
+ * other files depend on and the symbols called from the most places (test
+ * and generated files are left out of both rankings).
+ */
+export const sourceGraphMapResultSchema = z.strictObject({
+  project_path: z.string(),
+  upstream_tool: z.literal("codegraph_map"),
+  files: count,
+  symbols: count,
+  links: count,
+  /** When the index was last built or synced; null when CodeGraph has no time. */
+  last_indexed_at: z.string().nullable(),
+  languages: z.array(
+    z.strictObject({ language: z.string(), files: count, symbols: count }),
+  ),
+  most_depended_on_files: z.array(
+    z.strictObject({ file: z.string(), dependent_files: count }),
+  ),
+  most_called_symbols: z.array(
+    z.strictObject({
+      name: z.string(),
+      kind: z.string(),
+      file: z.string(),
+      line: count,
+      callers: count,
+    }),
+  ),
+});
+export type SourceGraphMapResult = z.infer<typeof sourceGraphMapResultSchema>;
+
+/** codegraph_map's JSON as CodeGraph writes it; parsed once, here. */
+const upstreamCodeMapSchema = z.object({
+  files: count,
+  symbols: count,
+  links: count,
+  lastIndexedAt: z.number().nullable(),
+  languages: z.array(
+    z.object({ language: z.string(), files: count, symbols: count }),
+  ),
+  mostDependedOnFiles: z.array(
+    z.object({ file: z.string(), dependents: count }),
+  ),
+  mostCalledSymbols: z.array(
+    z.object({
+      name: z.string(),
+      kind: z.string(),
+      file: z.string(),
+      line: count,
+      callers: count,
+    }),
+  ),
+});
+
+/** The map from codegraph_map's text; throws when it isn't that JSON. */
+export function parseSourceGraphMap(
+  projectPath: string,
+  text: string,
+): SourceGraphMapResult {
+  const map = upstreamCodeMapSchema.parse(JSON.parse(text));
+  return sourceGraphMapResultSchema.parse({
+    project_path: projectPath,
+    upstream_tool: "codegraph_map",
+    files: map.files,
+    symbols: map.symbols,
+    links: map.links,
+    last_indexed_at:
+      map.lastIndexedAt === null
+        ? null
+        : new Date(map.lastIndexedAt).toISOString(),
+    languages: map.languages,
+    most_depended_on_files: map.mostDependedOnFiles.map((entry) => ({
+      file: entry.file,
+      dependent_files: entry.dependents,
+    })),
+    most_called_symbols: map.mostCalledSymbols,
+  });
+}
+
 /** What a query returns: CodeGraph's answer, as text from the project. */
 export const sourceGraphQueryResultSchema = z.strictObject({
   project_path: z.string(),

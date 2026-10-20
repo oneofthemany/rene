@@ -6,32 +6,106 @@
 //
 //   {"id":1,"op":"record","summary":{...},"result":{...}|null}
 //   {"id":2,"op":"import","entries":[{"summary":{...},"result":...}, ...]}
-//   {"id":3,"op":"list"}            newest first, summaries only
+//   {"id":3,"op":"query","filter":{...}}   summaries only, newest first
 //   {"id":4,"op":"result","key":"<entry id>"}
 //   {"id":5,"op":"clear"}
 //
 // answered by {"id":n,"ok":true,"value":...} or {"id":n,"ok":false,"error":"..."}.
+// A query's filter members are all optional and combine with AND: name,
+// outcome, startedSince and startedBefore (startedAt bounds, inclusive),
+// beforeId (ids strictly older, the paging cursor), evidence (entries whose
+// summary lists any of these issued Evidence ids) and limit.
+//
 // Summaries and results are kept as the JSON text the bridge sent; the bridge
 // (frontend/history.mjs) owns their shape. Only id, startedAt and name are
-// read from a summary, for keys and ordering. Closing stdin ends the process
-// and closes the database cleanly.
+// read from a summary for keys and ordering, and outcome and evidence for
+// filters. Closing stdin ends the process and closes the database cleanly.
 
 use std::io::{self, BufRead, BufWriter, Write};
 
-use duckdb::{params, Connection, OptionalExt};
+use duckdb::types::Value;
+use duckdb::{params, params_from_iter, Connection, OptionalExt};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
 const SCHEMA_VERSION: &str = "1";
 
+/// A request; its id is read separately (IdOnly), so even a malformed
+/// request is answered under it.
 #[derive(Deserialize)]
 struct Request {
-    id: u64,
     op: String,
     summary: Option<Box<RawValue>>,
     result: Option<Box<RawValue>>,
     entries: Option<Vec<Entry>>,
     key: Option<String>,
+    #[serde(default)]
+    filter: Filter,
+}
+
+/// Which summaries a query returns; every member narrows it.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Filter {
+    name: Option<String>,
+    outcome: Option<String>,
+    started_since: Option<i64>,
+    started_before: Option<i64>,
+    before_id: Option<String>,
+    evidence: Option<Vec<String>>,
+    limit: Option<u32>,
+}
+
+/// The query's SQL and its parameters, in order.
+fn query_sql(filter: &Filter) -> Result<(String, Vec<Value>), String> {
+    let mut clauses = Vec::new();
+    let mut values = Vec::new();
+    if let Some(name) = &filter.name {
+        clauses.push("name = ?");
+        values.push(Value::Text(name.clone()));
+    }
+    if let Some(outcome) = &filter.outcome {
+        clauses.push("json_extract_string(summary, '$.outcome') = ?");
+        values.push(Value::Text(outcome.clone()));
+    }
+    if let Some(since) = filter.started_since {
+        clauses.push("started_at >= ?");
+        values.push(Value::BigInt(since));
+    }
+    if let Some(before) = filter.started_before {
+        clauses.push("started_at <= ?");
+        values.push(Value::BigInt(before));
+    }
+    if let Some(id) = &filter.before_id {
+        clauses.push("id < ?");
+        values.push(Value::Text(id.clone()));
+    }
+    if let Some(evidence) = &filter.evidence {
+        // An empty list matches nothing, as "issued any of none" should.
+        clauses.push(
+            "list_has_any(json_extract_string(summary, '$.evidence[*]'), json_extract_string(?, '$[*]'))",
+        );
+        values.push(Value::Text(
+            serde_json::to_string(evidence).map_err(|e| e.to_string())?,
+        ));
+    }
+    let mut sql = String::from("SELECT summary FROM calls");
+    if !clauses.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&clauses.join(" AND "));
+    }
+    sql.push_str(" ORDER BY id DESC");
+    if let Some(limit) = filter.limit {
+        sql.push_str(" LIMIT ?");
+        values.push(Value::BigInt(limit.into()));
+    }
+    Ok((sql, values))
+}
+
+/// Just a request's id, read before the rest is checked.
+#[derive(Deserialize)]
+struct IdOnly {
+    id: u64,
 }
 
 #[derive(Deserialize)]
@@ -115,12 +189,11 @@ fn handle(conn: &Connection, request: Request) -> Outcome {
             conn.execute_batch("COMMIT").map_err(db)?;
             Ok(format!("{{\"added\":{added},\"total\":{}}}", count(conn).map_err(db)?))
         }
-        "list" => {
-            let mut statement = conn
-                .prepare("SELECT summary FROM calls ORDER BY id DESC")
-                .map_err(db)?;
+        "query" => {
+            let (sql, values) = query_sql(&request.filter)?;
+            let mut statement = conn.prepare(&sql).map_err(db)?;
             let rows = statement
-                .query_map([], |row| row.get::<_, String>(0))
+                .query_map(params_from_iter(values), |row| row.get::<_, String>(0))
                 .map_err(db)?;
             let mut out = String::from("[");
             for (index, row) in rows.enumerate() {
@@ -182,20 +255,18 @@ fn main() {
         if line.trim().is_empty() {
             continue;
         }
-        let response = match serde_json::from_str::<Request>(&line) {
-            Ok(request) => {
-                let id = request.id;
-                match handle(&conn, request) {
-                    Ok(value) => format!("{{\"id\":{id},\"ok\":true,\"value\":{value}}}"),
-                    Err(error) => format!(
-                        "{{\"id\":{id},\"ok\":false,\"error\":{}}}",
-                        serde_json::to_string(&error).unwrap_or_else(|_| "\"error\"".into())
-                    ),
-                }
-            }
-            Err(e) => format!(
-                "{{\"id\":null,\"ok\":false,\"error\":{}}}",
-                serde_json::to_string(&format!("bad request: {e}")).unwrap_or_default()
+        // A request that names its id is always answered under it, even when
+        // the rest of it is malformed, so the bridge never waits on it.
+        let id = serde_json::from_str::<IdOnly>(&line).ok().map(|only| only.id);
+        let outcome = serde_json::from_str::<Request>(&line)
+            .map_err(|e| format!("bad request: {e}"))
+            .and_then(|request| handle(&conn, request));
+        let id = id.map_or_else(|| "null".to_string(), |id| id.to_string());
+        let response = match outcome {
+            Ok(value) => format!("{{\"id\":{id},\"ok\":true,\"value\":{value}}}"),
+            Err(error) => format!(
+                "{{\"id\":{id},\"ok\":false,\"error\":{}}}",
+                serde_json::to_string(&error).unwrap_or_else(|_| "\"error\"".into())
             ),
         };
         if writeln!(out, "{response}").and_then(|_| out.flush()).is_err() {

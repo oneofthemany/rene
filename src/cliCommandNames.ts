@@ -278,5 +278,6 @@ export const MCP_TOOLS_WITHOUT_DEDICATED_CLI = Object.freeze([
   "analyze_source_impact",
   "list_source_files",
   "source_graph_status",
+  "map_source_graph",
   "index_source_graph",
 ]);

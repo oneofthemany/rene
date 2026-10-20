@@ -111,9 +111,18 @@ export function findLinks(args, earlier) {
   return links;
 }
 
-/** The project's calls recorded before `before`, newest first. */
-export const earlierCalls = async (history, before) =>
-  (await history.list()).filter((entry) => entry.startedAt <= before);
+/**
+ * The project's calls recorded before `before` that issued Evidence `args`
+ * names, newest first: the only earlier calls findLinks can link to. A call
+ * naming no Evidence needs no lookup.
+ */
+export async function earlierCalls(history, before, args) {
+  const named = [
+    ...new Set(referencedEvidence(args).map(({ evidence }) => evidence)),
+  ];
+  if (named.length === 0) return [];
+  return history.list({ startedBefore: before, evidence: named });
+}
 
 const MAX_CHAIN = 6;
 const MAX_PATHS = 2000;
@@ -214,9 +223,11 @@ const cell = (text) => String(text).replaceAll("|", "\\|");
  * the survey its Evidence carries, or undefined when there is none.
  */
 export async function latestSurvey(history) {
-  const entry = (await history.list()).find(
-    (candidate) => candidate.name === SURVEY_TOOL && candidate.outcome === "ok",
-  );
+  const [entry] = await history.list({
+    name: SURVEY_TOOL,
+    outcome: "ok",
+    limit: 1,
+  });
   if (!entry) return undefined;
   const survey = payloadOf(await history.result(entry.id))?.normalized_result;
   return survey && Array.isArray(survey.file_types)
@@ -289,6 +300,65 @@ function surveyLines(latest) {
     lines.push("- The entry limit was reached.");
   if (coverage.unreadable.length)
     lines.push(`- Unreadable: ${coverage.unreadable.length} entries`);
+  lines.push("");
+  return lines;
+}
+
+export const MAP_TOOL = "map_source_graph";
+
+/**
+ * The newest successful map_source_graph call in a history, with the map
+ * its Evidence carries, or undefined when there is none.
+ */
+export async function latestCodeMap(history) {
+  const [entry] = await history.list({
+    name: MAP_TOOL,
+    outcome: "ok",
+    limit: 1,
+  });
+  if (!entry) return undefined;
+  const map = payloadOf(await history.result(entry.id))?.normalized_result;
+  return map && Array.isArray(map.most_called_symbols)
+    ? { entry, map }
+    : undefined;
+}
+
+/**
+ * Where to start in the code: CodeGraph's map of the project's index (the
+ * files most others depend on, the symbols called from most places), with
+ * the call it came from and when the index was built.
+ */
+function codeMapLines(latest) {
+  const lines = ["## Code map", ""];
+  if (!latest)
+    return [
+      ...lines,
+      "_No code map yet: build the project's source graph with index_source_graph; the workbench then maps it with map_source_graph._",
+      "",
+    ];
+  const { entry, map } = latest;
+  lines.push(
+    `_From map_source_graph, ${new Date(entry.startedAt).toISOString()} (entry ${shortId(entry.id)}); index last built ${map.last_indexed_at ?? "at an unknown time"}: ${map.files} files, ${map.symbols} symbols, ${map.links} links. Test and generated files are left out of the rankings. Ask explore_source_graph about any of these before reading files one by one._`,
+    "",
+    `Languages: ${map.languages
+      .slice(0, 8)
+      .map(({ language, files }) => `${language} (${files})`)
+      .join(", ")}`,
+    "",
+    "| Most depended-on file | Dependent files |",
+    "| --- | --- |",
+  );
+  for (const file of map.most_depended_on_files)
+    lines.push(`| \`${cell(file.file)}\` | ${file.dependent_files} |`);
+  lines.push(
+    "",
+    "| Most-called symbol | Kind | Where | Callers |",
+    "| --- | --- | --- | --- |",
+  );
+  for (const symbol of map.most_called_symbols)
+    lines.push(
+      `| \`${cell(symbol.name)}\` | ${symbol.kind} | \`${cell(symbol.file)}:${symbol.line}\` | ${symbol.callers} |`,
+    );
   lines.push("");
   return lines;
 }
@@ -377,14 +447,20 @@ function topicLines(tree) {
   return lines;
 }
 
-/** The generated block, markers included. */
-export function generatedBlock(summary, latest, turns, tree) {
+/**
+ * The generated block, markers included.
+ * @param {{ summary: object, survey?: object, codeMap?: object,
+ *   turns?: object[], topics?: object }} parts what summarize, latestSurvey,
+ *   latestCodeMap, the conversation turns and the topic tree produced
+ */
+export function generatedBlock({ summary, survey, codeMap, turns, topics }) {
   const lines = [
     BEGIN,
     "<!-- Rewritten by the REA workbench from this project's call history. Links are confirmed by Evidence ID: a call named Evidence (ev_<sha256>) an earlier call returned. Edit outside these markers. -->",
     "",
-    ...surveyLines(latest),
-    ...topicLines(tree),
+    ...surveyLines(survey),
+    ...codeMapLines(codeMap),
+    ...topicLines(topics),
     ...conversationLines(turns),
     "## Pathways",
     "",
@@ -457,16 +533,9 @@ const template = (name, block) =>
  * file from the template when there is none. Returns what happened.
  * @returns {Promise<"created" | "updated" | "unchanged" | "markers-missing">}
  */
-export async function writeAssessment(
-  folder,
-  name,
-  summary,
-  latest,
-  turns,
-  tree,
-) {
+export async function writeAssessment(folder, name, parts) {
   const path = join(folder, ASSESSMENT_FILE);
-  const block = generatedBlock(summary, latest, turns, tree);
+  const block = generatedBlock(parts);
   let current;
   try {
     current = await readFile(path, "utf8");

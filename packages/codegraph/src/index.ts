@@ -30,7 +30,7 @@ import {
 } from './types';
 import { DatabaseConnection, getDatabasePath, removeDatabaseFiles } from './db';
 import { WalCheckpointValve, resolveWalValveMb } from './db/wal-valve';
-import { QueryBuilder } from './db/queries';
+import { QueryBuilder, type CodeMap } from './db/queries';
 import { importPathKeys, moduleReferenceKeys } from './db/reference-tail';
 import {
   isInitialized,
@@ -1478,6 +1478,14 @@ export class CodeGraph {
    */
   getLastIndexedAt(): number | null {
     return this.queries.getLastIndexedAt();
+  }
+
+  /**
+   * An orientation map of the index: files and symbols per language, the
+   * most-depended-on files and the most-called symbols, `limit` of each.
+   */
+  getCodeMap(limit = 15): CodeMap {
+    return this.queries.getCodeMap(limit);
   }
 
   /**

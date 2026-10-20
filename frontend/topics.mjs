@@ -40,9 +40,9 @@ const payloadOf = (result) => {
  * Reads each declaration's stored result for the id a new topic was given.
  */
 export async function currentTopics(history) {
-  const declarations = (await history.list())
-    .filter((entry) => entry.name === TOPIC_TOOL && entry.outcome === "ok")
-    .sort((a, b) => a.startedAt - b.startedAt);
+  const declarations = (
+    await history.list({ name: TOPIC_TOOL, outcome: "ok" })
+  ).sort((a, b) => a.startedAt - b.startedAt);
   const topics = new Map();
   const declaredBy = new Map();
   for (const entry of declarations) {
