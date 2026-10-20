@@ -1106,6 +1106,9 @@ async function routeHistory(request, response, url) {
     await store.clear();
     return sendJson(response, 200, { cleared: true });
   }
+  // Before the entry-id route below, which the word would also match.
+  if (route === "GET /api/history/usage")
+    return sendJson(response, 200, { usage: await store.usage() });
   const audit = /^\/api\/history\/([\w-]+)\/audit$/.exec(url.pathname);
   if (request.method === "GET" && audit) {
     const entry = project ? await projects.get(project) : undefined;

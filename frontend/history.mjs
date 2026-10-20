@@ -345,6 +345,12 @@ export function createHistory(directory, limits) {
         `"op":"query","filter":${JSON.stringify(filter)}`,
       ),
 
+    /**
+     * Calls per tool name, from one aggregate in the store rather than the
+     * summaries: [{ name, calls, lastStartedAt }], by name.
+     */
+    usage: async () => (await connected()).send(`"op":"usage"`),
+
     /** The stored result for one entry, or undefined when none is kept. */
     async result(id) {
       if (!ID.test(id)) return undefined;

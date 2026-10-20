@@ -7,6 +7,20 @@
   `pack-npm.sh`, `npm-shim.js`, `local-install.sh`), the docs site (`site/`)
   and the hosted telemetry backends (`telemetry-worker/`,
   `telemetry-dashboard/`).
+- **CodeGraph's viewer for all of rene (paused, plan agreed).** The viewer
+  (`packages/codegraph/ui`, Svelte + @xyflow) reads through a `GraphAdapter`
+  seam (`ui/src/lib/adapter.ts`, 13 read methods, `Wire*` shapes in
+  `wire.ts`) with views for map, entry points, dead code, screens, steps and
+  flow. rene's graphs each have their own schema (the shared application
+  graph, `NativeInvestigationGraph`, the Android/Apple/Harmony inventories,
+  call paths), and the `Wire*` shapes carry no Evidence or unknowns. Three
+  steps:
+  1. A neutral view-graph contract in `src/domain` (nodes, edges, Evidence,
+     coverage, unknowns) that each producer projects to.
+  2. A rene `GraphAdapter` over that contract, and the viewer mounted in the
+     workbench, fed by CodeGraph first.
+  3. The other producers (application graphs, native investigation graph,
+     call paths) projected to the contract.
 - **Telemetry for all of rene, into the journal (placeholder).** Every part
   of rene reports to the user's telemetry journal (sherloQ,
   `http://127.0.0.1:5007`), never off the machine. CodeGraph already does:
@@ -33,13 +47,13 @@
 - **A long-running process tool.** Nothing in rene keeps a server up across
   calls (start, read output, stop, owned by rene). Needed to drive a web UI
   with the browser tools, e.g. CodeGraph's viewer.
-- **Tool popularity in the sidebar.** Show next to each tool in the sidebar
-  how many times it has been called (and when last), from the history store,
-  so popular and unused tools stand out. Needs the same aggregate query as
-  the next item (counts by tool name, not reading every summary).
 - **Assessment summary from queries.** `summarize` (the Tools used table and
-  pathways) and the topic tree still read every summary; give the store
-  aggregate queries for them.
+  pathways) and the topic tree still read every summary. The store now has
+  one aggregate, `usage` (calls and last start per tool, used by the
+  sidebar); the Tools used table can read it, and pathways need their own.
+- **`read_file` can't show an image.** A PNG comes back as "binary" with a
+  digest, so checking a screenshot (e.g. a workbench capture) needs Claude
+  Code's own Read. Return image files as MCP image content.
 - **Turn attribution.** `frontend/topics.mjs` files a turn under the last
   topic it declares. File calls under the topic in force when they were
   made, and list a turn under every topic it declared.

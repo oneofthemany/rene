@@ -17,7 +17,9 @@ import {
   loadStoredResult,
   loadTurn,
   loadTopics,
+  loadToolUsage,
   loadTurns,
+  countToolUse,
   startCall,
 } from "./calls.js";
 import { renderTopics, setTopicsExpanded } from "./topics.js";
@@ -52,6 +54,8 @@ const state = {
   shown: undefined,
   /** Calls of the active project (or the unassigned ones), newest first. */
   history: [],
+  /** Calls per tool in that history (loadToolUsage); undefined until read. */
+  usage: undefined,
   /** History filter: "all", "agent" or "workbench". */
   source: "all",
 };
@@ -335,6 +339,7 @@ function renderCatalog() {
   drawCatalog({
     tools: state.tools,
     prompts: state.prompts,
+    usage: state.usage,
     filter: document.getElementById("tool-filter").value.trim().toLowerCase(),
     selected: state.selected,
     onTool: (name) => void selectTool(name),
@@ -601,11 +606,18 @@ function run() {
 
 let renderPending = false;
 /** Coalesces call updates into one render per frame. */
+/** Set when tool usage changed; the next scheduled render redraws the catalog. */
+let catalogStale = false;
+
 function scheduleRender() {
   if (renderPending) return;
   renderPending = true;
   requestAnimationFrame(() => {
     renderPending = false;
+    if (catalogStale) {
+      catalogStale = false;
+      renderCatalog();
+    }
     renderHistory();
     renderWorkflow();
     renderShown();
@@ -866,8 +878,13 @@ function setSource(source) {
 /** Loads the active project's history, keeping this page's calls in flight. */
 async function loadHistory() {
   const project = activeProject()?.id;
-  const { entries: stored, next } = await loadStoredHistory(project);
+  const [{ entries: stored, next }, usage] = await Promise.all([
+    loadStoredHistory(project),
+    loadToolUsage(project),
+  ]);
   if (project !== activeProject()?.id) return;
+  state.usage = usage;
+  renderCatalog();
   olderHistory = next;
   const live = state.history.filter(
     (entry) => !entry.stored && isLive(entry) && entry.project === project,
@@ -914,6 +931,12 @@ document
 function mergeBridgeEntry({ project, entry: summary }) {
   const active = activeProject()?.id ?? null;
   if (project !== active) return;
+  // The bridge sends a call once history has stored it; a running agent call
+  // isn't stored yet.
+  if (summary.outcome !== "running" && state.usage) {
+    countToolUse(state.usage, summary);
+    catalogStale = true;
+  }
   const index = state.history.findIndex(
     (entry) => entry.historyId === summary.id,
   );
@@ -974,6 +997,8 @@ document
     button.textContent = "Clear";
     await clearStoredHistory(activeProject()?.id);
     state.history = state.history.filter(isLive);
+    state.usage = new Map();
+    renderCatalog();
     if (state.shown && !isLive(state.shown)) {
       state.shown = undefined;
       document.getElementById("result-view").replaceChildren();

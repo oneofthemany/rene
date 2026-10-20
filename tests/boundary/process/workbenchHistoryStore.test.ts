@@ -25,6 +25,7 @@ interface History {
   newId(startedAt: number): string;
   record(entry: Record<string, unknown>): Promise<Summary>;
   list(filter?: Record<string, unknown>): Promise<Summary[]>;
+  usage(): Promise<{ name: string; calls: number; lastStartedAt: number }[]>;
   result(id: string): Promise<unknown>;
   importJson(folder: string): Promise<{ added: number }>;
   clear(): Promise<void>;
@@ -154,6 +155,15 @@ it("keeps workbench history in DuckDB: import, record, query, restart, crash and
     ),
   ).toEqual([summaries[1]!.id]);
 
+  // Calls per tool, with each tool's latest start: the sidebar's numbers.
+  const expectedUsage = [
+    { name: "big", calls: 1, lastStartedAt: now + 1 },
+    { name: "probe", calls: 1, lastStartedAt: now },
+    { name: "read_file", calls: 3, lastStartedAt: summaries[4]!.startedAt },
+    { name: "record_topic", calls: 2, lastStartedAt: summaries[3]!.startedAt },
+  ];
+  expect(await history.usage()).toEqual(expectedUsage);
+
   // One owned store process, leading its own process group.
   const [pid, ...others] = await storeProcesses(database);
   expect(others).toEqual([]);
@@ -169,11 +179,13 @@ it("keeps workbench history in DuckDB: import, record, query, restart, crash and
   await history.close();
   history = createHistory(directory, { maxEntryBytes: MAX_ENTRY_BYTES });
   expect(await history.list()).toHaveLength(summaries.length + 2);
+  expect(await history.usage()).toEqual(expectedUsage);
   expect((await history.importJson(archived)).added).toBe(0);
   expect(existsSync(archived)).toBe(true);
 
   await history.clear();
   expect(await history.list()).toEqual([]);
+  expect(await history.usage()).toEqual([]);
   await history.close();
   expect(await storeProcesses(database)).toEqual([]);
 });

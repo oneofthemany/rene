@@ -216,6 +216,32 @@ export const loadAudit = (entry) =>
 export const clearStoredHistory = (project) =>
   apiJson(historyPath(project), { method: "DELETE" });
 
+/**
+ * How often each tool was called in the project's stored history, and when
+ * last: Map name → { calls, lastStartedAt }. Undefined when it can't be read,
+ * so no tool is shown as unused for want of the numbers.
+ */
+export const loadToolUsage = (project) =>
+  apiJson(historyPath(project, "usage")).then(
+    ({ usage }) =>
+      new Map(
+        usage.map(({ name, calls, lastStartedAt }) => [
+          name,
+          { calls, lastStartedAt },
+        ]),
+      ),
+    () => undefined,
+  );
+
+/** Counts one call history has just stored into `usage`. */
+export function countToolUse(usage, { name, startedAt }) {
+  const known = usage.get(name);
+  usage.set(name, {
+    calls: (known?.calls ?? 0) + 1,
+    lastStartedAt: Math.max(known?.lastStartedAt ?? startedAt, startedAt),
+  });
+}
+
 /** Restored entries carry only a summary until one is opened. */
 export async function loadStoredResult(entry) {
   if (!entry.stored || entry.result || entry.resultOmitted) return;

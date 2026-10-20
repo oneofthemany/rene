@@ -512,6 +512,18 @@ button.link {
   text-overflow: ellipsis;
 }
 
+.tool-item.unused .name {
+  color: var(--muted);
+}
+
+.uses {
+  flex: none;
+  font-family: var(--sans);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
 .effect {
   flex: none;
   font-family: var(--sans);

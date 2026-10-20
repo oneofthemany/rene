@@ -8,7 +8,8 @@
 //   {"id":2,"op":"import","entries":[{"summary":{...},"result":...}, ...]}
 //   {"id":3,"op":"query","filter":{...}}   summaries only, newest first
 //   {"id":4,"op":"result","key":"<entry id>"}
-//   {"id":5,"op":"clear"}
+//   {"id":5,"op":"usage"}   per name: [{"name","calls","lastStartedAt"}, ...]
+//   {"id":6,"op":"clear"}
 //
 // answered by {"id":n,"ok":true,"value":...} or {"id":n,"ok":false,"error":"..."}.
 // A query's filter members are all optional and combine with AND: name,
@@ -214,6 +215,24 @@ fn handle(conn: &Connection, request: Request) -> Outcome {
             Ok(found.flatten().unwrap_or_else(|| "null".into()))
         }
         "count" => Ok(count(conn).map_err(db)?.to_string()),
+        "usage" => {
+            // One aggregate over the keyed columns, so a caller counting calls
+            // per tool never reads the summaries.
+            let mut statement = conn
+                .prepare("SELECT name, count(*), max(started_at) FROM calls GROUP BY name ORDER BY name")
+                .map_err(db)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok(serde_json::json!({
+                        "name": row.get::<_, String>(0)?,
+                        "calls": row.get::<_, i64>(1)?,
+                        "lastStartedAt": row.get::<_, i64>(2)?,
+                    }))
+                })
+                .map_err(db)?;
+            let usage = rows.collect::<Result<Vec<_>, _>>().map_err(db)?;
+            serde_json::to_string(&usage).map_err(|e| e.to_string())
+        }
         "clear" => {
             conn.execute("DELETE FROM calls", []).map_err(db)?;
             Ok("null".into())

@@ -64,6 +64,20 @@ export function effectBadge(annotations) {
   return null;
 }
 
+/** How often history holds the tool, with its last call in the title. */
+function usageBadge(use) {
+  if (!use) return null;
+  const calls = `${use.calls} ${use.calls === 1 ? "call" : "calls"}`;
+  return h(
+    "span",
+    {
+      class: "uses",
+      title: `${calls}, last ${new Date(use.lastStartedAt).toLocaleString()}`,
+    },
+    String(use.calls),
+  );
+}
+
 const WORKFLOWS = "Guided workflows";
 
 /** Case-insensitive match on name, title, or description. */
@@ -92,11 +106,14 @@ function groupTools(tools, filter) {
 
 /**
  * Renders the sidebar: guided workflows (MCP prompts) first, then tool families.
- * `selected` is { kind: "tool" | "prompt", name }.
+ * `selected` is { kind: "tool" | "prompt", name }. `usage` (Map name →
+ * { calls, lastStartedAt }) shows each tool's calls in the project's history
+ * and dims the ones never called; undefined while it isn't known.
  */
 export function renderCatalog({
   tools,
   prompts,
+  usage,
   filter,
   selected,
   onTool,
@@ -121,20 +138,25 @@ export function renderCatalog({
     );
   const toolGroups = groupTools(tools, filter).map(([label, members]) => [
     label,
-    members.map((tool) =>
-      h(
+    members.map((tool) => {
+      const use = usage?.get(tool.name);
+      const unused = usage !== undefined && !use;
+      return h(
         "button",
         {
           type: "button",
-          class: "tool-item",
+          class: unused ? "tool-item unused" : "tool-item",
           "aria-current": String(isSelected("tool", tool.name)),
-          title: tool.title ?? tool.name,
+          title: unused
+            ? `${tool.title ?? tool.name}\nNever called in this history`
+            : (tool.title ?? tool.name),
           onclick: () => onTool(tool.name),
         },
         h("span", { class: "name" }, tool.name),
+        usageBadge(use),
         effectBadge(tool.annotations),
-      ),
-    ),
+      );
+    }),
   ]);
   const groups = [
     ...(workflowItems.length ? [[WORKFLOWS, workflowItems]] : []),
