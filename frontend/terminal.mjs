@@ -41,7 +41,7 @@ const BASE_INSTRUCTIONS = [
   "symbols' source, the call paths between them and what depends on them in one call; follow up with",
   "read_source_node, find_source_callers, find_source_callees or analyze_source_impact. They need the",
   "project's CodeGraph index (.codegraph/): when there is none and the code is more than a handful of files,",
-  "build it with index_source_graph (mode build), and bring it up to date with mode sync after large changes.",
+  "build it with index_source_graph (mode build); after that rene keeps it in step with your edits by itself.",
 ];
 
 /**

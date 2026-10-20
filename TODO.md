@@ -22,9 +22,10 @@
 - **Link topics to code.** Map the files a topic's calls touched to source
   graph symbols, and show an open topic's blast radius
   (`analyze_source_impact`). The links come from graph ids, not similarity.
-- **Index freshness.** The code map shows when the index was built; also say
-  how many files changed since (CodeGraph's status counts them), and sync
-  automatically when that grows.
+- **Auto-sync regression test in the repo.** Queries now sync the index
+  first; the end-to-end check (edit, query, two processes at once) lives in
+  `~/.cache/rene-scratch/codegraph-auto-sync-e2e.mjs`. Move it into the test
+  suite as a real CodeGraph workflow test.
 
 - **File the turns from before topics existed.** A declaration that names
   turns by their recorded identity (session and turn index), so the 59

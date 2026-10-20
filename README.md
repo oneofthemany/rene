@@ -354,6 +354,12 @@ flowchart LR
 - **`index_source_graph`** builds or syncs the index. It writes only
   `.codegraph/`, never agent settings, and it is the only thing that changes
   the index.
+- **Always current:** before answering, a query syncs the index with the
+  files (in the same owned index worker), at most every 5 s per project. A
+  sync with nothing to do takes about half a second; edited files are
+  re-parsed. If a sync can't run, for example because another process is
+  syncing the same project, the answer still comes, with a limitation saying
+  so. After the first build, nobody needs to run a sync by hand.
 - **Read-only query servers:** each REA process (the workbench bridge, every
   agent) runs its own CodeGraph server per project, read-only, so they don't
   contend for CodeGraph's one-writer lock and can query the same project at

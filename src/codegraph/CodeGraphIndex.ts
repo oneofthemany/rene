@@ -59,8 +59,9 @@ class ResultLineSink extends Writable {
 
 /**
  * Builds or syncs one project's index in an owned worker process running the
- * selected CodeGraph library. The caller stops the project's query server
- * first: CodeGraph allows one writer per project.
+ * selected CodeGraph library: the only writer of the index. Query servers are
+ * read-only and may keep running through a sync; a build replaces the
+ * database, so the caller stops its own server first.
  */
 export const indexCodeGraphProject = async (
   install: CodeGraphInstall,
