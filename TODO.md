@@ -1,8 +1,11 @@
 ## Now
 
-- **Restart the workbench for history queries.** The store's protocol changed
-  (`list` became `query`), so the running bridge and the rebuilt
-  `rene-history` must restart together.
+- **Move the rest of the scratch checks into the test suite.** Auto-sync
+  (`tests/acceptance/tools/sourceGraphAutoSync.test.ts`) and the agent git
+  hooks and topic gate (`tests/boundary/process/agentGitHooks.test.ts`) are
+  done. Still only in `~/.cache/rene-scratch/`: the history store
+  (`history-store-test.mjs`), `map_source_graph` (`map-source-graph-e2e.mjs`)
+  and the workbench's conversations (`workbench-conversations-test.mjs`).
 - **Assessment summary from queries.** `summarize` (the Tools used table and
   pathways) and the topic tree still read every summary; give the store
   aggregate queries for them.
@@ -22,11 +25,6 @@
 - **Link topics to code.** Map the files a topic's calls touched to source
   graph symbols, and show an open topic's blast radius
   (`analyze_source_impact`). The links come from graph ids, not similarity.
-- **Auto-sync regression test in the repo.** Queries now sync the index
-  first; the end-to-end check (edit, query, two processes at once) lives in
-  `~/.cache/rene-scratch/codegraph-auto-sync-e2e.mjs`. Move it into the test
-  suite as a real CodeGraph workflow test.
-
 - **File the turns from before topics existed.** A declaration that names
   turns by their recorded identity (session and turn index), so the 59
   earlier turns can be filed without guessing.
@@ -48,12 +46,6 @@
 - **Shift+Enter in the agent terminal.** Try it in the browser, and check
   whether Copilot CLI takes ESC+Enter as a new line (Claude Code does).
 - **Topic tree in History.** Check how it looks with real topics.
-- **Agent git hooks on the host.** They rely on git's `reference-transaction`
-  hook (git 2.31 or later). REA's environment has git 2.56; confirm the
-  host's git, which the agents use outside the container.
-
-## Housekeeping
-
-- **IntelliJ `.iml` files.** `rene.iml`, `bridge/bridge.iml`,
-  `packages/packages.iml` and `tests/tests.iml` are tracked; untrack them
-  (`git rm --cached`) and add `*.iml` to `.gitignore` beside `.idea/`.
+- **rdk_vcpe's assessment.** Its line about `map_source_graph` failing with
+  "Connection closed" is out of date since the read-only query servers;
+  remove it there.
