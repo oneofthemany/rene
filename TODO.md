@@ -51,6 +51,17 @@
   pathways) and the topic tree still read every summary. The store now has
   one aggregate, `usage` (calls and last start per tool, used by the
   sidebar); the Tools used table can read it, and pathways need their own.
+- **Browser scenarios can't move the mouse.** `capture_browser_scenario`
+  has click, fill, press, select and wait actions but no hover or mouse
+  move, so a bug that follows the pointer (the agent terminal's mouse
+  reports) can only be driven with clicks and keys. Add a `move`/`hover`
+  action.
+- **Browser results too big for an agent.** `capture_browser_scenario` with
+  network capture (80–170 KB) and `inspect_web_page` with accessibility text
+  (260 KB) exceed what an agent can take inline, so every check went through
+  a saved file and a script. Return a summary (step outcomes, request counts
+  by method and path, WebSocket counts, errors) with the full Evidence kept
+  for paging.
 - **`read_file` can't show an image.** A PNG comes back as "binary" with a
   digest, so checking a screenshot (e.g. a workbench capture) needs Claude
   Code's own Read. Return image files as MCP image content.

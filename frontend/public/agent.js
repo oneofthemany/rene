@@ -3,11 +3,10 @@
 // active project's folder. The terminal is built once and kept, so switching
 // to another view and back leaves the session and its screen as they were.
 
-import { api, apiJson, ndjson } from "./api.js";
+import { api, apiJson, getToken, ndjson } from "./api.js";
 import { h } from "./render.js";
 
 const AGENT_KEY = "rea-agent";
-let panel;
 
 const remember = (key, value) => {
   try {
@@ -18,21 +17,37 @@ const remember = (key, value) => {
   }
 };
 
-/** Sends keystrokes in small batches, in order. */
-function inputSender() {
-  let pending = "";
-  let sending = Promise.resolve();
-  return (data) => {
-    pending += data;
-    sending = sending.then(async () => {
-      if (!pending) return;
-      const chunk = pending;
-      pending = "";
-      await api("/api/terminal/input", {
-        method: "POST",
-        body: JSON.stringify({ data: chunk }),
-      }).catch(() => {});
+/**
+ * The agent's input channel: keystrokes, mouse reports and resizes, in order,
+ * over one WebSocket (output arrives on /api/terminal/stream). A TUI with
+ * mouse tracking reports every mouse move, so a request apiece was a flood.
+ * Messages sent while it connects wait for it; a dropped connection is
+ * reopened by the next message, and what it lost is dropped, as a failed
+ * request was.
+ */
+function terminalChannel() {
+  let socket;
+  let waiting = [];
+  const connect = () => {
+    const scheme = location.protocol === "https:" ? "wss" : "ws";
+    // The token rides as a subprotocol: a WebSocket can't carry headers.
+    socket = new WebSocket(`${scheme}://${location.host}/api/terminal/socket`, [
+      "rea-terminal",
+      getToken(),
+    ]);
+    socket.addEventListener("open", () => {
+      for (const message of waiting) socket.send(message);
+      waiting = [];
     });
+    socket.addEventListener("close", () => {
+      waiting = [];
+    });
+  };
+  return (message) => {
+    const text = JSON.stringify(message);
+    if (socket?.readyState === WebSocket.OPEN) return socket.send(text);
+    if (socket?.readyState !== WebSocket.CONNECTING) connect();
+    waiting.push(text);
   };
 }
 
@@ -188,8 +203,8 @@ async function follow(term, ui, onState) {
   }
 }
 
-/** Keeps the session's size in step with the terminal on screen. */
-function sizeKeeper(term, fit, screen, ui) {
+/** Fits the terminal on screen and reports each new size to onSize(cols, rows). */
+function sizeKeeper(term, fit, screen, onSize) {
   let size = "";
   return () => {
     if (!screen.isConnected) return;
@@ -197,12 +212,38 @@ function sizeKeeper(term, fit, screen, ui) {
     const next = `${term.cols}x${term.rows}`;
     if (next === size) return;
     size = next;
-    if (ui.running)
-      void api("/api/terminal/resize", {
-        method: "POST",
-        body: JSON.stringify({ cols: term.cols, rows: term.rows }),
-      }).catch(() => {});
+    onSize(term.cols, term.rows);
   };
+}
+
+/**
+ * Sends the running agent what the terminal produces (keystrokes, mouse
+ * reports, Shift+Enter, size changes) over one input channel. Returns the
+ * size check, for layout changes the observer doesn't see.
+ */
+function wireInput(term, fit, screen, ui) {
+  const send = terminalChannel();
+  const input = (data) => {
+    if (ui.running) send({ type: "input", data });
+  };
+  term.onData(input);
+  // Shift+Enter starts a new line in the prompt instead of sending it, as in
+  // an IDE. The agent gets Meta+Enter (ESC then CR), which terminal agents
+  // such as Claude Code read as a line break; a plain Enter still sends.
+  term.attachCustomKeyEventHandler((event) => {
+    const shiftEnter =
+      event.key === "Enter" &&
+      event.shiftKey &&
+      !event.ctrlKey &&
+      !event.altKey &&
+      !event.metaKey;
+    if (!shiftEnter) return true;
+    if (event.type === "keydown") input("\x1b\r");
+    return false;
+  });
+  return sizeKeeper(term, fit, screen, (cols, rows) => {
+    if (ui.running) send({ type: "resize", cols, rows });
+  });
 }
 
 /** The saved agent if it's installed, else the first installed one. */
@@ -225,25 +266,7 @@ export async function initAgent({ host, getProject, onState, onStarted }) {
   ]);
   const screen = h("div", { class: "agent-screen" });
   const ui = controls(initial.agents, getProject);
-  const send = inputSender();
-  term.onData((data) => {
-    if (ui.running) send(data);
-  });
-  // Shift+Enter starts a new line in the prompt instead of sending it, as in
-  // an IDE. The agent gets Meta+Enter (ESC then CR), which terminal agents
-  // such as Claude Code read as a line break; a plain Enter still sends.
-  term.attachCustomKeyEventHandler((event) => {
-    const shiftEnter =
-      event.key === "Enter" &&
-      event.shiftKey &&
-      !event.ctrlKey &&
-      !event.altKey &&
-      !event.metaKey;
-    if (!shiftEnter) return true;
-    if (event.type === "keydown" && ui.running) send("\x1b\r");
-    return false;
-  });
-  const resize = sizeKeeper(term, fit, screen, ui);
+  const resize = wireInput(term, fit, screen, ui);
   new ResizeObserver(resize).observe(screen);
 
   ui.picker.select.addEventListener("change", () => {

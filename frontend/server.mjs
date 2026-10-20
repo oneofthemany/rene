@@ -31,6 +31,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { Client, ProtocolError } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
+import { WebSocketServer } from "ws";
 import { CHOICES, checkOwner, ENGINES } from "./choices.mjs";
 import {
   ASSESSMENT_FILE,
@@ -91,6 +92,11 @@ const { values: options } = parseArgs({
       default: join(here, ".workbench-settings.json"),
     },
     "providers-dir": { type: "string", default: defaultProvidersDir() },
+    // The agent session's files (MCP config, settings, the relay token the
+    // agent's rene reports calls with). Per bridge, like the folders above:
+    // a second bridge writing the same files would redirect a running
+    // session's reports to itself.
+    "agent-dir": { type: "string", default: agentDirectory(here) },
     "projects-dir": { type: "string", default: defaultProjectsDir() },
   },
 });
@@ -546,7 +552,7 @@ async function registrationState(client) {
 }
 
 const terminal = createTerminal({
-  directory: agentDirectory(here),
+  directory: options["agent-dir"],
   // Saved provider paths reach REA through the agent's environment.
   environment: () => settings.environment(process.env),
   registration: registrationState,
@@ -596,19 +602,89 @@ const TERMINAL_ROUTES = {
       }
     });
   },
-  "POST /api/terminal/input": async (request, response) => {
-    const body = await readJsonBody(request);
-    return terminalAction(response, () => terminal.input(body?.data));
-  },
-  "POST /api/terminal/resize": async (request, response) => {
-    const body = await readJsonBody(request);
-    return terminalAction(response, () =>
-      terminal.resize(body?.cols, body?.rows),
-    );
-  },
   "POST /api/terminal/stop": (_request, response) =>
     terminalAction(response, () => ({ stopped: terminal.stop() })),
 };
+
+// Keystrokes, mouse reports and resizes reach the agent over one WebSocket
+// per page (output stays on /api/terminal/stream). A TUI with mouse tracking
+// reports every mouse move, and a request apiece flooded the bridge and the
+// page's network log. Messages: {"type":"input","data"} and
+// {"type":"resize","cols","rows"}; a failure is answered {"type":"error"}.
+const TERMINAL_SOCKET_PATH = "/api/terminal/socket";
+// The page names this protocol and offers its token as the other one:
+// browsers can't set headers on a WebSocket, and a URL would log the token.
+const TERMINAL_PROTOCOL = "rea-terminal";
+const terminalSockets = new WebSocketServer({
+  noServer: true,
+  // An input message is at most MAX_INPUT_CHARS characters, and JSON
+  // escaping can make each control character six bytes.
+  maxPayload: 6 * 64 * 1024 + 1024,
+  handleProtocols: (protocols) =>
+    protocols.has(TERMINAL_PROTOCOL) ? TERMINAL_PROTOCOL : false,
+});
+
+terminalSockets.on("connection", (socket) => {
+  // A protocol error (an oversized frame, say) closes the socket; unhandled,
+  // the event would end the bridge.
+  socket.on("error", () => {});
+  socket.on("message", (raw) => {
+    let message;
+    try {
+      message = JSON.parse(String(raw));
+    } catch {
+      message = undefined;
+    }
+    try {
+      if (message?.type === "input") terminal.input(message.data);
+      else if (message?.type === "resize")
+        terminal.resize(message.cols, message.rows);
+      else
+        throw new TerminalError(
+          'Expected {"type":"input","data"} or {"type":"resize","cols","rows"}.',
+        );
+    } catch (cause) {
+      socket.send(
+        JSON.stringify({ type: "error", error: describeError(cause) }),
+      );
+    }
+  });
+});
+
+/** Refuses an upgrade before any WebSocket exists. */
+function refuseUpgrade(socket, status, reason) {
+  socket.end(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\n\r\n`);
+}
+
+/**
+ * Upgrades /api/terminal/socket for the page: our loopback Host, our own
+ * Origin (a WebSocket isn't bound by CORS, so this keeps other sites out) and
+ * the page token offered as a subprotocol.
+ */
+function upgradeTerminalSocket(request, socket, head) {
+  // A page that goes away mid-handshake resets the connection.
+  socket.on("error", () => {});
+  const url = new URL(request.url ?? "/", "http://127.0.0.1");
+  const hosts = loopbackHosts();
+  if (url.pathname !== TERMINAL_SOCKET_PATH)
+    return refuseUpgrade(socket, 404, "Not Found");
+  if (!hosts.has(request.headers.host ?? ""))
+    return refuseUpgrade(socket, 421, "Misdirected Request");
+  const origin = String(request.headers.origin ?? "");
+  if (!hosts.has(origin.replace(/^http:\/\//, "")))
+    return refuseUpgrade(socket, 403, "Forbidden");
+  const offered = String(request.headers["sec-websocket-protocol"] ?? "")
+    .split(",")
+    .map((protocol) => protocol.trim());
+  if (
+    !offered.includes(TERMINAL_PROTOCOL) ||
+    !offered.some((protocol) => isPageToken(protocol))
+  )
+    return refuseUpgrade(socket, 401, "Unauthorized");
+  terminalSockets.handleUpgrade(request, socket, head, (ws) =>
+    terminalSockets.emit("connection", ws, request),
+  );
+}
 
 // Readiness and provider paths work while the MCP child is down.
 const PROVIDER_ROUTES = {
@@ -889,17 +965,20 @@ const server = createServer((request, response) => {
     }
   });
 });
+server.on("upgrade", upgradeTerminalSocket);
 
-async function handle(request, response) {
-  const url = new URL(request.url ?? "/", "http://127.0.0.1");
+/** The Host values of our loopback listener; anything else is DNS rebinding. */
+function loopbackHosts() {
   const address = server.address();
   const boundPort =
     typeof address === "object" && address ? address.port : port;
+  return new Set([`127.0.0.1:${boundPort}`, `localhost:${boundPort}`]);
+}
+
+async function handle(request, response) {
+  const url = new URL(request.url ?? "/", "http://127.0.0.1");
   // Reject DNS-rebinding requests whose Host is not our loopback listener.
-  const allowedHosts = new Set([
-    `127.0.0.1:${boundPort}`,
-    `localhost:${boundPort}`,
-  ]);
+  const allowedHosts = loopbackHosts();
   if (!allowedHosts.has(request.headers.host ?? "")) {
     return sendJson(response, 421, { error: "Unexpected Host header." });
   }
@@ -1581,7 +1660,7 @@ async function agentSession(cwd, agentId) {
   }
   const session = `agent-${Date.now()}-${randomBytes(4).toString("hex")}`;
   const relayToken = randomBytes(24).toString("base64url");
-  const directory = agentDirectory(here);
+  const directory = options["agent-dir"];
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const report = join(directory, "relay-report.json");
   const address = server.address();
@@ -1873,12 +1952,17 @@ function status() {
   };
 }
 
-function authorized(request) {
-  const supplied = Buffer.from(String(request.headers["x-rea-token"] ?? ""));
+/** Whether `value` is this bridge's page token, compared in constant time. */
+function isPageToken(value) {
+  const supplied = Buffer.from(String(value ?? ""));
   return (
     supplied.length === tokenBytes.length &&
     timingSafeEqual(supplied, tokenBytes)
   );
+}
+
+function authorized(request) {
+  return isPageToken(request.headers["x-rea-token"]);
 }
 
 async function readJsonBody(request, limit = MAX_BODY_BYTES) {
@@ -1943,6 +2027,8 @@ async function shutdown(exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
   for (const listener of listeners) listener.end();
+  for (const socket of terminalSockets.clients) socket.terminate();
+  terminalSockets.close();
   // The last of each followed transcript is kept before the bridge goes.
   await Promise.allSettled([...following.keys()].map(stopFollowing));
   terminal.close();

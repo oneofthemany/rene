@@ -80,6 +80,13 @@ function usageBadge(use) {
 
 const WORKFLOWS = "Guided workflows";
 
+/**
+ * Groups the user opened or closed, by label. The catalog is redrawn often
+ * (a filter keystroke, a selection, every call), and their choice outlives
+ * each redraw.
+ */
+const chosenOpen = new Map();
+
 /** Case-insensitive match on name, title, or description. */
 function matches(item, filter) {
   return (
@@ -170,15 +177,27 @@ export function renderCatalog({
     return;
   }
   container.replaceChildren(
-    ...groups.map(([label, items]) =>
-      h(
+    ...groups.map(([label, items]) => {
+      // A filter shows every matching group; otherwise the user's choice
+      // wins over the defaults.
+      const open =
+        Boolean(filter) ||
+        (chosenOpen.get(label) ??
+          (label === WORKFLOWS ||
+            label === GROUPS[0][0] ||
+            items.some(
+              (item) => item.getAttribute("aria-current") === "true",
+            )));
+      return h(
         "details",
         {
-          open:
-            Boolean(filter) ||
-            label === WORKFLOWS ||
-            label === GROUPS[0][0] ||
-            items.some((item) => item.getAttribute("aria-current") === "true"),
+          open,
+          // The toggle a group drawn open fires on insertion matches `open`;
+          // only a change from what was drawn is the user's.
+          ontoggle: (event) => {
+            if (!filter && event.currentTarget.open !== open)
+              chosenOpen.set(label, event.currentTarget.open);
+          },
         },
         h("summary", {}, label, h("span", { class: "count" }, items.length)),
         h(
@@ -186,7 +205,7 @@ export function renderCatalog({
           {},
           items.map((item) => h("li", {}, item)),
         ),
-      ),
-    ),
+      );
+    }),
   );
 }
