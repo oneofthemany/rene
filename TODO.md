@@ -1,12 +1,9 @@
 ## Now
 
-- **Move the rest of the scratch checks into the test suite.** Auto-sync
-  (`tests/acceptance/tools/sourceGraphAutoSync.test.ts`), the agent git
-  hooks and topic gate (`tests/boundary/process/agentGitHooks.test.ts`) and
-  the history store (`tests/boundary/process/workbenchHistoryStore.test.ts`)
-  are done. Still only in `~/.cache/rene-scratch/`: `map_source_graph`
-  (`map-source-graph-e2e.mjs`) and the workbench's conversations
-  (`workbench-conversations-test.mjs`).
+- **Last scratch checks into the test suite.** The topic tree
+  (`frontend/topics.mjs`, `history-topics.mjs`) and the Objective-C and
+  Solidity indexing check (`objc-sol-e2e.mjs`) are still only in
+  `~/.cache/rene-scratch/`.
 - **Assessment summary from queries.** `summarize` (the Tools used table and
   pathways) and the topic tree still read every summary; give the store
   aggregate queries for them.

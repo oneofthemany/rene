@@ -396,7 +396,7 @@ export function auditFor(historyId, turns) {
       produced: result ? { isError: result.isError, text: result.text } : null,
       outcome: after,
       matchedBy:
-        "the same agent session, the same tool and identical arguments, in order",
+        "the same tool and identical arguments, the recorded call closest after the tool use",
     };
   }
   return undefined;
