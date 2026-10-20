@@ -1,21 +1,12 @@
 ## Now
 
-- **Run CodeGraph's own tests in rene's checks.** `packages/codegraph`
-  has its own suite (Objective-C, Solidity and extraction: 770 tests pass),
-  but no rene script runs it. Decide where it belongs (`check:pr`, a turbo
-  task) given its run time. 13 of its test files commit in throwaway temp
-  repos (CodeGraph itself only reads git), so they fail inside agent
-  sessions; the task that runs them should drop the inherited `GIT_CONFIG_*`
-  for that child only.
 - **Trim rene's CodeGraph copy.** Done: no git-hook installs, no update
   check, no agent installer (`install`/`uninstall`/`upgrade`/`prompt-hook`,
   `src/installer/`, `src/upgrade/`, `install.sh`/`.ps1`). The viewer stays
   (see the next item). Remaining candidates: release tooling (`scripts/build-bundle.sh`,
   `pack-npm.sh`, `npm-shim.js`, `local-install.sh`), the docs site (`site/`)
   and the hosted telemetry backends (`telemetry-worker/`,
-  `telemetry-dashboard/`). Known failing before the trim:
-  `explore-cross-call-dedup` (re-sends lines on a second call) and
-  `bundle-launcher` (needs `zip`).
+  `telemetry-dashboard/`).
 - **Telemetry for all of rene, into the journal (placeholder).** Every part
   of rene reports to the user's telemetry journal (sherloQ,
   `http://127.0.0.1:5007`), never off the machine. CodeGraph already does:
@@ -42,10 +33,6 @@
 - **A long-running process tool.** Nothing in rene keeps a server up across
   calls (start, read output, stop, owned by rene). Needed to drive a web UI
   with the browser tools, e.g. CodeGraph's viewer.
-- **CodeGraph's tests inside agent sessions.** Its 13 commit tests see the
-  session's agent hooks, so they fail there. Decide whether the suite's
-  sandbox (`__tests__/setup-home-sandbox.ts`) should drop the inherited
-  `GIT_CONFIG_*` for its throwaway repos.
 - **Tool popularity in the sidebar.** Show next to each tool in the sidebar
   how many times it has been called (and when last), from the history store,
   so popular and unused tools stand out. Needs the same aggregate query as

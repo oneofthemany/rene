@@ -7,14 +7,24 @@ import { CodeGraph } from '../src';
 
 // Wrap only I/O entry points for deterministic failure injection; all other
 // calls, files, parser work and SQLite remain real.
+// A test injects a failure with `mockImplementation` on these module mocks
+// and `afterEach` puts the real call back with `mockReset`. (`vi.spyOn` on a
+// property that is already a mock returns that same mock, so a "real" captured
+// from it would call itself.)
 vi.mock('child_process', async importOriginal => {
   const actual = await importOriginal<typeof import('child_process')>();
   return { ...actual, execFileSync: vi.fn(actual.execFileSync) };
 });
 vi.mock('fs', async importOriginal => {
   const actual = await importOriginal<typeof import('fs')>();
-  return { ...actual, readFileSync: vi.fn(actual.readFileSync) };
+  return { ...actual, readFileSync: vi.fn(actual.readFileSync), openSync: vi.fn(actual.openSync) };
 });
+
+const resetIoMocks = () => {
+  vi.mocked(cp.execFileSync).mockReset();
+  vi.mocked(fs.readFileSync).mockReset();
+  vi.mocked(fs.openSync).mockReset();
+};
 
 describe('git index currency across commits and restores (#1829)', () => {
   let root: string;
@@ -34,7 +44,7 @@ describe('git index currency across commits and restores (#1829)', () => {
     cg = CodeGraph.initSync(root);
     expect((await cg.indexAll()).success).toBe(true);
   });
-  afterEach(() => { vi.restoreAllMocks(); cg?.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  afterEach(() => { vi.restoreAllMocks(); resetIoMocks(); cg?.close(); fs.rmSync(root, { recursive: true, force: true }); });
 
   it.each(['index', 'sync', 'scoped'] as const)('sees a restored indexed dirty edit after %s', async mode => {
     write('source.ts', 'dirtyVersion');
@@ -80,9 +90,9 @@ describe('git index currency across commits and restores (#1829)', () => {
 
   it('falls back when git diff fails instead of claiming a clean index', () => {
     write('new.ts', 'newSymbol'); commit();
-    const real = cp.execFileSync;
+    const real = vi.mocked(cp.execFileSync).getMockImplementation()!;
     let injected = 0;
-    vi.spyOn(cp, 'execFileSync').mockImplementation(((file: string, args: string[], options: any) => {
+    vi.mocked(cp.execFileSync).mockImplementation(((file: string, args: string[], options: any) => {
       if (file === 'git' && args[0] === 'diff') { injected++; throw new Error('Injected git diff timeout'); }
       return real(file, args, options);
     }) as typeof cp.execFileSync);
@@ -135,19 +145,19 @@ describe('git index currency across commits and restores (#1829)', () => {
     // Sync reads a source file through a bounded reader that opens a
     // descriptor (#1910), so the failure is injected at openSync as well as
     // readFileSync: it must reach whichever one the read goes through.
-    const realRead = fs.readFileSync;
-    const realOpen = fs.openSync;
+    const realRead = vi.mocked(fs.readFileSync).getMockImplementation()!;
+    const realOpen = vi.mocked(fs.openSync).getMockImplementation()!;
     let injected = 0;
     const failNewTs = (real: (...args: any[]) => unknown) => (file: any, ...args: any[]) => {
       if (String(file) === path.join(root, 'new.ts')) { injected++; throw new Error('Injected transient read error'); }
       return real(file, ...args);
     };
-    vi.spyOn(fs, 'readFileSync').mockImplementation(failNewTs(realRead as any) as typeof fs.readFileSync);
-    vi.spyOn(fs, 'openSync').mockImplementation(failNewTs(realOpen as any) as typeof fs.openSync);
+    vi.mocked(fs.readFileSync).mockImplementation(failNewTs(realRead as any) as typeof fs.readFileSync);
+    vi.mocked(fs.openSync).mockImplementation(failNewTs(realOpen as any) as typeof fs.openSync);
     await cg.sync();
     expect(injected).toBeGreaterThan(0);
     expect(symbols('newSymbol')).not.toContain('newSymbol');
-    vi.restoreAllMocks();
+    resetIoMocks();
     expect(cg.getChangedFiles().added).toEqual(['new.ts']);
     await cg.sync(); clean();
   });

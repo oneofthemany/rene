@@ -4535,12 +4535,16 @@ export class ToolHandler {
     // structure, not one hop of the question's flow: connected through it, the
     // payroll fixture's 8-line `RunResult` (which holds a `Payslip`) outranked
     // the 51-line method that builds and stores every payslip, and took its
-    // place in the file's budget.
+    // place in the file's budget. The same edge is not an edge site either
+    // (see the edge lines below).
     const TYPE_KINDS = new Set(['class', 'struct', 'union', 'interface', 'trait', 'protocol', 'enum', 'type_alias']);
-    const isTypeDeclaration = (id: string): boolean => TYPE_KINDS.has(subgraph.nodes.get(id)?.kind ?? '');
+    const isTypeDeclaration = (id: string): boolean =>
+      TYPE_KINDS.has((subgraph.nodes.get(id) ?? cg.getNode(id))?.kind ?? '');
+    const isStructuralReference = (edge: Edge): boolean =>
+      edge.kind === 'references' && isTypeDeclaration(edge.source) && isTypeDeclaration(edge.target);
     const connectedToEntry = new Set<string>();
     for (const edge of subgraph.edges) {
-      if (edge.kind === 'references' && isTypeDeclaration(edge.source) && isTypeDeclaration(edge.target)) continue;
+      if (isStructuralReference(edge)) continue;
       if (entryNodeIds.has(edge.source)) connectedToEntry.add(edge.target);
       if (entryNodeIds.has(edge.target)) connectedToEntry.add(edge.source);
     }
@@ -6434,6 +6438,11 @@ export class ToolHandler {
         const outgoing = cg.getOutgoingEdges(node.id);
         for (const edge of outgoing) {
           if (!edge.line || edge.line <= 0 || edge.kind === 'contains') continue;
+          // A type naming another type in its declaration (a Go struct's field
+          // type) is structure, not a site in the question's flow: as a site it
+          // rendered a window cut out of the type's body (payroll's `RunResult`
+          // L31-37 around its `[]Payslip` field), which a later call re-sent.
+          if (isStructuralReference(edge)) continue;
           const key = `${edge.line}:${edge.target}`;
           if (edgeLines.has(key)) continue;
           edgeLines.add(key);

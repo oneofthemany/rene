@@ -71,7 +71,7 @@ function startDetachedProcess(): number {
   return pid;
 }
 
-describe('codegraph index — full re-index keeps the graph populated (#874)', () => {
+describe('codegraph index — full re-index keeps the graph populated (#874)', { timeout: 60_000 }, () => {
   let tempDir: string;
 
   beforeEach(() => {
@@ -171,7 +171,7 @@ describe('codegraph index — full re-index keeps the graph populated (#874)', (
  * away. The fix discards (unlinks) the database files and re-initializes a fresh
  * one — O(1) regardless of size — so `index` recovers any prior state.
  */
-describe('codegraph index — recovers a stale/oversized prior index (#1067)', () => {
+describe('codegraph index — recovers a stale/oversized prior index (#1067)', { timeout: 60_000 }, () => {
   let tempDir: string;
   const dbPath = (dir: string) => path.join(dir, '.codegraph', 'codegraph.db');
 

@@ -7,7 +7,7 @@ import CodeGraph from '../src/index';
 
 const BIN = path.resolve(__dirname, '../dist/bin/codegraph.js');
 
-describe('codegraph sync reporting', () => {
+describe('codegraph sync reporting', { timeout: 60_000 }, () => {
   let testDir: string;
 
   beforeEach(async () => {

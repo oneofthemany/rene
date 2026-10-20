@@ -208,6 +208,21 @@
       ],
       "outputs": ["packages/codegraph/dist/**"]
     },
+    "codegraph:test": {
+      "dependsOn": ["codegraph:build"],
+      "inputs": [
+        "packages/codegraph/package.json",
+        "packages/codegraph/package-lock.json",
+        "packages/codegraph/tsconfig.json",
+        "packages/codegraph/vitest.config.mts",
+        "packages/codegraph/src/**",
+        "packages/codegraph/scripts/**",
+        "packages/codegraph/ui/**",
+        "packages/codegraph/__tests__/**",
+        "!packages/codegraph/ui/node_modules/**"
+      ],
+      "outputs": []
+    },
     "history-store:build": {
       "inputs": [
         "scripts/build-history-store.mjs",

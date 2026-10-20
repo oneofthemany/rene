@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -68,6 +68,50 @@ describe("topic gate", () => {
       expect(answer?.hookSpecificOutput?.permissionDecision).toBe("deny");
     },
   );
+
+  it("gives every prompt the user's standing rules, the way Claude Code runs the hook", async () => {
+    const directory = await createTestTempDirectory("rea-topic-gate-");
+    const hook = run(
+      process.execPath,
+      [fileURLToPath(new URL("topicGate.mjs", frontend))],
+      { env: { ...process.env, REA_TOPIC_GATE_DIR: directory } },
+    );
+    hook.child.stdin?.end(
+      JSON.stringify({
+        hook_event_name: "UserPromptSubmit",
+        session_id: "prompt-session",
+        prompt: "continue",
+      }),
+    );
+    const { stdout } = await hook;
+    const context = (
+      JSON.parse(stdout) as {
+        hookSpecificOutput: {
+          hookEventName: string;
+          additionalContext: string;
+        };
+      }
+    ).hookSpecificOutput;
+
+    expect(context.hookEventName).toBe("UserPromptSubmit");
+    // Declare the turn's topic first.
+    expect(context.additionalContext).toContain(
+      "Declare this request's topic with the rene record_topic tool",
+    );
+    // Close a limitation instead of working around it, unprompted.
+    expect(context.additionalContext).toContain(
+      "build the rene tool, or add the program to frontend/container/Containerfile",
+    );
+    expect(context.additionalContext).toContain(
+      "Don't skip, stub, downgrade or work around it, and don't wait to be asked.",
+    );
+    // A new prompt starts an undeclared turn.
+    expect(
+      JSON.parse(
+        await readFile(join(directory, "prompt-session.json"), "utf8"),
+      ),
+    ).toEqual({ pending: false, declared: false });
+  });
 });
 
 const run = promisify(execFile);

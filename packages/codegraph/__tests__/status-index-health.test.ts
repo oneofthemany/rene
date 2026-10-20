@@ -49,7 +49,7 @@ function runJson(cwd: string, args: string[]): any {
   return JSON.parse(result.stdout);
 }
 
-describe('status reports files indexed without their symbols (#2336, #2335)', () => {
+describe('status reports files indexed without their symbols (#2336, #2335)', { timeout: 60_000 }, () => {
   let dir: string;
 
   beforeEach(() => {

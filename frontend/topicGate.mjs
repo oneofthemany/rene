@@ -43,6 +43,15 @@ const DECLARE =
   "or declare a new feature, question, bug, investigation, refactor, docs, decision or other topic under its thread " +
   "(declare a thread first when none fits). Every turn needs its own declaration.";
 
+// The user's standing rule on limitations, given with every prompt so it
+// needn't be repeated: a missing tool, program or capability is closed, not
+// worked around.
+const CLOSE_GAPS =
+  "When a limitation blocks the work (a missing rene tool, a program missing from the container, a capability rene lacks), " +
+  "close it: build the rene tool, or add the program to frontend/container/Containerfile, and use it. " +
+  "Don't skip, stub, downgrade or work around it, and don't wait to be asked. " +
+  "If closing it needs a download, an install or a rebuild, ask for that approval and say what it unblocks.";
+
 const readStdin = async () => {
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
@@ -179,7 +188,10 @@ export async function gate(input, directory) {
   if (event === "UserPromptSubmit") {
     await store.write({ pending: false, declared: false });
     return {
-      hookSpecificOutput: { hookEventName: event, additionalContext: DECLARE },
+      hookSpecificOutput: {
+        hookEventName: event,
+        additionalContext: `${DECLARE} ${CLOSE_GAPS}`,
+      },
     };
   }
   if (event === "PreToolUse") {

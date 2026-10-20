@@ -11,7 +11,7 @@ FROM registry.fedoraproject.org/fedora:44
 # rest are tools REA's guides name: binwalk 3.1, sigrok-cli 0.7.2, gdb (with
 # pwndbg below), Unblob's extractors, Chromium for web pages, adb and uv.
 RUN dnf -y install --setopt=install_weak_deps=False \
-      nodejs24 procps-ng util-linux which findutils tar xz zstd unzip gzip \
+      nodejs24 procps-ng util-linux which findutils tar xz zstd zip unzip gzip \
       ca-certificates python3 uv git \
       xorg-x11-server-Xvfb xorg-x11-xauth libX11 libXtst \
       binwalk sigrok-cli gdb unar lz4 lziprecover erofs-utils partclone p7zip-plugins \
