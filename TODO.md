@@ -32,6 +32,16 @@
     (e.g. `REA_TELEMETRY_ENDPOINT`), and should rene's own CodeGraph
     processes stop forcing CodeGraph telemetry off? Who enables each new
     topic in the journal (it holds unknown topics until enabled)?
+- **`run_command` leaves processes behind at its timeout.** It answered
+  `stopped: "timeout"` for a command that had started `codegraph ui` in the
+  background, but the command's whole process group (bash and two node
+  processes) kept running and serving its port until killed by hand. Its
+  contract says everything the command started is stopped. Check the
+  timeout path in `src/toolbox/` against `src/process/` ownership (the call
+  had been moved to the background by the MCP client at 120 s).
+- **A long-running process tool.** Nothing in rene keeps a server up across
+  calls (start, read output, stop, owned by rene). Needed to drive a web UI
+  with the browser tools, e.g. CodeGraph's viewer.
 - **CodeGraph's tests inside agent sessions.** Its 13 commit tests see the
   session's agent hooks, so they fail there. Decide whether the suite's
   sandbox (`__tests__/setup-home-sandbox.ts`) should drop the inherited
