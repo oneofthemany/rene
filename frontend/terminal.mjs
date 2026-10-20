@@ -59,6 +59,8 @@ export const agentInstructions = (assessment) =>
           "rene:generated markers alone; the workbench rewrites it from the recorded tool calls.",
           "Its Code map section names the most depended-on files and most-called symbols, from the source",
           "graph, as places to start; its Topics section lists the conversation threads and topics with their ids.",
+          "Its Applicable tools section lists the rene tools that take this folder's file types, with example",
+          "files: for a file of a listed type, use that tool rather than a shell command or a generic reader.",
         ]
       : []),
     "When a request begins, declare it with the rene record_topic tool: a new feature, question, bug,",
