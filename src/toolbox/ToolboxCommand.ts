@@ -82,14 +82,21 @@ export const runToolboxCommand = async (
       duration_ms: duration(),
     };
   } catch (cause: unknown) {
-    if (!(cause instanceof OwnedCommandFailure) || cause.reason === "process")
-      throw cause;
+    if (!(cause instanceof OwnedCommandFailure)) throw cause;
+    // A command ended by a signal (e.g. one that kills its own process group)
+    // finished like a nonzero exit: its output and signal are the result.
+    const signalled =
+      cause.reason === "process" &&
+      !cause.collectionFailure &&
+      cause.snapshot !== null &&
+      cause.snapshot.signal !== null;
+    if (cause.reason === "process" && !signalled) throw cause;
     if (cause.cleanupOwner !== undefined) options.retain(cause.cleanupOwner);
     return {
       command: input.command,
       cwd,
       ...outcome(cause.snapshot),
-      stopped: cause.reason,
+      stopped: signalled ? null : cause.reason,
       duration_ms: duration(),
     };
   }

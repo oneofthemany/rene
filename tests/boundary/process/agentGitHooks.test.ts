@@ -16,6 +16,10 @@ const hooks = fileURLToPath(new URL("agent-git-hooks", frontend));
 
 interface TopicGate {
   gitHistoryWrite(command: string): string | undefined;
+  builtInToolRefusal(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+  ): string | undefined;
   gate(
     input: Record<string, unknown>,
     directory: string | undefined,
@@ -69,6 +73,46 @@ describe("topic gate", () => {
     },
   );
 
+  it.each([
+    ["Bash", { command: "ls" }, "run_command"],
+    ["Read", { file_path: "/a/b.ts" }, "read_file"],
+    ["Write", { file_path: "/a/b.ts" }, "write_file"],
+    ["Edit", { file_path: "/a/b.ts" }, "edit_file"],
+    ["Grep", { pattern: "x" }, "search_text"],
+    ["Glob", { pattern: "**/*.ts" }, "find_files"],
+  ])(
+    "refuses the built-in %s, naming rene's tool, before any topic is declared",
+    async (tool, toolInput, replacement) => {
+      const answer = (await topicGate.gate(
+        {
+          hook_event_name: "PreToolUse",
+          tool_name: tool,
+          tool_input: toolInput,
+        },
+        undefined,
+      )) as {
+        hookSpecificOutput?: {
+          permissionDecision?: string;
+          permissionDecisionReason?: string;
+        };
+      };
+      expect(answer.hookSpecificOutput?.permissionDecision).toBe("deny");
+      expect(answer.hookSpecificOutput?.permissionDecisionReason).toContain(
+        `mcp__rea__${replacement}`,
+      );
+    },
+  );
+
+  it.each([
+    ["Read", { file_path: "/a/shot.png" }],
+    ["Read", { file_path: "/a/report.PDF" }],
+    ["WebFetch", { url: "https://example.invalid" }],
+    ["mcp__rea__read_file", { path: "/a/b.ts" }],
+    ["mcp__rea__run_command", { command: "ls", cwd: "/a" }],
+  ])("lets %s through the tool rule", (tool, toolInput) => {
+    expect(topicGate.builtInToolRefusal(tool, toolInput)).toBeUndefined();
+  });
+
   it("gives every prompt the user's standing rules, the way Claude Code runs the hook", async () => {
     const directory = await createTestTempDirectory("rea-topic-gate-");
     const hook = run(
@@ -97,6 +141,10 @@ describe("topic gate", () => {
     // Declare the turn's topic first.
     expect(context.additionalContext).toContain(
       "Declare this request's topic with the rene record_topic tool",
+    );
+    // Work through rene's tools, not the agent's built-in ones.
+    expect(context.additionalContext).toContain(
+      "Work through rene's tools (mcp__rea__*), not your built-in ones",
     );
     // Close a limitation instead of working around it, unprompted.
     expect(context.additionalContext).toContain(

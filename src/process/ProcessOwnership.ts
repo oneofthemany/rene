@@ -790,13 +790,16 @@ const processRunTokenFailures = async (
   host: ProcessOwnershipHost,
 ): Promise<readonly ProcessOwnershipValidationFailure[]> => {
   const failures: ProcessOwnershipValidationFailure[] = [];
+  const owned = new Set<number>();
+  const tokenless: ProcessTableEntry[] = [];
   for await (const { process: member, observation } of readProcessRunTokens(
     host,
     members,
   )) {
     if (observation.state === "readable") {
-      if (observation.runId !== runId)
-        failures.push({ pid: member.pid, reason: "run-token-mismatch" });
+      if (observation.runId === runId) owned.add(member.pid);
+      else if (observation.runId === undefined) tokenless.push(member);
+      else failures.push({ pid: member.pid, reason: "run-token-mismatch" });
       continue;
     }
     failures.push({
@@ -805,7 +808,35 @@ const processRunTokenFailures = async (
       diagnostic: observation.reason,
     });
   }
+  failures.push(...tokenlessMembersNotForkedByOwned(tokenless, owned));
   return recheckOwnershipFailures(failures, host);
+};
+
+/**
+ * Programs that rewrite their process title (Chromium's zygote, renderer and
+ * utility processes) overwrite the environment block procfs reports, so a
+ * member they fork reads back with no run token at all. Such a member is
+ * owned when its parent in the same snapshot is an owned member of the group:
+ * the kernel keeps the parent link current, so a live child of a live owned
+ * process was forked by it. Members whose parent chain doesn't reach an owned
+ * member stay mismatches; a member carrying another run's token never
+ * inherits ownership.
+ */
+const tokenlessMembersNotForkedByOwned = (
+  tokenless: readonly ProcessTableEntry[],
+  owned: Set<number>,
+): readonly ProcessOwnershipValidationFailure[] => {
+  let pending = tokenless;
+  while (pending.length > 0) {
+    const forked = pending.filter(({ parentPid }) => owned.has(parentPid));
+    if (forked.length === 0) break;
+    for (const { pid } of forked) owned.add(pid);
+    pending = pending.filter(({ pid }) => !owned.has(pid));
+  }
+  return pending.map(({ pid }) => ({
+    pid,
+    reason: "run-token-mismatch" as const,
+  }));
 };
 
 /**

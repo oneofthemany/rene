@@ -37,13 +37,13 @@
     (e.g. `REA_TELEMETRY_ENDPOINT`), and should rene's own CodeGraph
     processes stop forcing CodeGraph telemetry off? Who enables each new
     topic in the journal (it holds unknown topics until enabled)?
-- **`run_command` leaves processes behind at its timeout.** It answered
-  `stopped: "timeout"` for a command that had started `codegraph ui` in the
-  background, but the command's whole process group (bash and two node
-  processes) kept running and serving its port until killed by hand. Its
-  contract says everything the command started is stopped. Check the
-  timeout path in `src/toolbox/` against `src/process/` ownership (the call
-  had been moved to the background by the MCP client at 120 s).
+- **rene tools for the remaining built-ins.** The topic gate refuses Claude
+  Code's Bash, Read, Write, Edit, Grep and Glob; still allowed until rene
+  has a replacement: Read for images and PDFs (the `read_file` item below),
+  WebFetch (`fetch_url`), NotebookEdit (`edit_notebook`) and WebSearch
+  (`web_search`, backed by SearXNG in the container: needs a Containerfile
+  change and a rebuild). Add each built-in to `RENE_REPLACEMENTS` in
+  `frontend/topicGate.mjs` as its tool lands.
 - **A long-running process tool.** Nothing in rene keeps a server up across
   calls (start, read output, stop, owned by rene). Needed to drive a web UI
   with the browser tools, e.g. CodeGraph's viewer.

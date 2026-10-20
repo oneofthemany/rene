@@ -269,6 +269,23 @@ describe("run_command", () => {
     ).rejects.toThrow(/outside/);
   });
 
+  it("returns a command ended by a signal as a result, with its output", async () => {
+    const result = await runToolboxCommand(
+      roots,
+      runCommandInputSchema.parse({
+        command: "echo before; kill -KILL -- -$$",
+        cwd: root,
+      }),
+      options,
+    );
+    expect(result).toMatchObject({
+      exit_code: null,
+      signal: "SIGKILL",
+      stdout: "before\n",
+      stopped: null,
+    });
+  });
+
   it("stops a command at its timeout", async () => {
     const result = await runToolboxCommand(
       roots,
@@ -283,4 +300,28 @@ describe("run_command", () => {
     expect(result.duration_ms).toBeLessThan(10_000);
     expect(retained).toEqual([]);
   });
+
+  // Perl stretches $0 over the environment block on Linux, as Chromium's
+  // child processes do, so procfs shows the child with no run token. The
+  // command it belongs to must still be stopped as a whole.
+  it.skipIf(process.platform !== "linux")(
+    "stops a command whose child overwrote its environment",
+    async () => {
+      const result = await runToolboxCommand(
+        roots,
+        runCommandInputSchema.parse({
+          command: `perl -e '$0 = "x" x 4000; sleep 30' & echo $!; wait`,
+          cwd: root,
+          timeout_ms: 1_000,
+        }),
+        options,
+      );
+      expect(result.stopped).toBe("timeout");
+      expect(retained).toEqual([]);
+      const child = Number(result.stdout.trim());
+      expect(() => process.kill(child, 0)).toThrow(
+        expect.objectContaining({ code: "ESRCH" }),
+      );
+    },
+  );
 });

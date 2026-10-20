@@ -113,6 +113,80 @@ describe("owned process-group cleanup validation: ownership and lineage", () => 
     });
     expect(signalGroup).not.toHaveBeenCalled();
   });
+});
+
+describe("owned process-group cleanup validation: tokenless descendants", () => {
+  // Chromium's zygote and renderers rewrite their title over the environment
+  // block, so procfs shows them with no run token: browser 101 (token) forks
+  // zygote 102, which forks renderer 103.
+  const titleRewriters = (
+    tokens: Readonly<Record<number, string>>,
+    parents: Readonly<Record<number, number>>,
+  ) => {
+    const signalGroup = vi.fn();
+    const adapter: ProcessOwnershipHost = {
+      listProcesses: () =>
+        Promise.resolve(
+          Object.entries(parents).map(([pid, parentPid]) => ({
+            pid: Number(pid),
+            parentPid,
+            processGroupId: 100,
+            state: "S",
+            command: "fixture",
+          })),
+        ),
+      environment: (pid) =>
+        Promise.resolve(
+          tokens[pid] === undefined ? {} : { REA_PROCESS_RUN_ID: tokens[pid] },
+        ),
+      signalGroup,
+    };
+    return { adapter, signalGroup };
+  };
+  it("owns tokenless members forked by an owned member of the group", async () => {
+    const { adapter, signalGroup } = titleRewriters(
+      { 100: "run-token", 101: "run-token" },
+      { 100: 1, 101: 100, 102: 101, 103: 102 },
+    );
+    expect(await cleanupOwnedProcessGroup(ownership, adapter)).toEqual({
+      cleaned: true,
+      signaled: true,
+    });
+    expect(signalGroup).toHaveBeenCalledWith(100, "SIGKILL");
+  });
+  it("fails closed for a tokenless member no owned member forked", async () => {
+    const { adapter, signalGroup } = titleRewriters(
+      { 100: "run-token" },
+      { 100: 1, 101: 1, 102: 101 },
+    );
+    expect(await cleanupOwnedProcessGroup(ownership, adapter)).toEqual({
+      cleaned: false,
+      reason: "process ownership token mismatch for PID(s): 101, 102",
+      failures: [
+        { pid: 101, reason: "run-token-mismatch" },
+        { pid: 102, reason: "run-token-mismatch" },
+      ],
+    });
+    expect(signalGroup).not.toHaveBeenCalled();
+  });
+  it("never lets ownership pass through another run's process", async () => {
+    const { adapter, signalGroup } = titleRewriters(
+      { 100: "run-token", 101: "other-run" },
+      { 100: 1, 101: 100, 102: 101 },
+    );
+    expect(await cleanupOwnedProcessGroup(ownership, adapter)).toEqual({
+      cleaned: false,
+      reason: "process ownership token mismatch for PID(s): 101, 102",
+      failures: [
+        { pid: 101, reason: "run-token-mismatch" },
+        { pid: 102, reason: "run-token-mismatch" },
+      ],
+    });
+    expect(signalGroup).not.toHaveBeenCalled();
+  });
+});
+
+describe("owned process-group cleanup validation: read failures", () => {
   it("checks every member and aggregates ownership read failures", async () => {
     const environment = vi.fn((pid: number) => {
       if (pid === 100)

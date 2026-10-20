@@ -109,7 +109,7 @@ export const TOOLBOX_TOOL_CONTRACTS = [
     name: "run_command",
     ...toolContractMetadata("run_command"),
     kind: "toolbox",
-    description: `Run a shell command line with bash -c in a folder and return its exit code, signal, stdout and stderr (1 MiB kept), and duration. The command and everything it starts are stopped at timeout_ms or on cancellation; a nonzero exit is a result. It runs with the current user's permissions where REA runs (its container, when started from the workbench) and can change files, start programs and use the network. ${ROOTS}`,
+    description: `Run a shell command line with bash -c in a folder and return its exit code, signal, stdout and stderr (1 MiB kept), and duration. The command and everything it starts are stopped at timeout_ms or on cancellation; a nonzero exit or an ending signal is a result. It runs with the current user's permissions where REA runs (its container, when started from the workbench) and can change files, start programs and use the network. ${ROOTS}`,
     inputSchema: runCommandInputSchema,
     outputSchema: evidenceResultOf(runCommandResultSchema),
     examples: [

@@ -27,8 +27,12 @@
 // undeclared.
 //
 // The same PreToolUse hook holds the agent to the user's other standing
-// rule: the user makes every commit. A shell command that would write or
-// publish git history is refused whatever the topic state (gitHistoryWrite).
+// rules, whatever the topic state: the user makes every commit, so a shell
+// command that would write or publish git history is refused
+// (gitHistoryWrite); and the agent works through rene's tools, so a Claude
+// Code built-in that a rene tool replaces is refused with that tool's name
+// (builtInToolRefusal). The hook file is read on every event, so the rules
+// hold in every session the bridge starts or resumes, running ones included.
 
 import { readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -51,6 +55,44 @@ const CLOSE_GAPS =
   "close it: build the rene tool, or add the program to frontend/container/Containerfile, and use it. " +
   "Don't skip, stub, downgrade or work around it, and don't wait to be asked. " +
   "If closing it needs a download, an install or a rebuild, ask for that approval and say what it unblocks.";
+
+// The user's standing rule on tools: rene is the agent's toolbox, so every
+// action goes through it and its calls are recorded in the project history.
+const USE_RENE =
+  "Work through rene's tools (mcp__rea__*), not your built-in ones: run_command for shell commands, " +
+  "read_file, write_file and edit_file for files, search_text and find_files to search, " +
+  "and the source graph (explore_source_graph) to understand code. " +
+  "Where rene has no tool for an action, build it as a rene tool.";
+
+/**
+ * Claude Code built-ins and the rene tool that replaces each. Built-ins with
+ * no rene counterpart yet (WebFetch, WebSearch, NotebookEdit) stay allowed
+ * until rene has one; so does Read for an image or PDF, which rene's
+ * read_file reports only as binary.
+ */
+const RENE_REPLACEMENTS = new Map([
+  ["Bash", "run_command"],
+  ["Read", "read_file"],
+  ["Write", "write_file"],
+  ["Edit", "edit_file"],
+  ["MultiEdit", "edit_file"],
+  ["Grep", "search_text"],
+  ["Glob", "find_files"],
+  ["LS", "find_files"],
+]);
+const SHOWN_BY_READ_ONLY = /\.(?:png|jpe?g|gif|webp|bmp|pdf)$/iu;
+
+/** The refusal for a built-in tool that a rene tool replaces, if it is one. */
+export function builtInToolRefusal(toolName, toolInput) {
+  const replacement = RENE_REPLACEMENTS.get(toolName);
+  if (replacement === undefined) return undefined;
+  if (
+    toolName === "Read" &&
+    SHOWN_BY_READ_ONLY.test(String(toolInput?.file_path ?? ""))
+  )
+    return undefined;
+  return `${toolName} is refused: use rene's ${replacement} (mcp__rea__${replacement}) instead, so the call is recorded in the project history. ${USE_RENE}`;
+}
 
 const readStdin = async () => {
   const chunks = [];
@@ -174,7 +216,9 @@ const failed = (response) =>
 export async function gate(input, directory) {
   const event = input.hook_event_name;
   if (event === "PreToolUse") {
-    const refusal = gitHistoryRefusal(input.tool_name, input.tool_input);
+    const refusal =
+      gitHistoryRefusal(input.tool_name, input.tool_input) ??
+      builtInToolRefusal(input.tool_name, input.tool_input);
     if (refusal !== undefined)
       return {
         hookSpecificOutput: {
@@ -190,7 +234,7 @@ export async function gate(input, directory) {
     return {
       hookSpecificOutput: {
         hookEventName: event,
-        additionalContext: `${DECLARE} ${CLOSE_GAPS}`,
+        additionalContext: `${DECLARE} ${USE_RENE} ${CLOSE_GAPS}`,
       },
     };
   }
