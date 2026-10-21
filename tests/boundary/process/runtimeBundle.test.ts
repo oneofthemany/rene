@@ -7,6 +7,14 @@ import { describe, expect } from "vitest";
 import { bundleRuntime } from "../../../scripts/bundle-runtime.mjs";
 import { workspaceCliTest } from "../../support/cli/workspaceCliFixture.js";
 
+/** Bundle entries other than main.js and cli.js, stubbed so the build reaches them. */
+const STUBBED_ENTRIES = [
+  "dist/cliOutput.js",
+  "dist/cli/cliResultOutput.js",
+  "dist/mcpDoctor.js",
+  "dist/toolCli.js",
+];
+
 describe("CLI and MCP runtime bundles", () => {
   workspaceCliTest(
     "preserves module locations, lazy side effects, package resolution and worker entrypoints",
@@ -53,6 +61,7 @@ export const lazyUrl = import.meta.url;`,
         "dist/cli/cliResultOutput.js":
           'export { facts } from "../provider/probe λ.js";',
         "dist/mcpDoctor.js": 'export { run } from "./main.js";',
+        "dist/toolCli.js": 'export { run } from "./main.js";',
         "dist/main.js": `
 import { facts } from './provider/probe λ.js';
 import { generatedPackageMetadata } from './generatedPackageMetadata.js';
@@ -89,6 +98,7 @@ export const run = async () => {
       await bundleRuntime(workspace.root);
       const bundled = await invoke("dist/mcp/main.js");
       expect(bundled).toEqual(original);
+      expect(await invoke("dist/mcp/toolCli.js")).toEqual(original);
       expect(await invoke("dist/cli-runtime/cli.js")).toEqual(
         await invoke("dist/cli.js"),
       );
@@ -134,11 +144,7 @@ export const run = async () => {
       await workspace.mkdir("dist");
       await workspace.mkdir("dist/cli");
       await workspace.write("package.json", '{"type":"module"}');
-      for (const path of [
-        "dist/cliOutput.js",
-        "dist/cli/cliResultOutput.js",
-        "dist/mcpDoctor.js",
-      ])
+      for (const path of STUBBED_ENTRIES)
         await workspace.write(path, "export {};\n");
       for (const entry of ["dist/main.js", "dist/cli.js"]) {
         for (const expression of [

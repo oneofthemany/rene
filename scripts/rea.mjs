@@ -14,6 +14,10 @@ process.env.REA_PACKAGE_VERSION = packageJson.version;
 const isMcpMode =
   args.length === 1 && (args[0] === "--mcp" || args[0] === "mcp");
 const isMcpDoctorMode = args[0] === "mcp" && args[1] === "doctor";
+// Explicit tool access (`rea tools`, `rea call`, `rea daemon`) runs the same
+// server composition as MCP, so it is routed before Incur as well.
+const isToolMode =
+  args[0] === "tools" || args[0] === "call" || args[0] === "daemon";
 /** Exit status of a writer terminated by SIGPIPE (128 + 13). */
 const SIGPIPE_EXIT_STATUS = 141;
 // Set once the reader of CLI output has closed the pipe.
@@ -42,13 +46,15 @@ if (
 
 const runtimeFiles = isMcpMode
   ? ["dist/mcp/main.js"]
-  : isMcpDoctorMode
-    ? ["dist/mcp/main.js", "dist/cli-runtime/mcpDoctor.js"]
-    : [
-        "dist/cli-runtime/cli.js",
-        "dist/cli-runtime/cliOutput.js",
-        "dist/cli-runtime/cliResultOutput.js",
-      ];
+  : isToolMode
+    ? ["dist/mcp/toolCli.js"]
+    : isMcpDoctorMode
+      ? ["dist/mcp/main.js", "dist/cli-runtime/mcpDoctor.js"]
+      : [
+          "dist/cli-runtime/cli.js",
+          "dist/cli-runtime/cliOutput.js",
+          "dist/cli-runtime/cliResultOutput.js",
+        ];
 
 if (!(await compiledRuntimeExists(runtimeFiles))) {
   process.stderr.write(
@@ -58,6 +64,19 @@ if (!(await compiledRuntimeExists(runtimeFiles))) {
 } else if (isMcpMode) {
   const { runEntrypoint } = await import("../dist/mcp/main.js");
   await runEntrypoint();
+} else if (isToolMode) {
+  guardClosedStdout();
+  const { runToolCli, readProcessStdin } =
+    await import("../dist/mcp/toolCli.js");
+  const status = await runToolCli(args, {
+    env: process.env,
+    writeStdout,
+    writeStderr: (text) => process.stderr.write(text),
+    readStdin: readProcessStdin,
+  });
+  // A daemon keeps serving after startup; it exits through its shutdown.
+  if (status !== 0 || args[0] !== "daemon")
+    process.exitCode = stdoutClosed ? SIGPIPE_EXIT_STATUS : status;
 } else if (isMcpDoctorMode) {
   guardClosedStdout();
   const { runProductionMcpDoctorCli } =

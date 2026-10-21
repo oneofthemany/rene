@@ -47,6 +47,7 @@ if (await pathExists(join(root, "src"))) {
   for (const path of [
     "dist/main.js",
     "dist/mcp/main.js",
+    "dist/mcp/toolCli.js",
     "dist/cli-runtime/cli.js",
     "dist/cli-runtime/cliOutput.js",
     "dist/cli-runtime/cliResultOutput.js",

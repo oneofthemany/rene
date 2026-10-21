@@ -9,7 +9,12 @@
 // A turn belongs to the topic declared in it (the last, when it declared
 // more than one) and to no other: nothing is carried over from an earlier
 // turn, so a turn without a declaration is listed as undeclared rather than
-// filed under a topic it may not be about. Workbench agents are held to a
+// filed under a topic it may not be about. An undeclared turn is filed only
+// by a declaration that names it by its recorded identity (its session and
+// the time of its request, in record_topic's turns); a topic's named turns
+// add up across its declarations, and the latest naming of a turn wins. A
+// declaration's evidence (the Evidence its conclusion rests on) links the
+// topic like Evidence its calls named. Workbench agents are held to a
 // declaration in every turn (topicGate.mjs). Calls join through their turns
 // (the timestamp link in conversations.mjs). Factual links between topics are
 // identities, not judgments: two topics whose calls read or changed the same
@@ -45,6 +50,7 @@ export async function currentTopics(history) {
   ).sort((a, b) => a.startedAt - b.startedAt);
   const topics = new Map();
   const declaredBy = new Map();
+  const filed = new Map();
   for (const entry of declarations) {
     const declared = payloadOf(
       await history.result(entry.id),
@@ -53,14 +59,26 @@ export async function currentTopics(history) {
     const previous = topics.get(declared.topic_id);
     topics.set(declared.topic_id, {
       ...declared,
+      // Declarations from before these fields existed name none.
+      evidence: [
+        ...new Set([
+          ...(previous?.evidence ?? []),
+          ...(declared.evidence ?? []),
+        ]),
+      ],
       first_declared_at: previous?.first_declared_at ?? declared.declared_at,
       declarations: (previous?.declarations ?? 0) + 1,
       declared_by: entry.source === "agent" ? (entry.agent ?? "Agent") : "You",
     });
     declaredBy.set(entry.id, declared.topic_id);
+    for (const turn of declared.turns ?? [])
+      filed.set(turnKey(turn.session, turn.at), declared.topic_id);
   }
-  return { topics, declaredBy };
+  return { topics, declaredBy, filed };
 }
+
+/** A turn's recorded identity: its session and the time of its request. */
+const turnKey = (session, at) => `${session}\u0000${Date.parse(at)}`;
 
 /** What a call touched that another topic's call could share: files and Evidence. */
 const touched = (entry) => {
@@ -76,11 +94,15 @@ const touched = (entry) => {
 
 /**
  * The topic tree.
- * @param {{ topics: Map, declaredBy: Map }} declared from currentTopics
+ * @param {{ topics: Map, declaredBy: Map, filed?: Map }} declared from currentTopics
  * @param {object[]} turns conversation turns (conversationTurns), oldest first
  * @param {object[]} history the project's call summaries
  */
-export function topicTree({ topics, declaredBy }, turns, history) {
+export function topicTree(
+  { topics, declaredBy, filed = new Map() },
+  turns,
+  history,
+) {
   const calls = new Map(history.map((entry) => [entry.id, entry]));
   const nodes = new Map(
     [...topics.values()].map((topic) => [
@@ -100,6 +122,7 @@ export function topicTree({ topics, declaredBy }, turns, history) {
         event.historyId
       )
         topicId = declaredBy.get(event.historyId) ?? topicId;
+    topicId ??= filed.get(turnKey(turn.session, turn.at));
     const node = nodes.get(topicId);
     const summary = {
       session: turn.session,
@@ -121,7 +144,15 @@ export function topicTree({ topics, declaredBy }, turns, history) {
   }
   // Factual links: topics whose calls touched the same file or Evidence.
   const owners = new Map();
-  for (const node of nodes.values())
+  const own = (key, topicId) => {
+    const k = `${key.kind}\u0000${key.value}`;
+    const set = owners.get(k) ?? new Set();
+    set.add(topicId);
+    owners.set(k, set);
+  };
+  for (const node of nodes.values()) {
+    for (const id of node.evidence ?? [])
+      own({ kind: "evidence", value: id }, node.topic_id);
     for (const id of node.calls) {
       const entry = calls.get(id);
       if (!entry || entry.name === TOPIC_TOOL) continue;
@@ -132,6 +163,7 @@ export function topicTree({ topics, declaredBy }, turns, history) {
         owners.set(k, set);
       }
     }
+  }
   for (const [k, ids] of owners) {
     if (ids.size < 2) continue;
     const [kind, value] = k.split("\u0000");

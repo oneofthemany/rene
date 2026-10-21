@@ -235,6 +235,13 @@ export const TOPIC_RELATIONS = [
 ] as const;
 
 const topicId = z.string().uuid();
+const topicEvidence = z.array(z.string().regex(/^ev_[a-f0-9]{64}$/u)).max(50);
+// A turn by its recorded identity: the conversation it is in and the time
+// its request was made, as the workbench lists turns no topic holds.
+const topicTurn = z.strictObject({
+  session: z.string().min(1).max(200),
+  at: z.string().datetime({ offset: true }),
+});
 
 export const recordTopicInputSchema = z
   .strictObject({
@@ -269,6 +276,18 @@ export const recordTopicInputSchema = z
       .max(2000)
       .default("")
       .describe("What was asked, found or decided, in a few sentences."),
+    evidence: topicEvidence
+      .default([])
+      .describe(
+        "The evidence_id of each earlier result the summary rests on, so the topic's conclusion links to the calls that produced it.",
+      ),
+    turns: z
+      .array(topicTurn)
+      .max(200)
+      .default([])
+      .describe(
+        "Earlier turns this topic holds, named by session and at as the project assessment lists turns in no topic. A turn that declares a topic itself stays with that topic.",
+      ),
   })
   .superRefine((topic, context) => {
     if (topic.kind === "thread" && topic.parent_id !== null)
@@ -295,6 +314,8 @@ export const recordTopicResultSchema = z.strictObject({
     z.strictObject({ topic_id: topicId, relation: z.enum(TOPIC_RELATIONS) }),
   ),
   summary: z.string(),
+  evidence: topicEvidence,
+  turns: z.array(topicTurn),
   declared_at: z.string(),
   created: z.boolean(),
 });
