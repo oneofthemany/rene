@@ -16,13 +16,15 @@
 // down or refuses a report costs a line on stderr, and the agent carries on.
 
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import { parseArgs } from "node:util";
 
-// The bridge's history keeps results up to this size; larger ones are
-// reported by size only, so a huge result never crosses the loopback twice.
-const MAX_RESULT_BYTES = 8 * 1024 * 1024;
+import {
+  createReportSender,
+  readReportTarget,
+  REPORT_DRAIN_MS,
+  resultFields,
+} from "../dist/toolbox/HistoryReport.js";
 
 const { values, positionals } = parseArgs({
   options: { report: { type: "string" } },
@@ -35,14 +37,19 @@ if (!values.report || positionals.length === 0) {
   process.exit(64);
 }
 
-let report;
-try {
-  report = JSON.parse(readFileSync(values.report, "utf8"));
-} catch (cause) {
+const target = readReportTarget(values.report);
+if (!target.ok)
   process.stderr.write(
-    `rene relay: can't read ${values.report} (${cause.message}); calls won't be recorded.\n`,
+    `rene relay: ${target.reason}; calls won't be recorded.\n`,
   );
-}
+const reports = target.ok
+  ? createReportSender(
+      target.target,
+      (text) => process.stderr.write(text),
+      "rene relay",
+    )
+  : undefined;
+const send = (event) => reports?.send(event);
 
 const [command, ...args] = positionals;
 const child = spawn(command, args, { stdio: ["pipe", "pipe", "inherit"] });
@@ -52,34 +59,6 @@ child.on("error", (cause) => {
   );
   process.exit(69);
 });
-
-// Reports go out one at a time, so the bridge sees "started" before "settled".
-let reports = Promise.resolve();
-let warned = false;
-function send(event) {
-  if (!report) return;
-  reports = reports.then(async () => {
-    try {
-      const response = await fetch(report.url, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-rea-relay-token": report.token,
-        },
-        body: JSON.stringify(event),
-        signal: AbortSignal.timeout(10_000),
-      });
-      if (!response.ok)
-        throw new Error(`the bridge answered ${response.status}`);
-    } catch (cause) {
-      if (!warned)
-        process.stderr.write(
-          `rene relay: couldn't record a call in the workbench (${cause.message}); the agent is unaffected.\n`,
-        );
-      warned = true;
-    }
-  });
-}
 
 /** tools/call requests sent by the agent and not answered yet, by JSON-RPC id. */
 const pending = new Map();
@@ -126,17 +105,6 @@ function fromRea(message) {
           elapsedMs,
         },
   );
-}
-
-function resultFields(result) {
-  const bytes = Buffer.byteLength(JSON.stringify(result ?? null));
-  return bytes <= MAX_RESULT_BYTES
-    ? { result }
-    : {
-        resultOmitted: true,
-        resultBytes: bytes,
-        untrusted: result?._meta?.provenance?.untrusted_content === true,
-      };
 }
 
 /** Splits a byte stream into JSON-RPC messages; unparseable lines are skipped. */
@@ -197,8 +165,5 @@ child.on("exit", (code, signal) => {
   pending.clear();
   const done = () => process.exit(code ?? (signal ? 128 : 1));
   // Outstanding reports get a moment to land; the agent doesn't wait on them.
-  Promise.race([
-    reports,
-    new Promise((resolve) => setTimeout(resolve, 2000)),
-  ]).then(done, done);
+  (reports?.drain(REPORT_DRAIN_MS) ?? Promise.resolve()).then(done, done);
 });

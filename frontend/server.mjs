@@ -1689,6 +1689,8 @@ async function agentSession(cwd, agentId) {
       command: process.execPath,
       args: [relayScript, "--report", report, "--", rea.command, ...rea.args],
     },
+    // `rea call` in the agent's shell reports through the same file.
+    report,
     instructions: agentInstructions(
       project.manifest.assessment === "enabled" ? ASSESSMENT_FILE : undefined,
     ),

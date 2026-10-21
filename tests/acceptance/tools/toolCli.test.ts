@@ -1,5 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -141,3 +143,65 @@ describe("explicit tool CLI", () => {
     expect(absent.stderr).toContain("No REA daemon answers");
   }, 180_000);
 });
+
+it("records a call in the workbench history through the session's report file", async () => {
+  const root = await createTestTempDirectory("rea-tool-history-");
+  const file = join(root, "note.txt");
+  await writeFile(file, "hello\n");
+  const reports: { token: unknown; event: Record<string, unknown> }[] = [];
+  // Stands in for the workbench bridge's /api/relay endpoint.
+  const bridge = createServer((request, response) => {
+    let body = "";
+    request.on("data", (chunk: Buffer) => (body += chunk.toString("utf8")));
+    request.on("end", () => {
+      reports.push({
+        token: request.headers["x-rea-relay-token"],
+        event: JSON.parse(body) as Record<string, unknown>,
+      });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{}");
+    });
+  });
+  await new Promise<void>((listening) =>
+    bridge.listen(0, "127.0.0.1", listening),
+  );
+  try {
+    const { port } = bridge.address() as AddressInfo;
+    const report = join(root, "relay-report.json");
+    await writeFile(
+      report,
+      JSON.stringify({
+        url: `http://127.0.0.1:${port}/api/relay`,
+        token: "t1",
+      }),
+      { mode: 0o600 },
+    );
+    const env = { REA_TOOLBOX_ROOTS: root, REA_HISTORY_REPORT: report };
+    const args = { path: file };
+
+    const called = await rea(["call", "read_file", JSON.stringify(args)], env);
+    expect(called.code).toBe(0);
+    expect(called.stderr).toBe("");
+    const failed = await rea(["call", "no_such_tool", "{}"], env);
+    expect(failed.code).toBe(1);
+
+    expect(reports.every(({ token }) => token === "t1")).toBe(true);
+    const events = reports.map(({ event }) => event);
+    expect(
+      events.map(({ type, name, outcome }) => [type, name ?? outcome]),
+    ).toEqual([
+      ["started", "read_file"],
+      ["settled", "ok"],
+      ["started", "no_such_tool"],
+      ["settled", "error"],
+    ]);
+    expect(events[0]).toMatchObject({ args });
+    expect(events[1]!.ref).toBe(events[0]!.ref);
+    expect(JSON.stringify(events[1]!.result)).toContain("hello");
+    expect(events[3]).toMatchObject({
+      failure: expect.stringContaining("no_such_tool"),
+    });
+  } finally {
+    await new Promise((closed) => bridge.close(closed));
+  }
+}, 120_000);

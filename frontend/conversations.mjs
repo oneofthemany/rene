@@ -80,7 +80,12 @@ export const storedEvent = (event) => {
         toolUseId: event.id,
         tool: event.tool,
         rea: event.rene,
-        args: event.rene ? (event.args ?? {}) : undefined,
+        // null: a `rea call` whose arguments weren't on its command line.
+        args: event.rene
+          ? event.args === undefined
+            ? {}
+            : event.args
+          : undefined,
       };
     case "tool_result":
       return {
@@ -299,7 +304,8 @@ const LINK_AFTER_MS = 5 * 60_000;
 /**
  * Splits a transcript's events into turns (a prompt and what followed it)
  * and ties each rea tool use to the call the relay recorded, by its
- * timestamp: the same tool with identical arguments, started within
+ * timestamp: the same tool with identical arguments (any arguments when the
+ * tool use's are unknown, as for `rea call` reading stdin), started within
  * LINK_BEFORE_MS before to LINK_AFTER_MS after the tool use, the closest one
  * not already taken. A transcript can span several workbench sessions (a
  * resumed conversation), so the workbench session id isn't part of the match.
@@ -316,7 +322,7 @@ export function conversationTurns(meta, events, history) {
       if (used.has(entry.id) || entry.name !== event.tool) continue;
       const gap = entry.startedAt - at;
       if (gap < -LINK_BEFORE_MS || gap > LINK_AFTER_MS) continue;
-      if (canonical(entry.args) !== key) continue;
+      if (event.args !== null && canonical(entry.args) !== key) continue;
       if (!best || Math.abs(gap) < Math.abs(best.startedAt - at)) best = entry;
     }
     if (best) used.add(best.id);

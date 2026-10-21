@@ -21,6 +21,12 @@ import { run } from "./main.js";
 import { registerProcessShutdown } from "./main/processShutdown.js";
 import type { RuntimeDependencies } from "./main/types.js";
 import { PRODUCT_IDENTITY } from "./identity.js";
+import {
+  createReportSender,
+  readReportTarget,
+  resultFields,
+  type ReportSender,
+} from "./toolbox/HistoryReport.js";
 
 /**
  * Explicit command-line access to every REA tool, without an MCP client.
@@ -290,6 +296,21 @@ const parseArguments = (
   return { ok: true, value: value as Record<string, unknown> };
 };
 
+/**
+ * The workbench's history reporter when the agent's session names one with
+ * REA_HISTORY_REPORT; calls are recorded as the MCP relay records them.
+ */
+const historyReports = (io: ToolCliIo): ReportSender | undefined => {
+  const path = io.env.REA_HISTORY_REPORT;
+  if (path === undefined || path === "") return undefined;
+  const target = readReportTarget(path);
+  if (!target.ok) {
+    io.writeStderr(`rea call: ${target.reason}; the call won't be recorded.\n`);
+    return undefined;
+  }
+  return createReportSender(target.target, io.writeStderr, "rea call");
+};
+
 const runCall = async (
   args: readonly string[],
   io: ToolCliIo,
@@ -306,11 +327,39 @@ const runCall = async (
     io.writeStderr(`The arguments for ${name} are ${parsed.reason}.\n`);
     return 2;
   }
+  const reports = historyReports(io);
   return withToolClient(io, async (client) => {
-    const result = await client.callTool({
+    const ref = `${process.pid}:cli:${Date.now()}`;
+    const startedAt = Date.now();
+    reports?.send({
+      type: "started",
+      ref,
       name,
-      arguments: parsed.value,
+      args: parsed.value,
+      startedAt,
     });
+    let result: Awaited<ReturnType<Client["callTool"]>>;
+    try {
+      result = await client.callTool({ name, arguments: parsed.value });
+    } catch (cause: unknown) {
+      reports?.send({
+        type: "settled",
+        ref,
+        outcome: "error",
+        failure: errorMessage(cause),
+        elapsedMs: Date.now() - startedAt,
+      });
+      await reports?.drain();
+      throw cause;
+    }
+    reports?.send({
+      type: "settled",
+      ref,
+      outcome: result.isError === true ? "error" : "ok",
+      ...resultFields(result),
+      elapsedMs: Date.now() - startedAt,
+    });
+    await reports?.drain();
     // The text blocks are what an MCP agent reads; structured content is
     // printed only when a result carries no text.
     const content = Array.isArray(result.content) ? result.content : [];

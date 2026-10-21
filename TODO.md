@@ -78,6 +78,27 @@
   source graph first. Compare tool calls, tokens and time on one real code
   question with and without it.
 
+## Closing items (MCP → local CLI toolkit)
+
+Finish these before the move off MCP is called done.
+
+- **Lint warnings in touched code.** `bundleRuntime` in
+  `scripts/bundle-runtime.mjs` is 120 lines (limit 100); split the rolldown
+  plugin and the write options into their own functions. `topicTree` in
+  `frontend/topics.mjs` has complexity 28 (limit 20); split turn filing,
+  shared-key links and the hierarchy into helpers. Topic
+  `65f6dabe-1a6f-4fee-b5d7-a0d7c4c81a18`.
+- **Older lint warnings in files the move touches** (all present at
+  `15cd20fda`): `frontend/server.mjs` is 1722 lines (limit 500) and
+  `routeApi` (22), `callTool` (21) and `routeProjects` (30) are over the
+  complexity limit of 20; `createTerminal` in `frontend/terminal.mjs` is 114
+  lines (limit 100); `claudeEvents` in `src/toolbox/AgentConversations.ts`
+  has complexity 26 (was 28).
+- **Daemon keeps one Android provider per connection.** `rea daemon` serves
+  each connection from the MCP transport's factory, which creates an Android
+  analysis provider per server and closes them only at shutdown. Close each
+  connection's provider when that connection ends.
+
 ## Roadmap
 
 - **Link topics to code.** Map the files a topic's calls touched to source

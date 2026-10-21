@@ -318,12 +318,17 @@ async function requireRene(agent, registration) {
 /** Writes the agent's session files and starts it in a pseudo-terminal. */
 async function launch(
   agent,
-  { server, directory, environment, instructions, conversationId },
+  { server, directory, environment, instructions, conversationId, report },
   cwd,
   size,
 ) {
   await mkdir(directory, { recursive: true, mode: 0o700 });
-  const base = sessionEnvironment(environment());
+  // The report file names the bridge and the session's token for `rea call`;
+  // the variable carries the private file's path, not the token.
+  const base = {
+    ...sessionEnvironment(environment()),
+    ...(report ? { REA_HISTORY_REPORT: report } : {}),
+  };
   const { args = [], env } = agent.prepare
     ? await agent.prepare({
         server,
@@ -400,6 +405,7 @@ export function createTerminal(options) {
         environment,
         instructions: link.instructions,
         conversationId: link.conversationId,
+        report: link.report,
       },
       cwd,
       { cols, rows },
