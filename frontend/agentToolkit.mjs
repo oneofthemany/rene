@@ -1,13 +1,15 @@
 // How a workbench agent reaches rene's tools: its toolkit.
 //
-//   cli  `rea call <tool> '<json>'` in the agent's shell (the default). The
-//        session gets a `rea` command on its PATH and one `rea daemon`, so
+//   cli  `rene call <tool> '<json>'` in the agent's shell: the default. The
+//        session gets a `rea` command on its PATH and one `rene daemon`, so
 //        every call shares a session (a target opened by one call stays open
-//        for the next), named to `rea call` by REA_DAEMON_SOCKET.
-//   mcp  rene as an MCP server through the relay (relay.mjs).
+//        for the next), named to `rene call` by REA_DAEMON_SOCKET. Claude
+//        Code's topic gate names each rene tool it runs in the console.
+//   mcp  rene as named tools from an MCP server, through the relay
+//        (relay.mjs).
 //
-// REA_AGENT_TOOLKIT=mcp in the workbench's environment selects MCP; MCP stays
-// available until the move to the command line is complete.
+// REA_AGENT_TOOLKIT=mcp in the workbench's environment selects MCP. Either
+// way every call is recorded in the project's history by its rene tool name.
 //
 // The daemon is an owned process (src/process supervision) started through
 // the same rea command as everything else, so it runs in the container when
@@ -34,26 +36,29 @@ const MAX_STDERR_BYTES = 8 * 1024;
 // sun_path holds 108 bytes on Linux, 104 on macOS.
 const MAX_SOCKET_PATH = 100;
 
-/** The session's toolkit from the workbench's environment. */
+/** The session's toolkit from the workbench's environment: cli unless MCP is asked for. */
 export const agentToolkit = (env) =>
   env.REA_AGENT_TOOLKIT === "mcp" ? "mcp" : "cli";
 
 const shellQuote = (text) => `'${text.replaceAll("'", "'\\''")}'`;
 
 /**
- * Writes `<directory>/bin/rea`, which runs the workbench's rea command, so
- * the agent's shell has `rea` whether or not it is installed.
+ * Writes `<directory>/bin/rene`, which runs the workbench's rea command (it
+ * answers rene's call, tools, daemon and agent), so the agent's shell has
+ * `rene` whether or not it is installed; `rea`, the older name, too.
  */
 async function writeReaShim(directory, rea) {
   const bin = join(directory, "bin");
   await mkdir(bin, { recursive: true, mode: 0o700 });
-  const path = join(bin, "rea");
-  const temporary = `${path}.${process.pid}.tmp`;
   const command = [rea.command, ...rea.args].map(shellQuote).join(" ");
-  await writeFile(temporary, `#!/bin/sh\nexec ${command} "$@"\n`, {
-    mode: 0o700,
-  });
-  await rename(temporary, path);
+  for (const name of ["rene", "rea"]) {
+    const path = join(bin, name);
+    const temporary = `${path}.${process.pid}.tmp`;
+    await writeFile(temporary, `#!/bin/sh\nexec ${command} "$@"\n`, {
+      mode: 0o700,
+    });
+    await rename(temporary, path);
+  }
   return bin;
 }
 
@@ -69,7 +74,7 @@ async function stopDaemon({ child, supervisor, socket }) {
   const result = await supervisor.stop();
   if (result.status === "incomplete")
     throw new Error(
-      `The session's rea daemon could not be stopped: ${result.reason}`,
+      `The session's rene daemon could not be stopped: ${result.reason}`,
     );
   supervisor.dispose();
   await rm(socket, { force: true });
@@ -89,7 +94,7 @@ function daemonReady(child, socket, stderr) {
         child.off("exit", exited);
         reject(
           new Error(
-            `rea daemon didn't open ${socket} within ${DAEMON_START_MS / 1000} s.${stderr()}`,
+            `rene daemon didn't open ${socket} within ${DAEMON_START_MS / 1000} s.${stderr()}`,
           ),
         );
       }
@@ -98,7 +103,7 @@ function daemonReady(child, socket, stderr) {
       clearInterval(timer);
       reject(
         new Error(
-          `rea daemon exited (${signal ?? `status ${code}`}) before opening its socket.${stderr()}`,
+          `rene daemon exited (${signal ?? `status ${code}`}) before opening its socket.${stderr()}`,
         ),
       );
     };

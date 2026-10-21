@@ -97,6 +97,21 @@ export const editFileResultSchema = z.strictObject({
   previous_sha256: z.string(),
 });
 
+export const editFilesInputSchema = z.strictObject({
+  edits: z
+    .array(editFileInputSchema)
+    .min(1)
+    .max(500)
+    .describe(
+      "Replacements in order; several may change the same file, each applied to the text the ones before it left.",
+    ),
+});
+
+export const editFilesResultSchema = z.strictObject({
+  edits: z.number().int().positive(),
+  files: z.array(editFileResultSchema),
+});
+
 export const findFilesInputSchema = z.strictObject({
   root: absolutePath.describe("Folder to search, inside the toolbox roots."),
   pattern: z
@@ -438,6 +453,7 @@ export type RecordTopicInput = z.infer<typeof recordTopicInputSchema>;
 export type ReadFileInput = z.infer<typeof readFileInputSchema>;
 export type WriteFileInput = z.infer<typeof writeFileInputSchema>;
 export type EditFileInput = z.infer<typeof editFileInputSchema>;
+export type EditFilesInput = z.infer<typeof editFilesInputSchema>;
 export type FindFilesInput = z.infer<typeof findFilesInputSchema>;
 export type SearchTextInput = z.infer<typeof searchTextInputSchema>;
 export type RunCommandInput = z.infer<typeof runCommandInputSchema>;

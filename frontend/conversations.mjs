@@ -80,7 +80,7 @@ export const storedEvent = (event) => {
         toolUseId: event.id,
         tool: event.tool,
         rea: event.rene,
-        // null: a `rea call` whose arguments weren't on its command line.
+        // null: a `rene call` whose arguments weren't on its command line.
         args: event.rene
           ? event.args === undefined
             ? {}
@@ -143,6 +143,11 @@ export function createConversationStore(directory) {
       );
       return metas.filter(Boolean).sort((a, b) => a.startedAt - b.startedAt);
     },
+    /** Empties a session's events, so its transcript can be read again. */
+    async clearEvents(session) {
+      await ready;
+      await writeFile(eventsPath(session), "", { mode: 0o600 });
+    },
     async append(session, events) {
       if (events.length === 0) return;
       await ready;
@@ -199,15 +204,30 @@ function ingestTranscript(store, id) {
   return next;
 }
 
-async function ingestFrom(store, meta) {
+/**
+ * Which reading of transcripts a session's stored events came from. Raise it
+ * when rene parses transcripts into different events (2: one tool use per
+ * `rene call` on a shell line), so stored sessions are read again from the
+ * start rather than keeping events the current parser wouldn't produce.
+ */
+const EVENTS_VERSION = 2;
+
+async function ingestFrom(store, stored) {
+  let meta = stored;
   let handle;
   try {
     handle = await open(meta.transcript, "r");
   } catch {
+    // A transcript that is gone keeps the events already read from it.
     return 0;
   }
   let added = 0;
   try {
+    if (meta.eventsVersion !== EVENTS_VERSION) {
+      await store.clearEvents(meta.session);
+      meta = { ...meta, offset: 0, eventsVersion: EVENTS_VERSION };
+      await store.writeMeta(meta);
+    }
     const { size } = await handle.stat();
     let offset = meta.offset ?? 0;
     while (offset < size) {
@@ -305,7 +325,7 @@ const LINK_AFTER_MS = 5 * 60_000;
  * Splits a transcript's events into turns (a prompt and what followed it)
  * and ties each rea tool use to the call the relay recorded, by its
  * timestamp: the same tool with identical arguments (any arguments when the
- * tool use's are unknown, as for `rea call` reading stdin), started within
+ * tool use's are unknown, as for `rene call` reading stdin), started within
  * LINK_BEFORE_MS before to LINK_AFTER_MS after the tool use, the closest one
  * not already taken. A transcript can span several workbench sessions (a
  * resumed conversation), so the workbench session id isn't part of the match.

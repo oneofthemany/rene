@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { existsSync, unlinkSync } from "node:fs";
 import { chmod } from "node:fs/promises";
 import { createConnection, createServer, type Socket } from "node:net";
@@ -27,14 +28,18 @@ import {
   resultFields,
   type ReportSender,
 } from "./toolbox/HistoryReport.js";
+import {
+  declarationReceipt,
+  declaredTopicIds,
+} from "./toolbox/ReaCallCommand.js";
 
 /**
  * Explicit command-line access to every REA tool, without an MCP client.
  *
- *   rea tools [search <words…>]    one line per tool: name and summary
- *   rea tools describe <name>      the tool's description and input schema
- *   rea call <name> [<json>|-]     run one tool; arguments as JSON or stdin
- *   rea daemon [--socket <path>] [--exit-with-stdin]
+ *   rene tools [search <words…>]    one line per tool: name and summary
+ *   rene tools describe <name>      the tool's description and input schema
+ *   rene call <name> [<json>|-]     run one tool; arguments as JSON or stdin
+ *   rene daemon [--socket <path>] [--exit-with-stdin]
  *                                  keep one session for many calls; with
  *                                  --exit-with-stdin it stops when its
  *                                  stdin closes, so the process that started
@@ -44,7 +49,7 @@ import {
  * admission, Evidence and result delivery have one owner. Without
  * REA_DAEMON_SOCKET a call starts that runtime in-process and closes it when
  * the call settles, so targets opened by one call are gone by the next; with
- * it, calls reach a `rea daemon` whose session persists between them.
+ * it, calls reach a `rene daemon` whose session persists between them.
  */
 
 export interface ToolCliIo {
@@ -55,10 +60,12 @@ export interface ToolCliIo {
 }
 
 const USAGE = `Usage:
-  rea tools [search <words…>]    List tools (name and summary)
-  rea tools describe <name>      Show a tool's description and input schema
-  rea call <name> [<json>|-]     Run one tool; '-' reads the JSON arguments from stdin
-  rea daemon [--socket <path>] [--exit-with-stdin]
+  rene tools [search <words…>]    List tools (name and summary)
+  rene tools describe <name>      Show a tool's description and input schema
+  rene call <name> [<json>|-]     Run one tool; '-' reads the JSON arguments from stdin
+  rene call <name> <json> --stdin-field <field>
+                                 Run one tool with <field> set to stdin's raw text
+  rene daemon [--socket <path>] [--exit-with-stdin]
                                  Serve one persistent session on a Unix socket;
                                  --exit-with-stdin stops it when stdin closes
 
@@ -165,7 +172,7 @@ const errorMessage = (cause: unknown): string =>
  * Run `action` with a connected client: to the daemon REA_DAEMON_SOCKET names,
  * or to a runtime started in this process and closed when `action` settles.
  */
-const withToolClient = async (
+export const withToolClient = async (
   io: ToolCliIo,
   action: (client: Client) => Promise<number>,
 ): Promise<number> => {
@@ -180,7 +187,7 @@ const withToolClient = async (
       socket = await connectSocket(socketPath);
     } catch (cause: unknown) {
       io.writeStderr(
-        `No REA daemon answers at ${socketPath} (REA_DAEMON_SOCKET): ${errorMessage(cause)}. Start one with 'rea daemon --socket ${socketPath}', or unset REA_DAEMON_SOCKET to run in-process.\n`,
+        `No REA daemon answers at ${socketPath} (REA_DAEMON_SOCKET): ${errorMessage(cause)}. Start one with 'rene daemon --socket ${socketPath}', or unset REA_DAEMON_SOCKET to run in-process.\n`,
       );
       return 1;
     }
@@ -252,7 +259,7 @@ const runTools = async (
       );
       if (tool === undefined) {
         io.writeStderr(
-          `No tool named ${name}. 'rea tools search <words>' finds tools.\n`,
+          `No tool named ${name}. 'rene tools search <words>' finds tools.\n`,
         );
         return 1;
       }
@@ -307,19 +314,74 @@ const parseArguments = (
   return { ok: true, value: value as Record<string, unknown> };
 };
 
+export type ToolResult = Awaited<ReturnType<Client["callTool"]>>;
+
+/**
+ * What an agent reads of a tool result: its text blocks, as an MCP client
+ * shows them, or its structured content when it carries no text.
+ */
+export const resultText = (result: ToolResult): string => {
+  const content = Array.isArray(result.content) ? result.content : [];
+  const texts = content.flatMap((block) =>
+    block.type === "text" ? [block.text] : [],
+  );
+  return texts.length > 0
+    ? texts.join("\n")
+    : JSON.stringify(result.structuredContent ?? result);
+};
+
+/**
+ * Calls one tool and reports it to the workbench's history, started and
+ * settled, as the MCP relay reports the calls it sees. A call that throws is
+ * reported as failed and rethrown.
+ */
+export const callRecorded = async (
+  client: Client,
+  reports: ReportSender | undefined,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<ToolResult> => {
+  const ref = `${process.pid}:cli:${Date.now()}:${randomBytes(4).toString("hex")}`;
+  const startedAt = Date.now();
+  reports?.send({ type: "started", ref, name, args, startedAt });
+  let result: ToolResult;
+  try {
+    result = await client.callTool({ name, arguments: args });
+  } catch (cause: unknown) {
+    reports?.send({
+      type: "settled",
+      ref,
+      outcome: "error",
+      failure: errorMessage(cause),
+      elapsedMs: Date.now() - startedAt,
+    });
+    throw cause;
+  }
+  reports?.send({
+    type: "settled",
+    ref,
+    outcome: result.isError === true ? "error" : "ok",
+    ...resultFields(result),
+    elapsedMs: Date.now() - startedAt,
+  });
+  return result;
+};
+
 /**
  * The workbench's history reporter when the agent's session names one with
  * REA_HISTORY_REPORT; calls are recorded as the MCP relay records them.
  */
-const historyReports = (io: ToolCliIo): ReportSender | undefined => {
+export const historyReports = (io: ToolCliIo): ReportSender | undefined => {
   const path = io.env.REA_HISTORY_REPORT;
   if (path === undefined || path === "") return undefined;
   const target = readReportTarget(path);
   if (!target.ok) {
-    io.writeStderr(`rea call: ${target.reason}; the call won't be recorded.\n`);
+    io.writeStderr(
+      `rene call: ${target.reason}; the call won't be recorded.\n`,
+    );
     return undefined;
   }
-  return createReportSender(target.target, io.writeStderr, "rea call");
+  return createReportSender(target.target, io.writeStderr, "rene call");
 };
 
 const runCall = async (
@@ -327,7 +389,15 @@ const runCall = async (
   io: ToolCliIo,
 ): Promise<number> => {
   const [name, input, ...extra] = args;
-  if (name === undefined || extra.length > 0) {
+  // --stdin-field <field>: that field's value is stdin's raw text, so long
+  // or multi-line text (a file's content, a script) needs no JSON escaping.
+  const stdinField =
+    extra.length === 2 && extra[0] === "--stdin-field" ? extra[1] : undefined;
+  if (
+    name === undefined ||
+    (extra.length > 0 && stdinField === undefined) ||
+    (stdinField !== undefined && (input === undefined || input === "-"))
+  ) {
     io.writeStderr(USAGE);
     return 2;
   }
@@ -338,50 +408,20 @@ const runCall = async (
     io.writeStderr(`The arguments for ${name} are ${parsed.reason}.\n`);
     return 2;
   }
+  const callArgs =
+    stdinField === undefined
+      ? parsed.value
+      : { ...parsed.value, [stdinField]: await io.readStdin() };
   const reports = historyReports(io);
   return withToolClient(io, async (client) => {
-    const ref = `${process.pid}:cli:${Date.now()}`;
-    const startedAt = Date.now();
-    reports?.send({
-      type: "started",
-      ref,
-      name,
-      args: parsed.value,
-      startedAt,
-    });
-    let result: Awaited<ReturnType<Client["callTool"]>>;
-    try {
-      result = await client.callTool({ name, arguments: parsed.value });
-    } catch (cause: unknown) {
-      reports?.send({
-        type: "settled",
-        ref,
-        outcome: "error",
-        failure: errorMessage(cause),
-        elapsedMs: Date.now() - startedAt,
-      });
-      await reports?.drain();
-      throw cause;
-    }
-    reports?.send({
-      type: "settled",
-      ref,
-      outcome: result.isError === true ? "error" : "ok",
-      ...resultFields(result),
-      elapsedMs: Date.now() - startedAt,
-    });
+    const result = await callRecorded(client, reports, name, callArgs);
     await reports?.drain();
-    // The text blocks are what an MCP agent reads; structured content is
-    // printed only when a result carries no text.
-    const content = Array.isArray(result.content) ? result.content : [];
-    const texts = content.flatMap((block) =>
-      block.type === "text" ? [block.text] : [],
-    );
-    io.writeStdout(
-      texts.length > 0
-        ? `${texts.join("\n")}\n`
-        : `${JSON.stringify(result.structuredContent ?? result)}\n`,
-    );
+    io.writeStdout(`${resultText(result)}\n`);
+    // A receipt on stderr, which a filter on stdout (jq, head) leaves alone,
+    // so the workbench's topic gate sees the declaration either way.
+    if (name === "record_topic" && result.isError !== true)
+      for (const id of declaredTopicIds(resultText(result)))
+        io.writeStderr(declarationReceipt(id));
     return result.isError === true ? 1 : 0;
   });
 };
@@ -416,7 +456,7 @@ const runDaemon = async (
   }
   if (socketPath === undefined || socketPath === "") {
     io.writeStderr(
-      "rea daemon needs a socket path: --socket <path> or REA_DAEMON_SOCKET.\n",
+      "rene daemon needs a socket path: --socket <path> or REA_DAEMON_SOCKET.\n",
     );
     return 2;
   }
@@ -471,7 +511,7 @@ const runDaemon = async (
   return run(runtimeDependencies(io, serve, () => undefined, exitWithStdin));
 };
 
-/** Run `rea tools`, `rea call` or `rea daemon` and return the exit status. */
+/** Run `rene tools`, `rene call` or `rene daemon` and return the exit status. */
 export const runToolCli = async (
   args: readonly string[],
   io: ToolCliIo,

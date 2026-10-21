@@ -3,8 +3,8 @@
 //
 // An agent reaches rene's tools one of two ways, the session's toolkit
 // (REA_AGENT_TOOLKIT): "mcp", as MCP tools (mcp__rea__*), or "cli", as
-// `rea call <tool> '<json>'` in its shell. With "cli" the shell runs rea and
-// nothing else (reaOnlyShellLine), and a `rea call record_topic` is the
+// `rene call <tool> '<json>'` in its shell. With "cli" the shell runs rea and
+// nothing else (reaOnlyShellLine), and a `rene call record_topic` is the
 // declaration; its printed Evidence is how the gate sees it succeed.
 //
 // A turn belongs to the topic declared in it and to no other (topics.mjs), so
@@ -48,6 +48,14 @@ import {
   declaredTopicIds,
   reaOnlyShellLine,
 } from "../dist/toolbox/ReaCallCommand.js";
+import {
+  GIT_HISTORY_RULE,
+  gitHistoryWrite,
+} from "../dist/toolbox/GitHistory.js";
+import { CONSENT_RULE, consentNeeded } from "../dist/toolbox/CommandConsent.js";
+
+// The git rule's owner is src/toolbox/GitHistory.ts; re-exported for tests.
+export { gitHistoryWrite };
 
 const ALWAYS_ALLOWED = new Set(["ToolSearch"]);
 const SESSION = /^[\w-]{1,120}$/;
@@ -58,7 +66,7 @@ const TOPIC_CHOICE =
   "(declare a thread first when none fits). Every turn needs its own declaration.";
 const DECLARE = {
   mcp: `Declare this request's topic with the rene record_topic tool (mcp__rea__record_topic) before anything else: ${TOPIC_CHOICE}`,
-  cli: `Declare this request's topic before anything else with \`rea call record_topic '<json>'\` in your shell: ${TOPIC_CHOICE}`,
+  cli: `Declare this request's topic before anything else with \`rene call record_topic '<json>'\` in your shell: ${TOPIC_CHOICE}`,
 };
 
 // The user's standing rule on limitations, given with every prompt so it
@@ -79,14 +87,14 @@ const RENE_TOOLS =
 const USE_RENE = {
   mcp: `Work through rene's tools (mcp__rea__*), not your built-in ones: ${RENE_TOOLS}`,
   cli:
-    "Work through rene's tools with `rea call <tool> '<json>'` in your shell (`rea call <tool> -` reads the JSON from stdin), " +
-    "not your built-in ones; `rea tools search <words>` finds a tool and `rea tools describe <tool>` shows its input. " +
-    `Your shell runs only rea commands, whose output you may pipe into head, tail, wc or jq. ${RENE_TOOLS}`,
+    "Work through rene's tools with `rene call <tool> '<json>'` in your shell (`rene call <tool> -` reads the JSON from stdin), " +
+    "not your built-in ones; `rene tools search <words>` finds a tool and `rene tools describe <tool>` shows its input. " +
+    `Your shell runs only rene commands, whose output you may pipe into head, tail, wc or jq. ${RENE_TOOLS}`,
 };
 
 /** How the agent calls one rene tool in its toolkit. */
 const howToCall = (tool, toolkit) =>
-  toolkit === "cli" ? `\`rea call ${tool} '<json>'\`` : `mcp__rea__${tool}`;
+  toolkit === "cli" ? `\`rene call ${tool} '<json>'\`` : `mcp__rea__${tool}`;
 
 /**
  * Claude Code built-ins and the rene tool that replaces each. Built-ins with
@@ -122,7 +130,7 @@ export function builtInToolRefusal(toolName, toolInput, toolkit = "mcp") {
   if (toolkit === "cli" && toolName === "Bash") {
     const line = reaOnlyShellLine(String(toolInput?.command ?? ""));
     if (line.ok) return undefined;
-    return `This shell runs only rea commands, and this one doesn't (${line.reason}). Run a shell command with \`rea call run_command '{"command":"…","cwd":"…"}'\`, so it is recorded in the project history. ${USE_RENE.cli}`;
+    return `This shell runs only rene commands, and this one doesn't (${line.reason}). Run a shell command with \`rene call run_command '{"command":"…","cwd":"…"}'\`, so it is recorded in the project history. ${USE_RENE.cli}`;
   }
   return `${toolName} is refused: use rene's ${replacement} (${howToCall(replacement, toolkit)}) instead, so the call is recorded in the project history. ${USE_RENE[toolkit]}`;
 }
@@ -135,23 +143,64 @@ const readStdin = async () => {
 
 const isTopicTool = (name) => /(?:^|__)record_topic$/.test(name ?? "");
 
-/** The rea calls a shell tool use makes, when its line runs only rea. */
+/** The rene calls a shell tool use makes, when its line runs only rea. */
 const reaCalls = (toolName, toolInput) => {
   if (toolName !== "Bash") return [];
   const line = reaOnlyShellLine(String(toolInput?.command ?? ""));
   return line.ok ? line.calls : [];
 };
 
-/** Whether a tool use declares the turn's topic, through MCP or rea call. */
+/** Whether a tool use declares the turn's topic, through MCP or rene call. */
 const declaresTopic = (toolName, toolInput) =>
   isTopicTool(toolName) ||
   reaCalls(toolName, toolInput).some(({ tool }) => tool === "record_topic");
 
+// The argument that says what a call was about, in the order tools use them.
+const KEY_ARGUMENTS = [
+  "path",
+  "command",
+  "root",
+  "query",
+  "project_path",
+  "title",
+  "url",
+  "name",
+];
+
+/** One call's console line: `rene · <tool> <its main argument>`. */
+const reneCallLine = ({ tool, args }) => {
+  const key = KEY_ARGUMENTS.find((name) => typeof args?.[name] === "string");
+  const detail =
+    args === null
+      ? "(arguments from stdin)"
+      : key === undefined
+        ? ""
+        : String(args[key]).replace(/\s+/gu, " ");
+  const shown = detail.length > 100 ? `${detail.slice(0, 99)}…` : detail;
+  return `rene · ${tool}${shown ? ` ${shown}` : ""}`;
+};
+
+/**
+ * With the cli toolkit Claude Code shows a rene call only as a shell command,
+ * and folds a run of them into one line. The gate names each rene tool the
+ * line ran in the console (a hook's systemMessage), as an MCP client would.
+ */
+const reneCallNote = (toolName, toolInput) => {
+  const calls = reaCalls(toolName, toolInput);
+  return calls.length === 0
+    ? undefined
+    : { systemMessage: calls.map(reneCallLine).join("\n") };
+};
+
 /** Whether a tool use's result shows a successful declaration. */
+
 const declared = (toolName, response) => {
   if (isTopicTool(toolName)) return !failed(response);
+  // The receipt `rene call` writes to stderr survives a filter on stdout.
   const output =
-    typeof response === "string" ? response : String(response?.stdout ?? "");
+    typeof response === "string"
+      ? response
+      : `${response?.stdout ?? ""}\n${response?.stderr ?? ""}`;
   return declaredTopicIds(output).length > 0;
 };
 
@@ -181,77 +230,16 @@ function stateStore(directory, session) {
 
 /**
  * The user makes every commit, never the agent. Git subcommands that write
- * history or publish it are refused in any shell command an agent sends
- * (Claude Code's Bash or rene's run_command); reading history, staging and
- * unstaging stay allowed. Checked before the topic gate and independent of
- * its state, so it holds even when that state can't be read.
+ * history or publish it (src/toolbox/GitHistory.ts finds them) are refused in
+ * any shell command an agent sends through these tools: Claude Code's Bash or
+ * rene's run_command. Checked before the topic gate and independent of its
+ * state, so it holds even when that state can't be read.
  */
-const HISTORY_WRITES = new Set([
-  "commit",
-  "commit-tree",
-  "merge",
-  "rebase",
-  "cherry-pick",
-  "revert",
-  "am",
-  "update-ref",
-  "push",
-  "pull",
-  "subtree",
-  "filter-branch",
-  "filter-repo",
-  "replace",
-  "notes",
-]);
-// Global options whose value is the next word, e.g. git -C <path> commit.
-const OPTIONS_WITH_VALUE = new Set([
-  "-C",
-  "-c",
-  "--git-dir",
-  "--work-tree",
-  "--namespace",
-  "--exec-path",
-]);
 const SHELL_TOOLS = new Set(["Bash", "mcp__rea__run_command"]);
-
-/** The history-writing git subcommand a shell command line runs, if any. */
-export function gitHistoryWrite(command) {
-  for (const segment of String(command).split(/&&|\|\||[;|\n&()`]|\$\(/u)) {
-    const words = segment.trim().split(/\s+/u);
-    let index = words.findIndex((word) => /(?:^|\/)git$/u.test(word));
-    if (index < 0) continue;
-    index += 1;
-    while (index < words.length && words[index].startsWith("-")) {
-      const option = words[index];
-      index += OPTIONS_WITH_VALUE.has(option) && !option.includes("=") ? 2 : 1;
-    }
-    const subcommand = words[index];
-    const rest = words.slice(index + 1);
-    if (subcommand === undefined) continue;
-    if (HISTORY_WRITES.has(subcommand)) return subcommand;
-    // Moving a branch to another commit rewrites history; unstaging doesn't.
-    if (
-      subcommand === "reset" &&
-      rest.some((word) => /^--(?:soft|hard|keep|merge)$/u.test(word))
-    )
-      return "reset";
-    // Listing tags and stashes reads; creating or dropping them writes.
-    if (
-      subcommand === "tag" &&
-      rest.some(
-        (word) => !/^(?:-l|--list|-n\d*|--sort=.*|--contains)$/u.test(word),
-      )
-    )
-      return "tag";
-    if (subcommand === "stash" && !["list", "show"].includes(rest[0]))
-      return "stash";
-  }
-  return undefined;
-}
 
 /**
  * The shell command lines a tool use runs: its own, and with the cli toolkit
- * the command of each `rea call run_command` on it. A run_command whose
+ * the command of each `rene call run_command` on it. A run_command whose
  * arguments aren't on the line (read from stdin) can't be checked, so it is
  * reported as undefined and refused.
  */
@@ -266,22 +254,55 @@ const shellCommands = (toolName, toolInput) => {
   return [own, ...nested];
 };
 
-const GIT_RULE =
-  "the user makes every commit and every change to git history, never the agent. Leave the changes in the working tree, say what is ready, and ask the user to commit.";
-
 /** The refusal for an agent's history-writing git command, if it sent one. */
 const gitHistoryRefusal = (toolName, toolInput) => {
   for (const command of shellCommands(toolName, toolInput)) {
     if (command === undefined)
-      return "run_command's arguments must be on the rea call line, not read from stdin, so the workbench can check the command it runs.";
+      return "run_command's arguments must be on the rene call line, not read from stdin, so the workbench can check the command it runs.";
     const subcommand = gitHistoryWrite(command);
     if (subcommand !== undefined)
-      return `git ${subcommand} is refused: ${GIT_RULE}`;
+      return `git ${subcommand} is refused: ${GIT_HISTORY_RULE}`;
+  }
+  return undefined;
+};
+
+/**
+ * The command lines run_command would run for a tool use: an MCP
+ * run_command's own, or each `rene call run_command` on a shell line. (The
+ * shell line itself runs rene alone, which the tool rule holds it to.)
+ */
+const runCommandLines = (toolName, toolInput) => {
+  if (toolName === "mcp__rea__run_command")
+    return [String(toolInput?.command ?? "")];
+  return reaCalls(toolName, toolInput)
+    .filter(({ tool, args }) => tool === "run_command" && args !== null)
+    .map(({ args }) => String(args.command ?? ""));
+};
+
+/**
+ * Claude Code's own approval prompt for a run_command that installs,
+ * downloads or launches software, acts on a cloud service, or runs a
+ * privileged, destructive or credential-reading command
+ * (src/toolbox/CommandConsent.ts): the user decides that command. Other
+ * commands run without asking.
+ */
+const consentAnswer = (event, toolName, toolInput) => {
+  for (const command of runCommandLines(toolName, toolInput)) {
+    const reason = consentNeeded(command);
+    if (reason !== undefined)
+      return {
+        hookSpecificOutput: {
+          hookEventName: event,
+          permissionDecision: "ask",
+          permissionDecisionReason: `rene asks before this command: ${reason}.\n  ${command}\n${CONSENT_RULE}`,
+        },
+      };
   }
   return undefined;
 };
 
 /** A tool result that reports failure. */
+
 const failed = (response) =>
   response?.isError === true || response?.is_error === true;
 
@@ -322,7 +343,8 @@ export async function gate(input, directory, toolkit = "mcp") {
       if (!state.pending) await store.write({ ...state, pending: true });
       return;
     }
-    if (state.pending || state.declared) return;
+    if (state.pending || state.declared)
+      return consentAnswer(event, input.tool_name, input.tool_input);
     return {
       hookSpecificOutput: {
         hookEventName: event,
@@ -332,11 +354,14 @@ export async function gate(input, directory, toolkit = "mcp") {
     };
   }
   if (event === "PostToolUse") {
-    if (!declaresTopic(input.tool_name, input.tool_input)) return;
-    if (!declared(input.tool_name, input.tool_response)) return;
-    const state = await store.read();
-    await store.write({ ...state, declared: true });
-    return;
+    if (
+      declaresTopic(input.tool_name, input.tool_input) &&
+      declared(input.tool_name, input.tool_response)
+    ) {
+      const state = await store.read();
+      await store.write({ ...state, declared: true });
+    }
+    return reneCallNote(input.tool_name, input.tool_input);
   }
   if (event === "Stop") {
     // Sent back once; a turn that still ends undeclared shows as such.

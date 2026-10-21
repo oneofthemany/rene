@@ -13,6 +13,7 @@ const STUBBED_ENTRIES = [
   "dist/cli/cliResultOutput.js",
   "dist/mcpDoctor.js",
   "dist/toolCli.js",
+  "dist/agentCli.js",
 ];
 
 describe("CLI and MCP runtime bundles", () => {
@@ -62,6 +63,7 @@ export const lazyUrl = import.meta.url;`,
           'export { facts } from "../provider/probe λ.js";',
         "dist/mcpDoctor.js": 'export { run } from "./main.js";',
         "dist/toolCli.js": 'export { run } from "./main.js";',
+        "dist/agentCli.js": 'export { run } from "./main.js";',
         "dist/main.js": `
 import { facts } from './provider/probe λ.js';
 import { generatedPackageMetadata } from './generatedPackageMetadata.js';

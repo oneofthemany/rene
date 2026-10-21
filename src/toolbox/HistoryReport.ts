@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
  * Reports of tool calls to the rene workbench bridge, which records them in
  * the project's history. Both ways an agent reaches rene report through
  * here: the MCP relay (frontend/relay.mjs), which reads calls off the stdio
- * traffic, and `rea call`, which makes them itself.
+ * traffic, and `rene call`, which makes them itself.
  *
  * The bridge writes a private report file per agent session holding its URL
  * and the session's token, and names it to the relay with --report and to

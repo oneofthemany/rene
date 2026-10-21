@@ -4,7 +4,7 @@
 // Codex, ...) in a pseudo-terminal and relays it to the page: output as an
 // NDJSON stream, keystrokes and resizes as small POSTs. Each agent reaches
 // this fork's REA through the session's toolkit (agentToolkit.mjs): by
-// default `rea call` in its shell, with a `rea` command and a session daemon
+// default `rene call` in its shell, with a `rea` command and a session daemon
 // set up for it; or, with REA_AGENT_TOOLKIT=mcp, as its `rea` MCP server.
 // Claude Code and Copilot CLI get either for the session, with the tools
 // pre-approved, their calls recorded in the project's history and a short
@@ -37,10 +37,10 @@ const REACH_RENE = {
     "rather than ad-hoc shell tools. Call binary_session first when unsure what is available.",
   ],
   cli: [
-    "rene (this machine's fork of REA) is your toolkit, used from your shell: `rea call <tool> '<json>'`",
-    "runs one tool and prints its result (`rea call <tool> -` reads the JSON from stdin, such as a",
-    "here-document), `rea tools search <words>` finds tools and `rea tools describe <tool>` shows a tool's",
-    "input schema. Your shell runs only rea commands, whose output you may pipe into head, tail, wc or jq.",
+    "rene (this machine's fork of REA) is your toolkit, used from your shell: `rene call <tool> '<json>'`",
+    "runs one tool and prints its result (`rene call <tool> -` reads the JSON from stdin, such as a",
+    "here-document), `rene tools search <words>` finds tools and `rene tools describe <tool>` shows a tool's",
+    "input schema. Your shell runs only rene commands, whose output you may pipe into head, tail, wc or jq.",
     "Every call in this session shares one rene session, so a target one call opens stays open for the next.",
     "For reverse-engineering, analysis and investigation questions, use rene's tools and the",
     "reverse-engineer-anything skill if you have it. Call binary_session first when unsure what is available.",
@@ -87,7 +87,7 @@ export const agentInstructions = (assessment, toolkit = "mcp") =>
         ]
       : []),
     toolkit === "cli"
-      ? "When a request begins, declare it with `rea call record_topic`: a new feature, question, bug,"
+      ? "When a request begins, declare it with `rene call record_topic`: a new feature, question, bug,"
       : "When a request begins, declare it with the rene record_topic tool: a new feature, question, bug,",
     "investigation and so on goes under the thread it belongs to (declare a thread first when none fits),",
     "and you update the topic with status done or abandoned, and a summary of what was found or decided,",
@@ -162,7 +162,7 @@ const topicGateSettings = (stateDirectory, toolkit) => {
     hooks: {
       UserPromptSubmit: [{ hooks }],
       PreToolUse: [{ matcher: "*", hooks }],
-      // With the cli toolkit a declaration is a `rea call record_topic`.
+      // With the cli toolkit a declaration is a `rene call record_topic`.
       PostToolUse: [
         {
           matcher: toolkit === "cli" ? "Bash" : "mcp__rea__record_topic",
@@ -179,7 +179,7 @@ const shellQuote = (text) => `'${text.replaceAll("'", "'\\''")}'`;
  * Claude Code permission rules for the cli toolkit: rea, and the filters the
  * topic gate lets read rea's output; the gate refuses any other shell line.
  */
-const CLI_ALLOWED_TOOLS = ["rea", "head", "tail", "wc", "jq"].map(
+const CLI_ALLOWED_TOOLS = ["rene", "rea", "head", "tail", "wc", "jq"].map(
   (program) => `Bash(${program}:*)`,
 );
 
@@ -258,7 +258,7 @@ const SESSION_AGENTS = [
         args:
           toolkit === "mcp"
             ? ["--additional-mcp-config", `@${config}`, "--allow-tool", "rea"]
-            : ["--allow-tool", "shell(rea)"],
+            : ["--allow-tool", "shell(rene)", "--allow-tool", "shell(rea)"],
         env: { COPILOT_CUSTOM_INSTRUCTIONS_DIRS: dirs },
       };
     },
@@ -368,7 +368,7 @@ async function requireRene(agent, registration, toolkit) {
 async function launch(agent, { link, directory, environment }, cwd, size) {
   const { server, instructions, conversationId, report, toolkit, rea } = link;
   await mkdir(directory, { recursive: true, mode: 0o700 });
-  // The report file names the bridge and the session's token for `rea call`;
+  // The report file names the bridge and the session's token for `rene call`;
   // the variable carries the private file's path, not the token.
   let base = {
     ...sessionEnvironment(environment()),

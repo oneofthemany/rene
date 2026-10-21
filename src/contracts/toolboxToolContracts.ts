@@ -1,6 +1,8 @@
 import {
   editFileInputSchema,
   editFileResultSchema,
+  editFilesInputSchema,
+  editFilesResultSchema,
   listAgentConversationsInputSchema,
   listAgentConversationsResultSchema,
   readAgentConversationInputSchema,
@@ -74,7 +76,36 @@ export const TOOLBOX_TOOL_CONTRACTS = [
     ],
   },
   {
+    name: "edit_files",
+    ...toolContractMetadata("edit_files"),
+    kind: "toolbox",
+    description: `Apply exact-text replacements across one or more text files in one call, as edit_file does for one. Each edit is checked against the text the edits before it left before any file is written: an edit whose old_text is missing, or occurs more than once without replace_all, refuses the whole call and nothing changes. Each changed file is then written atomically, keeping its permissions; the replacement counts and the SHA-256 before and after are returned per file. ${ROOTS}`,
+    inputSchema: editFilesInputSchema,
+    outputSchema: evidenceResultOf(editFilesResultSchema),
+    examples: [
+      {
+        title: "Rename a setting in two files",
+        input: {
+          edits: [
+            {
+              path: "/home/analyst/project/config.toml",
+              old_text: "debug = false",
+              new_text: "verbose = false",
+            },
+            {
+              path: "/home/analyst/project/README.md",
+              old_text: "`debug`",
+              new_text: "`verbose`",
+              replace_all: true,
+            },
+          ],
+        },
+      },
+    ],
+  },
+  {
     name: "find_files",
+
     ...toolContractMetadata("find_files"),
     kind: "toolbox",
     description: `List files under a folder whose relative path matches a glob (e.g. **/*.ts), in name order, with size and modification time. Symbolic links are listed, not followed; folders named in exclude_names (default .git, node_modules) are skipped and reported. ${ROOTS}`,

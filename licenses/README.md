@@ -36,8 +36,9 @@ Temporary archives were removed after collection.
 For releases that omit original documents, the collection uses pinned upstream
 texts, embedded source/README license sections, or the same release's parent
 notice for the `@lydell/node-pty` prebuilt family. `evmole@0.9.3` uses the existing
-preserved upstream license. `clean-git-ref@2.0.1` and `minimisted@2.0.1` provide
-only license and author metadata: their missing original copyright documents
+preserved upstream license. `clean-git-ref@2.0.1`, `minimisted@2.0.1` and
+`standardwebhooks@1.1.1` (a dependency of `@anthropic-ai/sdk`) provide only
+license and author metadata: their missing original copyright documents
 remain explicitly identified in the runtime texts. Do not describe those
 entries as complete recovered attribution.
 

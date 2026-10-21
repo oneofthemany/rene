@@ -5,9 +5,9 @@ import { expect, it } from "vitest";
 import { claudeTranscriptFolder } from "../../src/toolbox/AgentConversations.js";
 import { createTestTempDirectory } from "../fixtures/temporaryDirectory.js";
 
-// An agent that reaches rene through `rea call` in its shell, not MCP: the
+// An agent that reaches rene through `rene call` in its shell, not MCP: the
 // workbench's capture (frontend/conversations.mjs) reads the shell tool use
-// as the rene tool it ran and ties it to the call `rea call` recorded.
+// as the rene tool it ran and ties it to the call `rene call` recorded.
 
 interface StoredEvent {
   readonly kind: string;
@@ -23,6 +23,9 @@ interface Meta {
 interface Store {
   sessions(): Promise<Meta[]>;
   events(session: string): Promise<StoredEvent[]>;
+  meta(session: string): Promise<Record<string, unknown> | undefined>;
+  writeMeta(meta: Record<string, unknown>): Promise<void>;
+  append(session: string, events: readonly unknown[]): Promise<void>;
 }
 const conversations = (await import(
   new URL("../../frontend/conversations.mjs", import.meta.url).href
@@ -51,7 +54,7 @@ const bash = (id: string, command: string) => ({
   input: { command, description: "Run a rene tool" },
 });
 
-it("reads rea call shell commands as rene tool uses and links them to recorded calls", async () => {
+it("reads rene call shell commands as rene tool uses and links them to recorded calls", async () => {
   const root = await createTestTempDirectory("rea-workbench-cli-calls-");
   const project = join(root, "project");
   await mkdir(project);
@@ -74,10 +77,14 @@ it("reads rea call shell commands as rene tool uses and links them to recorded c
         timestamp: at,
         message: {
           content: [
-            bash("a", `rea call read_file '{"path":"/x"}' | head -c 400`),
+            // Two calls on one line: each is its own rene tool use.
+            bash(
+              "a",
+              `rene call read_file '{"path":"/x"}' | head -c 400; rene call search_text '{"query":"q"}'`,
+            ),
             bash(
               "b",
-              `rea call record_topic - <<'EOF'\n{"kind":"thread"}\nEOF`,
+              `rene call record_topic - <<'EOF'\n{"kind":"thread"}\nEOF`,
             ),
             bash("c", "ls -la"),
           ],
@@ -98,7 +105,7 @@ it("reads rea call shell commands as rene tool uses and links them to recorded c
         data: {
           toolCallId: "d",
           toolName: "bash",
-          arguments: { command: `rea call search_text '{"query":"q"}'` },
+          arguments: { command: `rene call search_text '{"query":"q"}'` },
         },
       },
     ]),
@@ -113,11 +120,13 @@ it("reads rea call shell commands as rene tool uses and links them to recorded c
     (await store.events(session))
       .filter(({ kind }) => kind === "tool_use")
       .map(({ tool, rea, args }) => [tool, rea, args]);
-  expect(await uses("s1")).toEqual([
+  const s1Uses = [
     ["read_file", true, { path: "/x" }],
+    ["search_text", true, { query: "q" }],
     ["record_topic", true, null],
     ["Bash", false, undefined],
-  ]);
+  ];
+  expect(await uses("s1")).toEqual(s1Uses);
   expect(await uses("c1")).toEqual([["search_text", true, { query: "q" }]]);
 
   // Known arguments must match; unknown ones (stdin) match by tool and time.
@@ -137,6 +146,7 @@ it("reads rea call shell commands as rene tool uses and links them to recorded c
     [
       call("other-path", "read_file", { path: "/y" }, 200),
       call("read", "read_file", { path: "/x" }, 1_500),
+      call("search", "search_text", { query: "q" }, 1_600),
       call("topic", "record_topic", { kind: "thread", title: "T" }, 1_800),
     ],
   );
@@ -144,5 +154,53 @@ it("reads rea call shell commands as rene tool uses and links them to recorded c
     turn!.events
       .filter(({ kind }) => kind === "tool_use")
       .map(({ historyId }) => historyId),
-  ).toEqual(["read", "topic", undefined]);
+  ).toEqual(["read", "search", "topic", undefined]);
+});
+
+it("reads a stored session again when transcripts are parsed differently", async () => {
+  const root = await createTestTempDirectory("rea-workbench-reparse-");
+  const project = join(root, "project");
+  await mkdir(project);
+  const environment = { CLAUDE_CONFIG_DIR: join(root, "claude") };
+  const since = Date.now() - 60_000;
+  const at = new Date(since + 1_000).toISOString();
+  const claude = claudeTranscriptFolder(environment, project);
+  await mkdir(claude, { recursive: true });
+  await writeFile(
+    join(claude, "s1.jsonl"),
+    jsonLines([
+      { type: "user", timestamp: at, message: { content: "two calls" } },
+      {
+        type: "assistant",
+        timestamp: at,
+        message: {
+          content: [
+            bash(
+              "a",
+              `rene call read_file '{"path":"/x"}'; rene call read_file '{"path":"/y"}'`,
+            ),
+          ],
+        },
+      },
+    ]),
+  );
+  const store = conversations.createConversationStore(join(root, "store"));
+  const follow = () =>
+    conversations
+      .followConversations({ store, environment, folder: project, since })
+      .stop();
+  await follow();
+  const fresh = await store.events("s1");
+  // A session stored by an older parser: no version, and an event the
+  // current parser wouldn't produce.
+  const { eventsVersion: _version, ...older } = (await store.meta("s1"))!;
+  await store.writeMeta(older);
+  await store.append("s1", [
+    { kind: "tool_use", tool: "stale", rea: true, args: {} },
+  ]);
+  await follow();
+  expect(await store.events("s1")).toEqual(fresh);
+  expect(
+    fresh.filter(({ kind }) => kind === "tool_use").map(({ args }) => args),
+  ).toEqual([{ path: "/x" }, { path: "/y" }]);
 });

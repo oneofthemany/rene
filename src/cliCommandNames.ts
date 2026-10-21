@@ -264,6 +264,7 @@ export const MCP_TOOLS_WITHOUT_DEDICATED_CLI = Object.freeze([
   "read_file",
   "write_file",
   "edit_file",
+  "edit_files",
   "find_files",
   "search_text",
   "run_command",

@@ -8,8 +8,8 @@ import { describe, expect, it } from "vitest";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 
 // A workbench agent session with the cli toolkit: the agent reaches rene
-// with `rea call` in its shell. The topic gate holds its shell to rea and
-// takes a `rea call record_topic` as the turn's declaration, and the session
+// with `rene call` in its shell. The topic gate holds its shell to rea and
+// takes a `rene call record_topic` as the turn's declaration, and the session
 // gets a `rea` command and a daemon it shares (frontend/agentToolkit.mjs).
 
 const frontend = new URL("../../../frontend/", import.meta.url);
@@ -48,14 +48,14 @@ const { agentInstructions } = (await import(
   new URL("terminal.mjs", frontend).href
 )) as { agentInstructions(assessment?: string, toolkit?: string): string };
 
-const recordTopic = `rea call record_topic '{"kind":"thread","title":"T"}'`;
+const recordTopic = `rene call record_topic '{"kind":"thread","title":"T"}'`;
 const topicEvidence = JSON.stringify({
   operation: "record_topic",
   normalized_result: { topic_id: "00000000-0000-4000-8000-000000000001" },
 });
 
 describe("cli toolkit", () => {
-  it("holds a turn's shell to rea and takes rea call record_topic as its declaration", async () => {
+  it("holds a turn's shell to rea and takes rene call record_topic as its declaration", async () => {
     const directory = await createTestTempDirectory("rea-cli-gate-");
     const event = (name: string, extra: Record<string, unknown> = {}) =>
       gate(
@@ -74,15 +74,15 @@ describe("cli toolkit", () => {
 
     const prompt = await event("UserPromptSubmit");
     expect(prompt?.hookSpecificOutput?.additionalContext).toContain(
-      "rea call record_topic",
+      "rene call record_topic",
     );
     // Not rea at all: refused, naming the recorded way to run it.
     const ls = await bash("ls -la");
     expect(decision(ls)).toBe("deny");
     expect(ls?.hookSpecificOutput?.permissionDecisionReason).toContain(
-      "rea call run_command",
+      "rene call run_command",
     );
-    expect(decision(await bash(`rea call read_file '{"path":"/x"}'`))).toBe(
+    expect(decision(await bash(`rene call read_file '{"path":"/x"}'`))).toBe(
       "deny", // rea, but no topic yet.
     );
     expect(decision(await bash(recordTopic))).toBeUndefined();
@@ -100,24 +100,25 @@ describe("cli toolkit", () => {
     });
     expect(await event("Stop")).toBeUndefined();
     expect(
-      decision(await bash(`rea call read_file '{"path":"/x"}' | head -c 100`)),
+      decision(await bash(`rene call read_file '{"path":"/x"}' | head -c 100`)),
     ).toBeUndefined();
-    // Built-ins rene replaces are refused with the rea call that does it.
+    // Built-ins rene replaces are refused with the rene call that does it.
+
     const read = await event("PreToolUse", {
       tool_name: "Read",
       tool_input: { file_path: "/a/b.ts" },
     });
     expect(read?.hookSpecificOutput?.permissionDecisionReason).toContain(
-      "`rea call read_file '<json>'`",
+      "`rene call read_file '<json>'`",
     );
     // The git rule reaches into run_command's own command line.
     const commit = await bash(
-      `rea call run_command '{"command":"git commit -m x","cwd":"/r"}'`,
+      `rene call run_command '{"command":"git commit -m x","cwd":"/r"}'`,
     );
     expect(commit?.hookSpecificOutput?.permissionDecisionReason).toContain(
       "git commit is refused",
     );
-    const hidden = await bash(`rea call run_command - <<'EOF'\n{}\nEOF`);
+    const hidden = await bash(`rene call run_command - <<'EOF'\n{}\nEOF`);
     expect(decision(hidden)).toBe("deny");
   });
 
@@ -142,14 +143,23 @@ describe("cli toolkit", () => {
         hookSpecificOutput: { additionalContext: string };
       }
     ).hookSpecificOutput.additionalContext;
-    expect(context).toContain("`rea call <tool> '<json>'`");
+    expect(context).toContain("`rene call <tool> '<json>'`");
     expect(context).not.toContain("mcp__rea__record_topic");
   });
 
-  it("tells the agent to use rea call, not MCP tools", () => {
+  it("is the default: MCP only when asked for", async () => {
+    const { agentToolkit } = (await import(
+      new URL("agentToolkit.mjs", frontend).href
+    )) as { agentToolkit(env: Record<string, string>): string };
+    expect(agentToolkit({})).toBe("cli");
+    expect(agentToolkit({ REA_AGENT_TOOLKIT: "cli" })).toBe("cli");
+    expect(agentToolkit({ REA_AGENT_TOOLKIT: "mcp" })).toBe("mcp");
+  });
+
+  it("tells the agent to use rene call, not MCP tools", () => {
     const cli = agentInstructions(undefined, "cli");
-    expect(cli).toContain("`rea call <tool> '<json>'`");
-    expect(cli).toContain("declare it with `rea call record_topic`");
+    expect(cli).toContain("`rene call <tool> '<json>'`");
+    expect(cli).toContain("declare it with `rene call record_topic`");
     expect(cli).not.toContain("MCP tools");
     expect(agentInstructions(undefined, "mcp")).toContain("`rea` MCP tools");
   });
@@ -200,5 +210,52 @@ describe("cli toolkit", () => {
         env: { PATH: process.env.PATH ?? "" },
       }),
     ).rejects.toThrow(/exited \(status 3\).*no rea here/su);
+  });
+});
+
+it("counts a declaration whose output was filtered, from its stderr receipt", async () => {
+  const directory = await createTestTempDirectory("rea-cli-receipt-");
+  const event = (name: string, extra: Record<string, unknown> = {}) =>
+    gate(
+      { hook_event_name: name, session_id: "s1", ...extra },
+      directory,
+      "cli",
+    );
+  const filtered = `${recordTopic} | jq -r .normalized_result.topic_id`;
+  await event("UserPromptSubmit");
+  await event("PreToolUse", {
+    tool_name: "Bash",
+    tool_input: { command: filtered },
+  });
+  await event("PostToolUse", {
+    tool_name: "Bash",
+    tool_input: { command: filtered },
+    tool_response: {
+      stdout: "00000000-0000-4000-8000-000000000001\n",
+      stderr:
+        "rene call: declared topic 00000000-0000-4000-8000-000000000001\n",
+    },
+  });
+  expect(await event("Stop")).toBeUndefined();
+});
+
+it("names each rene tool a shell line ran in the console", async () => {
+  const directory = await createTestTempDirectory("rea-cli-console-");
+  const note = await gate(
+    {
+      hook_event_name: "PostToolUse",
+      session_id: "s1",
+      tool_name: "Bash",
+      tool_input: {
+        command: `rene call read_file '{"path":"/x"}' | head -c 100 && rene call run_command - <<'EOF'\n{}\nEOF`,
+      },
+      tool_response: { stdout: "", stderr: "" },
+    },
+    directory,
+    "cli",
+  );
+  expect(note).toEqual({
+    systemMessage:
+      "rene · read_file /x\nrene · run_command (arguments from stdin)",
   });
 });

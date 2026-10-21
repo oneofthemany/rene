@@ -673,6 +673,11 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
     mayDiscardData: true,
     idempotent: false,
   }),
+  edit_files: effects({
+    writesFilesystem: true,
+    mayDiscardData: true,
+    idempotent: false,
+  }),
   run_command: effects({
     mutatesTarget: true,
     writesFilesystem: true,

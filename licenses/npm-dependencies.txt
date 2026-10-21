@@ -2,7 +2,7 @@ REA npm dependency inventory
 Prepared from the root package-lock.json; refresh this inventory when locked dependencies change.
 License identifiers are upstream lockfile declarations, not a legal assessment.
 Runtime includes transitive and optional platform packages; development includes build, test and website tooling.
-Locked package entries: 750; runtime: 178.
+Locked package entries: 758; runtime: 186.
 Full runtime copyright/license/NOTICE texts: npm-runtime-notices.txt.
 
 @algolia/abtesting@1.25.0 | development | MIT
@@ -95,6 +95,11 @@ Full runtime copyright/license/NOTICE texts: npm-runtime-notices.txt.
   Package: https://www.npmjs.com/package/@algolia/requester-node-http/v/5.59.0
   Archive: https://registry.npmjs.org/@algolia/requester-node-http/-/requester-node-http-5.59.0.tgz
   Integrity: sha512-YYHLEs5rC6oRTFwT7bJaKBR9NSFzikeVHGAT1ffATmUQzR8XqyhHXjoieAUoR7fBU6I5cfy1FVeh5GoRgriuzA==
+@anthropic-ai/sdk@0.137.0 | runtime | MIT
+  Lockfile path: node_modules/@anthropic-ai/sdk
+  Package: https://www.npmjs.com/package/@anthropic-ai/sdk/v/0.137.0
+  Archive: https://registry.npmjs.org/@anthropic-ai/sdk/-/sdk-0.137.0.tgz
+  Integrity: sha512-YpEnbPz8kWF1BWthwUCnRhci7OvDLSUO8NFKoevoPkjNkK9CJeibZITgxr9vhqOP8Le61e5tNDHFTxw1dc6Png==
 @babel/code-frame@8.0.6 | development | MIT
   Lockfile path: node_modules/@babel/code-frame
   Package: https://www.npmjs.com/package/@babel/code-frame/v/8.0.6
@@ -300,6 +305,11 @@ obug@3.0.0 | development | MIT
   Package: https://www.npmjs.com/package/@babel/preset-typescript/v/8.0.7
   Archive: https://registry.npmjs.org/@babel/preset-typescript/-/preset-typescript-8.0.7.tgz
   Integrity: sha512-sUFLFphAG6YNjCnJpSKpyoNxkfyeM2KNuUjJJN0R6dZusMcK2V3Fg11MVHPFvb37AZeDNocc+xM748vdh9z82Q==
+@babel/runtime@7.29.10 | runtime | MIT
+  Lockfile path: node_modules/@babel/runtime
+  Package: https://www.npmjs.com/package/@babel/runtime/v/7.29.10
+  Archive: https://registry.npmjs.org/@babel/runtime/-/runtime-7.29.10.tgz
+  Integrity: sha512-NpugTzbKgGrNe45Ui32cN8vCFFMxVtP/9rtfwv0nP5FRDAjvYBxJcLVpYA9mr1jxP6cnIT7x9LUzuDTbWYYNRA==
 @babel/template@8.0.0 | development | MIT
   Lockfile path: node_modules/@babel/template
   Package: https://www.npmjs.com/package/@babel/template/v/8.0.0
@@ -695,6 +705,11 @@ commander@13.1.0 | runtime | MIT
   Package: https://www.npmjs.com/package/@napi-rs/wasm-runtime/v/1.2.5
   Archive: https://registry.npmjs.org/@napi-rs/wasm-runtime/-/wasm-runtime-1.2.5.tgz
   Integrity: sha512-HshSvXzmBxNzqejd3k/KemgQ3hdREUYFRRrgxOZ+gPljDIsO2SDZrVZMd4Z/HsxudQbE62OVyVFE8z9BCurfjA==
+@opentelemetry/api@1.10.0 | runtime | Apache-2.0
+  Lockfile path: node_modules/@opentelemetry/api
+  Package: https://www.npmjs.com/package/@opentelemetry/api/v/1.10.0
+  Archive: https://registry.npmjs.org/@opentelemetry/api/-/api-1.10.0.tgz
+  Integrity: sha512-lMkyes8iHrG+mk6WH7X70MdCLI2RS0FwNBY1PyQ8UemaijE2m5mv5A0Niy3HtbYTFrgkUEQjFMXmSAk2hQDuPQ==
 @oxc-parser/binding-android-arm-eabi@0.150.0 | development, optional | MIT
   Lockfile path: node_modules/@oxc-parser/binding-android-arm-eabi
   Package: https://www.npmjs.com/package/@oxc-parser/binding-android-arm-eabi/v/0.150.0
@@ -1345,6 +1360,11 @@ commander@13.1.0 | runtime | MIT
   Package: https://www.npmjs.com/package/@sindresorhus/merge-streams/v/4.0.0
   Archive: https://registry.npmjs.org/@sindresorhus/merge-streams/-/merge-streams-4.0.0.tgz
   Integrity: sha512-tlqY9xq5ukxTUZBmoOp+m61cqwQD5pHJtFY3Mn8CA8ps6yghLH/Hw8UPdqg4OLmFW3IFlcXnQNmo/dh8HzXYIQ==
+@stablelib/base64@1.0.1 | runtime | MIT
+  Lockfile path: node_modules/@stablelib/base64
+  Package: https://www.npmjs.com/package/@stablelib/base64/v/1.0.1
+  Archive: https://registry.npmjs.org/@stablelib/base64/-/base64-1.0.1.tgz
+  Integrity: sha512-1bnPQqSxSuc3Ii6MhBysoWCg58j97aUjuCSZrGSmDxNqtytIi0k8utUenAwTZN4V5mXXYGsVUI9zeBqy+jBOSQ==
 @stryker-mutator/api@10.0.0 | development | Apache-2.0
   Lockfile path: node_modules/@stryker-mutator/api
   Package: https://www.npmjs.com/package/@stryker-mutator/api/v/10.0.0
@@ -2210,6 +2230,11 @@ fast-deep-equal@3.1.3 | runtime | MIT
   Package: https://www.npmjs.com/package/fast-deep-equal/v/3.1.3
   Archive: https://registry.npmjs.org/fast-deep-equal/-/fast-deep-equal-3.1.3.tgz
   Integrity: sha512-f3qQ9oQy9j2AhBe/H9VC91wLmKBCCU/gDOnKNAYG5hswO7BLKj09Hc5HYNz9cGI++xlpDCIgDaitVs03ATR84Q==
+fast-sha256@1.3.0 | runtime | Unlicense
+  Lockfile path: node_modules/fast-sha256
+  Package: https://www.npmjs.com/package/fast-sha256/v/1.3.0
+  Archive: https://registry.npmjs.org/fast-sha256/-/fast-sha256-1.3.0.tgz
+  Integrity: sha512-n11RGP/lrWEFI/bWdygLxhI+pVeo1ZYIVwvvPkW7azl/rOy+F3HYRZ2K5zeE9mmkhQppyv9sQFx0JM9UabnpPQ==
 fast-string-truncated-width@3.0.3 | runtime | MIT
   Lockfile path: node_modules/fast-string-truncated-width
   Package: https://www.npmjs.com/package/fast-string-truncated-width/v/3.0.3
@@ -2550,6 +2575,11 @@ json-rpc-2.0@1.8.1 | development | MIT
   Package: https://www.npmjs.com/package/json-rpc-2.0/v/1.8.1
   Archive: https://registry.npmjs.org/json-rpc-2.0/-/json-rpc-2.0-1.8.1.tgz
   Integrity: sha512-BmN42JKn6FI36pcMMzHCXQhpKNEfbeqgSIcUYHKnifq0/4Ey6PDinovwUOgajT7NsgUtpWdDXaCWlpI4LHXN3g==
+json-schema-to-ts@3.1.1 | runtime | MIT
+  Lockfile path: node_modules/json-schema-to-ts
+  Package: https://www.npmjs.com/package/json-schema-to-ts/v/3.1.1
+  Archive: https://registry.npmjs.org/json-schema-to-ts/-/json-schema-to-ts-3.1.1.tgz
+  Integrity: sha512-+DWg8jCJG2TEnpy7kOm/7/AxaYoaRbjVB4LFZLySZlWn8exGs3A4OLJR966cVvU26N7X9TWxl+Jsw7dzAqKT6g==
 json-schema-traverse@1.0.0 | runtime | MIT
   Lockfile path: node_modules/json-schema-traverse
   Package: https://www.npmjs.com/package/json-schema-traverse/v/1.0.0
@@ -3260,6 +3290,11 @@ split2@4.2.0 | runtime | ISC
   Package: https://www.npmjs.com/package/split2/v/4.2.0
   Archive: https://registry.npmjs.org/split2/-/split2-4.2.0.tgz
   Integrity: sha512-UcjcJOWknrNkF6PLX83qcHM6KHgVKNkV62Y8a5uYDVv9ydGQVwAHMKqHdJje1VTWpljG0WYpCDhrCdAOYH4TWg==
+standardwebhooks@1.1.1 | runtime | MIT
+  Lockfile path: node_modules/standardwebhooks
+  Package: https://www.npmjs.com/package/standardwebhooks/v/1.1.1
+  Archive: https://registry.npmjs.org/standardwebhooks/-/standardwebhooks-1.1.1.tgz
+  Integrity: sha512-bCbX9ZEyFkWPsRz7Bl3NuQUJohmwGSev/yhr7vhaGPlc4AfIrspIRa6cPTBuI1ItmrTDJ4d/S2hCsfe4+vQGnQ==
 std-env@4.2.0 | development | MIT
   Lockfile path: node_modules/std-env
   Package: https://www.npmjs.com/package/std-env/v/4.2.0
@@ -3385,6 +3420,11 @@ trim-lines@3.0.1 | development | MIT
   Package: https://www.npmjs.com/package/trim-lines/v/3.0.1
   Archive: https://registry.npmjs.org/trim-lines/-/trim-lines-3.0.1.tgz
   Integrity: sha512-kRj8B+YHZCc9kQYdWfJB2/oUl9rA99qbowYYBtr4ui4mZyAQ2JpvVBd/6U2YloATfqBhBTSMhTpgBHtU0Mf3Rg==
+ts-algebra@2.0.0 | runtime | MIT
+  Lockfile path: node_modules/ts-algebra
+  Package: https://www.npmjs.com/package/ts-algebra/v/2.0.0
+  Archive: https://registry.npmjs.org/ts-algebra/-/ts-algebra-2.0.0.tgz
+  Integrity: sha512-FPAhNPFMrkwz76P7cdjdmiShwMynZYN6SgOujD1urY4oNm80Ou9oMdmbR45LotcKOXoy7wSmHkRFE6Mxbrhefw==
 tslib@2.8.1 | development | 0BSD
   Lockfile path: node_modules/tslib
   Package: https://www.npmjs.com/package/tslib/v/2.8.1

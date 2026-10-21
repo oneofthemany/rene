@@ -1,9 +1,9 @@
 /**
- * What a shell command line an agent ran does with rea: which `rea call`s
+ * What a shell command line an agent ran does with rea: which `rene call`s
  * it makes, and whether it runs anything but rea.
  *
  * Two readers depend on this: the transcript parser, which ties an agent's
- * shell tool use to the call `rea call` recorded, and the workbench's topic
+ * shell tool use to the call `rene call` recorded, and the workbench's topic
  * gate, which lets an agent's shell run rea and nothing else. The line is
  * read with POSIX quoting (single quotes, double quotes with their backslash
  * escapes, backslashes outside quotes) into simple commands separated by
@@ -283,8 +283,13 @@ export const parseShellLine = (line: string): ShellLine | undefined => {
 
 const basename = (word: string) => word.slice(word.lastIndexOf("/") + 1);
 
-/** The words after the program when a simple command runs rea, else undefined. */
-export const reaArguments = (
+// rene is the toolkit's name; rea, REA's command, runs the same call, tools and
+// daemon, and older transcripts used it.
+const TOOLKIT_COMMANDS = new Set(["rene", "rea"]);
+const TOOLKIT_SCRIPTS = new Set(["rene.mjs", "rea.mjs"]);
+
+/** The words after the program when a simple command runs rene (or rea), else undefined. */
+export const toolkitArguments = (
   words: readonly string[],
 ): readonly string[] | undefined => {
   let start = 0;
@@ -293,55 +298,57 @@ export const reaArguments = (
   const [program, ...rest] = words.slice(start);
   if (program === undefined) return undefined;
   const name = basename(program);
-  if (name === "rea" || name === "rea.mjs") return rest;
+  if (TOOLKIT_COMMANDS.has(name) || TOOLKIT_SCRIPTS.has(name)) return rest;
   if (
     name === "node" &&
     rest[0] !== undefined &&
-    basename(rest[0]) === "rea.mjs"
+    TOOLKIT_SCRIPTS.has(basename(rest[0]))
   )
     return rest.slice(1);
   if (name === "npx") {
     const at = rest.findIndex((word) => !word.startsWith("-"));
-    if (at !== -1 && rest[at] === "rea") return rest.slice(at + 1);
+    if (at !== -1 && TOOLKIT_COMMANDS.has(rest[at] as string))
+      return rest.slice(at + 1);
   }
   return undefined;
 };
 
-/** The call one simple command makes, if it runs `rea call` with arguments rea accepts. */
+/** The call one simple command makes, if it runs `rene call` with arguments rea accepts. */
 export const reaCallOf = (
   words: readonly string[],
 ): ReaCallCommand | undefined => {
-  const rest = reaArguments(words);
+  const rest = toolkitArguments(words);
   if (rest?.[0] !== "call") return undefined;
   const [, tool, input, ...extra] = rest;
-  if (tool === undefined || !TOOL_NAME.test(tool) || extra.length > 0)
-    return undefined;
-  if (input === undefined) return { tool, args: {} };
-  if (input === "-") return { tool, args: null };
+  // --stdin-field <field> sets one field from stdin: the arguments are then
+  // not all on the line.
+  const stdinField = extra.length === 2 && extra[0] === "--stdin-field";
+  if (tool === undefined || !TOOL_NAME.test(tool)) return undefined;
+  if (extra.length > 0 && !stdinField) return undefined;
+  if (input === undefined) return stdinField ? undefined : { tool, args: {} };
+  if (input === "-") return stdinField ? undefined : { tool, args: null };
+  if (stdinField)
+    return reaCallOf(["rea", "call", tool, input]) && { tool, args: null };
   let value: unknown;
   try {
     value = JSON.parse(input);
   } catch {
     // Text the shell would have expanded is unknown; other text that is not
-    // JSON was refused by rea call, so no call was made.
+    // JSON was refused by rene call, so no call was made.
     return /[$`]/u.test(input) ? { tool, args: null } : undefined;
   }
-  // rea call refuses anything but an object, so no call was made.
+  // rene call refuses anything but an object, so no call was made.
   if (typeof value !== "object" || value === null || Array.isArray(value))
     return undefined;
   return { tool, args: value as Record<string, unknown> };
 };
 
-/** The first `rea call` in a shell command line, if it has one. */
-export const parseReaCallCommand = (
-  line: string,
-): ReaCallCommand | undefined => {
-  for (const command of parseShellLine(line)?.commands ?? []) {
+/** Every `rene call` a shell command line makes, in order. */
+export const parseReaCallCommands = (line: string): ReaCallCommand[] =>
+  (parseShellLine(line)?.commands ?? []).flatMap((command) => {
     const call = reaCallOf(command.words);
-    if (call !== undefined) return call;
-  }
-  return undefined;
-};
+    return call === undefined ? [] : [call];
+  });
 
 /** Programs that may read a rea command's output from a pipe. */
 const OUTPUT_FILTERS = new Set(["head", "tail", "wc", "jq"]);
@@ -359,7 +366,7 @@ const redirectionProblem = ({ operator, target }: Redirection) => {
       ? undefined
       : `${operator}${target} writes to a file`;
   if (OUTPUT_REDIRECT.has(operator) && target !== "/dev/null")
-    return `${operator} ${target} writes a file rea doesn't record`;
+    return `${operator} ${target} writes a file rene doesn't record`;
   return undefined;
 };
 
@@ -375,7 +382,7 @@ const filterProblem = ([program, ...args]: readonly string[]) => {
 
 /**
  * Whether a shell command line runs rea and nothing else: every simple
- * command is `rea call` or `rea tools`, or head, tail, wc or jq reading a
+ * command is `rene call` or `rene tools`, or head, tail, wc or jq reading a
  * rea command's output from a pipe; no output is redirected to a file but
  * /dev/null, and no command or process substitution runs. With the calls the
  * line makes, so the gate can see a record_topic among them.
@@ -394,14 +401,14 @@ export const reaOnlyShellLine = (line: string): ReaOnlyLine => {
       .map(redirectionProblem)
       .find((problem) => problem !== undefined);
     if (redirected !== undefined) return { ok: false, reason: redirected };
-    const rest = reaArguments(command.words);
+    const rest = toolkitArguments(command.words);
     if (rest !== undefined) {
       if (rest[0] === "tools") continue;
       const call = reaCallOf(command.words);
       if (call === undefined)
         return {
           ok: false,
-          reason: `\`${command.words.join(" ")}\` isn't a rea call or rea tools command`,
+          reason: `\`${command.words.join(" ")}\` isn't a rene call or rene tools command`,
         };
       calls.push(call);
       continue;
@@ -409,20 +416,37 @@ export const reaOnlyShellLine = (line: string): ReaOnlyLine => {
     const program = basename(command.words[0] ?? "");
     const piped = command.after === "|" || command.after === "|&";
     if (!piped || !OUTPUT_FILTERS.has(program))
-      return { ok: false, reason: `${program || "it"} isn't rea` };
+      return { ok: false, reason: `${program || "it"} isn't rene` };
     const filtered = filterProblem([program, ...command.words.slice(1)]);
     if (filtered !== undefined) return { ok: false, reason: filtered };
   }
   return { ok: true, calls };
 };
 
+const RECEIPT = "rene call: declared topic ";
+// What the receipt said before the toolkit was named rene.
+const EARLIER_RECEIPT = "rea call: declared topic ";
+
 /**
- * The topics a shell command's output shows were declared: each line that
- * is record_topic's Evidence, as `rea call record_topic` prints it on
- * success, names one. A failed declaration prints no such Evidence.
+ * The line `rene call record_topic` writes to stderr on success, so a filter
+ * on its stdout doesn't hide the declaration from the topic gate.
+ */
+export const declarationReceipt = (topicId: string) => `${RECEIPT}${topicId}\n`;
+
+/**
+ * The topics a shell command's output shows were declared: a declaration
+ * receipt, or a line of record_topic's Evidence as `rene call record_topic`
+ * prints it on success. A failed declaration prints neither.
  */
 export const declaredTopicIds = (output: string): string[] =>
   output.split("\n").flatMap((line) => {
+    const receipt = [RECEIPT, EARLIER_RECEIPT].find((prefix) =>
+      line.startsWith(prefix),
+    );
+    if (receipt !== undefined) {
+      const id = line.slice(receipt.length).trim();
+      return id === "" ? [] : [id];
+    }
     if (!line.startsWith("{")) return [];
     let evidence: unknown;
     try {

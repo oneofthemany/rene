@@ -29,6 +29,7 @@ import { isPathWithinRoot } from "../domain/localPath.js";
 import {
   MAX_READ_BYTES,
   type EditFileInput,
+  type EditFilesInput,
   type FindFilesInput,
   type ReadFileInput,
   type SearchTextInput,
@@ -237,41 +238,104 @@ export const writeTextFile = async (
   };
 };
 
+/** A text file read for editing: its text, the bytes it came from and its mode. */
+interface EditableFile {
+  readonly path: string;
+  readonly bytes: Buffer;
+  readonly mode: number;
+  text: string;
+  replacements: number;
+}
+
+const openEditable = async (
+  roots: readonly string[],
+  requested: string,
+  field: string,
+): Promise<EditableFile> => {
+  const path = await confine(roots, requested, field);
+  const info = await lstat(path).catch(() => undefined);
+  if (!info?.isFile())
+    throw new ToolboxRefusal(`${path} is not an existing regular file.`, field);
+  const bytes = await readFile(path);
+  if (isBinary(bytes))
+    throw new ToolboxRefusal(
+      `${path} is binary; edits change text files.`,
+      field,
+    );
+  return {
+    path,
+    bytes,
+    mode: info.mode & 0o7777,
+    text: bytes.toString("utf8"),
+    replacements: 0,
+  };
+};
+
+/**
+ * Applies one replacement to a file's text in memory: old_text must occur
+ * exactly once, or at least once with replace_all.
+ */
+const applyEdit = (
+  file: EditableFile,
+  edit: Pick<EditFileInput, "old_text" | "new_text" | "replace_all">,
+  field: string,
+) => {
+  const occurrences = file.text.split(edit.old_text).length - 1;
+  if (occurrences === 0)
+    throw new ToolboxRefusal(`old_text doesn't occur in ${file.path}.`, field);
+  if (occurrences > 1 && !edit.replace_all)
+    throw new ToolboxRefusal(
+      `old_text occurs ${occurrences} times in ${file.path}; add surrounding text to make it unique, or set replace_all.`,
+      field,
+    );
+  file.text = file.text.split(edit.old_text).join(edit.new_text);
+  file.replacements += occurrences;
+};
+
+const saveEditable = async (file: EditableFile) => {
+  await writeAtomic(file.path, file.text, file.mode);
+  return {
+    path: file.path,
+    replacements: file.replacements,
+    bytes: Buffer.byteLength(file.text),
+    sha256: sha256(file.text),
+    previous_sha256: sha256(file.bytes),
+  };
+};
+
 export const editTextFile = async (
   roots: readonly string[],
   input: EditFileInput,
 ) => {
-  const path = await confine(roots, input.path, "path");
-  const info = await lstat(path).catch(() => undefined);
-  if (!info?.isFile())
-    throw new ToolboxRefusal(
-      `${path} is not an existing regular file.`,
-      "path",
-    );
-  const bytes = await readFile(path);
-  if (isBinary(bytes))
-    throw new ToolboxRefusal(
-      `${path} is binary; edit_file changes text files.`,
-      "path",
-    );
-  const text = bytes.toString("utf8");
-  const occurrences = text.split(input.old_text).length - 1;
-  if (occurrences === 0)
-    throw new ToolboxRefusal(`old_text doesn't occur in ${path}.`, "old_text");
-  if (occurrences > 1 && !input.replace_all)
-    throw new ToolboxRefusal(
-      `old_text occurs ${occurrences} times in ${path}; add surrounding text to make it unique, or set replace_all.`,
-      "old_text",
-    );
-  const updated = text.split(input.old_text).join(input.new_text);
-  await writeAtomic(path, updated, info.mode & 0o7777);
-  return {
-    path,
-    replacements: occurrences,
-    bytes: Buffer.byteLength(updated),
-    sha256: sha256(updated),
-    previous_sha256: sha256(bytes),
-  };
+  const file = await openEditable(roots, input.path, "path");
+  applyEdit(file, input, "old_text");
+  return saveEditable(file);
+};
+
+/**
+ * Applies replacements across files. Every edit is checked against the text
+ * the edits before it left, before any file is written: one that doesn't
+ * apply refuses the whole call, naming it, and nothing changes. Each changed
+ * file is then written atomically, keeping its permissions.
+ */
+export const editTextFiles = async (
+  roots: readonly string[],
+  input: EditFilesInput,
+) => {
+  const files = new Map<string, EditableFile>();
+  for (const [index, edit] of input.edits.entries()) {
+    const field = `edits.${index}`;
+    const path = await confine(roots, edit.path, `${field}.path`);
+    let file = files.get(path);
+    if (file === undefined) {
+      file = await openEditable(roots, path, `${field}.path`);
+      files.set(path, file);
+    }
+    applyEdit(file, edit, `${field}.old_text`);
+  }
+  const written = [];
+  for (const file of files.values()) written.push(await saveEditable(file));
+  return { edits: input.edits.length, files: written };
 };
 
 interface WalkEntry {

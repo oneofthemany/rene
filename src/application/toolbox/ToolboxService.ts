@@ -14,6 +14,8 @@ import { err, type Result } from "../../domain/result.js";
 import {
   editFileInputSchema,
   editFileResultSchema,
+  editFilesInputSchema,
+  editFilesResultSchema,
   listAgentConversationsInputSchema,
   listAgentConversationsResultSchema,
   readAgentConversationInputSchema,
@@ -40,6 +42,7 @@ import {
 } from "../../toolbox/ToolboxConversations.js";
 import {
   editTextFile,
+  editTextFiles,
   findFiles,
   readTextFile,
   searchText,
@@ -59,6 +62,7 @@ export const TOOLBOX_OPERATIONS = [
   "read_file",
   "write_file",
   "edit_file",
+  "edit_files",
   "find_files",
   "search_text",
   "run_command",
@@ -118,6 +122,16 @@ const SPECS: Readonly<Record<ToolboxOperation, OperationSpec>> = {
     result: editFileResultSchema,
     location: (result) => String(result.path),
     limitations: [],
+  },
+  edit_files: {
+    input: editFilesInputSchema,
+    result: editFilesResultSchema,
+    // Every changed file is in files; the Evidence locates the first.
+    location: (result) =>
+      (result.files as { path: string }[] | undefined)?.[0]?.path,
+    limitations: [
+      "Edits are all checked before any file is written, but files are written one after another: a failure while writing (a full disk) can leave earlier files changed and later ones not.",
+    ],
   },
   find_files: {
     input: findFilesInputSchema,
@@ -254,6 +268,8 @@ export class ToolboxService {
         return writeTextFile(roots, input);
       case "edit_file":
         return editTextFile(roots, input);
+      case "edit_files":
+        return editTextFiles(roots, input);
       case "find_files":
         return findFiles(roots, input);
       case "search_text":

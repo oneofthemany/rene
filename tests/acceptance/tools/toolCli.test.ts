@@ -2,7 +2,7 @@ import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { stat, writeFile } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
@@ -204,4 +204,77 @@ it("records a call in the workbench history through the session's report file", 
   } finally {
     await new Promise((closed) => bridge.close(closed));
   }
+}, 120_000);
+
+/** Runs a toolkit script with `input` on its stdin. */
+const withInput = (
+  script: string,
+  args: readonly string[],
+  env: Readonly<Record<string, string>>,
+  input: string,
+): Promise<{ code: number; stdout: string; stderr: string }> =>
+  new Promise((settle) => {
+    const child = execFile(
+      process.execPath,
+      [script, ...args],
+      {
+        env: { PATH: process.env.PATH ?? "", REA_LOG_LEVEL: "silent", ...env },
+      },
+      (error, stdout, stderr) =>
+        settle({
+          code: error ? ((error as { code?: number }).code ?? -1) : 0,
+          stdout,
+          stderr,
+        }),
+    );
+    child.stdin?.end(input);
+  });
+
+it("rene call writes stdin's raw text into one field, and receipts a declaration on stderr", async () => {
+  const root = await createTestTempDirectory("rene-call-stdin-");
+  const env = { REA_TOOLBOX_ROOTS: root };
+  const RENE = resolve("scripts/rene.mjs");
+  // Quotes, $ and backslashes arrive as written: no JSON escaping, no expansion.
+  const body = 'first line\n"quoted" and $HOME and \\n stay as written\n';
+  const target = join(root, "out.txt");
+  const written = await withInput(
+    RENE,
+    [
+      "call",
+      "write_file",
+      JSON.stringify({ path: target }),
+      "--stdin-field",
+      "content",
+    ],
+    env,
+    body,
+  );
+  expect(written.code).toBe(0);
+  expect(await readFile(target, "utf8")).toBe(body);
+  // Without its other arguments on the line, --stdin-field is refused.
+  const refused = await withInput(
+    RENE,
+    ["call", "write_file", "-", "--stdin-field", "content"],
+    env,
+    body,
+  );
+  expect(refused.code).toBe(2);
+
+  const declared = await withInput(
+    RENE,
+    [
+      "call",
+      "record_topic",
+      JSON.stringify({ kind: "thread", title: "CLI test" }),
+    ],
+    env,
+    "",
+  );
+  expect(declared.code).toBe(0);
+  expect(declared.stderr).toMatch(
+    /^rene call: declared topic [0-9a-f-]{36}\n$/u,
+  );
+  // rea, REA's command, answers rene's commands too.
+  const viaRea = await rea(["tools", "describe", "read_file"], env);
+  expect(viaRea.code).toBe(0);
 }, 120_000);

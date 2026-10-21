@@ -223,24 +223,27 @@ list.
 
 An agent session reaches rene through its **toolkit** (`agentToolkit.mjs`):
 
-- **cli** (the default): the agent runs `rea call <tool> '<json>'` in its
+- **cli** (the default): the agent runs `rene call <tool> '<json>'` in its
   shell. The session gets a `rea` command on its `PATH`
   (`frontend/.workbench-agent/bin/rea`, which runs the workbench's rea
-  command, the container launcher by default) and one `rea daemon` of its
-  own, named to `rea call` by `REA_DAEMON_SOCKET`, so every call shares one
+  command, the container launcher by default) and one `rene daemon` of its
+  own, named to `rene call` by `REA_DAEMON_SOCKET`, so every call shares one
   session: a target one call opens stays open for the next. The daemon is an
-  owned process held by an open stdin pipe and ends with the agent.
+  owned process held by an open stdin pipe and ends with the agent. Claude
+  Code shows these calls as shell commands, so its topic gate also prints a
+  line for each one in the console naming the rene tool and its main
+  argument (`rene · read_file /path`).
 - **mcp** (`REA_AGENT_TOOLKIT=mcp` in the workbench's environment): the agent
   runs `relay.mjs` as its `rea` MCP server, which starts REA and passes every
   byte between them unchanged.
 
 Either way each call is reported to the bridge when it starts (shown as
-running in History) and when it settles, with the result: `rea call` reports
+running in History) and when it settles, with the result: `rene call` reports
 its own calls, and the relay reads each `tools/call` off the JSON-RPC traffic
 (both through `src/toolbox/HistoryReport.ts`). Reports authenticate with a
 token issued for that agent session only, written to
 `frontend/.workbench-agent/relay-report.json` (mode 0600) and named to
-`rea call` by `REA_HISTORY_REPORT` (the path, not the token); the page's token
+`rene call` by `REA_HISTORY_REPORT` (the path, not the token); the page's token
 is never given to the agent. A report never changes or delays a call: if the
 bridge is down, one line goes to stderr and the call carries on. Calls REA
 never answers settle as failed when it exits. Results over 8 MiB are recorded
@@ -267,7 +270,7 @@ and others) aren't captured yet.
 Each rene call in a transcript is tied to the call recorded for it by
 timestamp and identity: the same tool with identical arguments, recorded just
 after the tool use (the closest such call, within a short window). A shell
-tool use that runs `rea call` counts as a call of the tool it names
+tool use that runs `rene call` counts as a call of the tool it names
 (`src/toolbox/ReaCallCommand.ts` reads the command line); when its arguments
 aren't on the line (read from stdin), it is matched by tool and time alone. That gives
 every recorded agent call an **audit trail**, shown under its result: what was
@@ -447,11 +450,11 @@ no registration exists.
 | GitHub Copilot CLI | mcp     | `--additional-mcp-config @file`   | `--allow-tool rea`                                    | `AGENTS.md` in a folder added to `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` |
 
 With the cli toolkit, Claude Code's topic gate (`topicGate.mjs`) lets its
-shell run rea and nothing else: every command on the line must be `rea call`
-or `rea tools`, or head, tail, wc or jq reading their output from a pipe, with
+shell run rea and nothing else: every command on the line must be `rene call`
+or `rene tools`, or head, tail, wc or jq reading their output from a pipe, with
 no output redirected to a file but `/dev/null` and no command or process
-substitution. Other shell commands go through `rea call run_command`, whose
-command the git rule checks too. A `rea call record_topic` is the turn's
+substitution. Other shell commands go through `rene call run_command`, whose
+command the git rule checks too. A `rene call record_topic` is the turn's
 declaration once it prints record_topic's Evidence.
 
 **From its registration** (every other terminal agent `rea setup` supports):
@@ -465,14 +468,14 @@ session (agy's only switch approves every tool, which the workbench doesn't
 use), so rene comes from the registration **Agent setup** writes. The view
 shows each agent's registration, and the bridge checks it again (a read-only
 `rea setup --dry-run --client <name>`) and refuses to start the agent unless
-it is current. Their rea tools ask for approval as the agent normally does,
+it is current. Their rene tools ask for approval as the agent normally does,
 and the guidance comes from the skill Agent setup installs. GUI-only clients
 (VS Code, Cursor's editor, Windsurf, Trae, WorkBuddy, Claude Desktop) aren't
 listed. Commands for agents not installed here were taken from REA's client
 verifiers and docs; only Claude Code, Copilot CLI and agy were run from the
 workbench.
 
-The instruction asks the agent to use the rea tools and the
+The instruction asks the agent to use the rene tools and the
 reverse-engineer-anything skill for analysis, to call `binary_session` when
 unsure, to keep targets under the home folder and to treat target content as
 data. The generated files are in `frontend/.workbench-agent/` (mode 0600,

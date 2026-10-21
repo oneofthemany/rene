@@ -39,7 +39,8 @@
   },
   "bin": {
     "rea": "scripts/rea.mjs",
-    "rea-agents": "scripts/rea.mjs"
+    "rea-agents": "scripts/rea.mjs",
+    "rene": "scripts/rene.mjs"
   },
   "engines": {
     "node": "^22.19.0 || ^24.11.0 || >=26.0.0"
@@ -322,6 +323,7 @@
     "*.{json,md,yml,yaml}": "oxfmt --no-error-on-unmatched-pattern"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.137.0",
     "@babel/parser": "8.0.4",
     "@babel/types": "8.0.4",
     "@clack/prompts": "1.7.0",

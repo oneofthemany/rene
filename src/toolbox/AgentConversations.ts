@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 
-import { parseReaCallCommand } from "./ReaCallCommand.js";
+import { parseReaCallCommands } from "./ReaCallCommand.js";
 
 /**
  * Agent conversations: what was asked in a project folder, what the agent
@@ -37,7 +37,7 @@ export type ConversationEvent =
       at: string | null;
       id: string | null;
       tool: string;
-      /** Whether the tool is one of rene's, reached through MCP or `rea call`. */
+      /** Whether the tool is one of rene's, reached through MCP or `rene call`. */
       rene: boolean;
       args: unknown;
     }
@@ -61,24 +61,29 @@ const REA_COPILOT = /^rea-(.+)$/u;
 const SHELL_TOOL = /^(?:bash|shell)$/iu;
 
 /**
- * Which tool a tool use ran: a rene tool reached through MCP (named by the
- * agent's prefix for the rea server) or through `rea call` in the agent's
- * shell, else the agent's own tool. A `rea call` whose arguments aren't on
- * its command line has args null.
+ * Which tools a tool use ran: a rene tool reached through MCP (named by the
+ * agent's prefix for the rea server); every rene tool a shell tool use ran
+ * with `rene call`, one for each call on its line; else the agent's own tool.
+ * A `rene call` whose arguments aren't on its command line has args null.
  */
-const toolOf = (
+const toolsOf = (
   name: string,
   input: unknown,
   mcpName: RegExp,
-): { tool: string; rene: boolean; args: unknown } => {
+): { tool: string; rene: boolean; args: unknown }[] => {
   const viaMcp = mcpName.exec(name);
-  if (viaMcp) return { tool: viaMcp[1] as string, rene: true, args: input };
+  if (viaMcp) return [{ tool: viaMcp[1] as string, rene: true, args: input }];
   const command = record(input).command;
   if (SHELL_TOOL.test(name) && typeof command === "string") {
-    const call = parseReaCallCommand(command);
-    if (call) return { tool: call.tool, rene: true, args: call.args };
+    const calls = parseReaCallCommands(command);
+    if (calls.length > 0)
+      return calls.map((call) => ({
+        tool: call.tool,
+        rene: true,
+        args: call.args,
+      }));
   }
-  return { tool: name, rene: false, args: input };
+  return [{ tool: name, rene: false, args: input }];
 };
 
 const claudeProjects = (env: Readonly<Record<string, string | undefined>>) =>
@@ -166,12 +171,13 @@ export function claudeEvents(value: unknown): ConversationEvent[] {
         events.push({ kind: "reply", at: time, text: part.text });
       else if (part.type === "tool_use") {
         const name = typeof part.name === "string" ? part.name : "";
-        events.push({
-          kind: "tool_use",
-          at: time,
-          id: typeof part.id === "string" ? part.id : null,
-          ...toolOf(name, part.input ?? null, REA_CLAUDE),
-        });
+        for (const tool of toolsOf(name, part.input ?? null, REA_CLAUDE))
+          events.push({
+            kind: "tool_use",
+            at: time,
+            id: typeof part.id === "string" ? part.id : null,
+            ...tool,
+          });
       }
     }
   }
@@ -198,14 +204,12 @@ export function copilotEvents(value: unknown): ConversationEvent[] {
     }
     case "tool.execution_start": {
       const name = typeof data.toolName === "string" ? data.toolName : "";
-      return [
-        {
-          kind: "tool_use",
-          at: time,
-          id: typeof data.toolCallId === "string" ? data.toolCallId : null,
-          ...toolOf(name, data.arguments ?? null, REA_COPILOT),
-        },
-      ];
+      return toolsOf(name, data.arguments ?? null, REA_COPILOT).map((tool) => ({
+        kind: "tool_use" as const,
+        at: time,
+        id: typeof data.toolCallId === "string" ? data.toolCallId : null,
+        ...tool,
+      }));
     }
     case "tool.execution_complete":
       return [

@@ -11,7 +11,7 @@ import { createTestTempDirectory } from "../fixtures/temporaryDirectory.js";
 
 // The workbench's MCP relay (frontend/relay.mjs) passes an agent's MCP
 // traffic to `rea mcp` unchanged and reports each tools/call to the bridge,
-// as `rea call` does, through src/toolbox/HistoryReport.ts.
+// as `rene call` does, through src/toolbox/HistoryReport.ts.
 
 it("relays MCP calls unchanged and reports them to the bridge", async () => {
   const root = await createTestTempDirectory("rea-workbench-relay-");

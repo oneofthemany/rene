@@ -18,7 +18,10 @@ export const bundleRuntime = async (root) => {
     await readFile(join(root, "package.json"), "utf8"),
   );
   for (const [directory, entries] of [
-    ["mcp", { main: "main.js", toolCli: "toolCli.js" }],
+    [
+      "mcp",
+      { main: "main.js", toolCli: "toolCli.js", agentCli: "agentCli.js" },
+    ],
     [
       "cli-runtime",
       {

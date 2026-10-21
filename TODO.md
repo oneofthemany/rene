@@ -100,14 +100,18 @@ Finish these before the move off MCP is called done.
   particular that closing its stdin on the host ends it in the container.
 - **Registered agents with the cli toolkit.** Agents without a session flag
   (Codex, Gemini CLI, OpenCode, …) now start without an MCP registration and
-  get `rea` on `PATH`, the session daemon and history reporting, but no
-  instruction telling them to use `rea call`, and no topic gate (that is
-  Claude Code's hooks). Give each a way in: its own instructions file or flag
-  where it has one.
+  get `rea` on `PATH`, the session daemon and history reporting. The root
+  `AGENTS.md` now carries the instruction to use `rene call`, so the agents
+  that read it (Claude Code, Copilot CLI, Codex) get it in any session, one
+  the workbench started or one started by hand; before that only
+  workbench-launched Copilot sessions were told, through
+  `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`. Agents reading another file (Gemini
+  CLI's `GEMINI.md`) still need their own way in, and none of them has a
+  topic gate (that is Claude Code's hooks).
 - **A workbench setting for the toolkit.** It is chosen by
   `REA_AGENT_TOOLKIT` in the workbench's environment; put it in the settings
   page beside the model source (local or cloud) when that lands.
-- **Daemon keeps one Android provider per connection.** `rea daemon` serves
+- **Daemon keeps one Android provider per connection.** `rene daemon` serves
   each connection from the MCP transport's factory, which creates an Android
   analysis provider per server and closes them only at shutdown. Close each
   connection's provider when that connection ends.
