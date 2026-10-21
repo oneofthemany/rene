@@ -95,9 +95,10 @@ check(
 // has no resident-input ceiling; src/evm/EvmoleInterfaceProvider.ts,
 // src/firmware/FirmwareCommand.ts and src/javascript/recovery/WakaruCommand.ts
 // spell soft-only forms (`--core=0:`, `--core=0`). Those four stay as they are;
-// a new paired producer calls prlimitArgumentVector instead of spelling options.
+// a new paired producer calls prlimitArgumentVector, or prlimitCeilingArguments
+// when it appends the producer argv itself, instead of spelling options.
 check(
-  "inline paired prlimit ceilings (use prlimitArgumentVector from src/process/LinuxResourceLimits)",
+  "inline paired prlimit ceilings (use prlimitArgumentVector/prlimitCeilingArguments from src/process/LinuxResourceLimits)",
   files,
   /--core=0:0/,
   ["src/process/LinuxResourceLimits.ts", "src/pcap/PcapNativeBound.ts"],

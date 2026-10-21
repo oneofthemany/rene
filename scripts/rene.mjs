@@ -7,8 +7,10 @@
 //   rene tools [search|describe] …       find tools and their inputs
 //   rene daemon [--socket <path>] …      keep one session for many calls
 //   rene agent [options] [<request>…]    a local troubleshooting agent
+//   rene copilot [<copilot args>…]       Copilot CLI, held to rene's tools
 //
-// All run from the same compiled runtime (dist/mcp).
+// The first four run from the same compiled runtime (dist/mcp); copilot runs
+// the user's own GitHub Copilot CLI.
 
 import { access } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
@@ -22,6 +24,8 @@ Commands:
   daemon   Keep one rene session for many calls:  rene daemon --socket <path>
   agent    Troubleshoot and investigate with rene's tools on a local or cloud
            model (rene agent --help)
+  copilot  Start GitHub Copilot CLI with rene's tools in place of its own:
+           rene copilot [<copilot args>…]
 `;
 const TOOL_COMMANDS = new Set(["call", "tools", "daemon"]);
 /** Exit status of a writer terminated by SIGPIPE (128 + 13). */
@@ -43,8 +47,45 @@ process.stdout.on("error", (cause) => {
   process.exitCode = SIGPIPE_EXIT_STATUS;
 });
 
+/**
+ * Start the user's GitHub Copilot CLI with this project's tool policy: rene's
+ * commands pre-approved, and the tools rene owns denied. A session started by
+ * hand is then held to the same rule as one the workbench starts, instead of
+ * relying on the agent to decline its own reader.
+ */
+async function runCopilot(passthrough) {
+  const [{ copilotToolkitArguments }, { spawn }, { constants }] =
+    await Promise.all([
+      import("./lib/copilot-tool-policy.mjs"),
+      import("node:child_process"),
+      import("node:os"),
+    ]);
+  const child = spawn(
+    "copilot",
+    [...copilotToolkitArguments(), ...passthrough],
+    { stdio: "inherit" },
+  );
+  return await new Promise((settle) => {
+    child.on("error", (cause) => {
+      process.stderr.write(
+        cause?.code === "ENOENT"
+          ? "GitHub Copilot CLI is not on PATH. Install it, then run `rene copilot` again.\n"
+          : `rene could not start Copilot CLI: ${cause?.message ?? cause}\n`,
+      );
+      settle(1);
+    });
+    child.on("exit", (status, signal) => {
+      // A terminated child has no status; report it as its shell would.
+      if (signal) settle(128 + (constants.signals[signal] ?? 0));
+      else settle(status ?? 0);
+    });
+  });
+}
+
 const command = args[0];
-if (command !== "agent" && !TOOL_COMMANDS.has(command)) {
+if (command === "copilot") {
+  process.exitCode = await runCopilot(args.slice(1));
+} else if (command !== "agent" && !TOOL_COMMANDS.has(command)) {
   process.stderr.write(USAGE);
   process.exitCode = args.length === 0 || command === "--help" ? 0 : 2;
 } else {

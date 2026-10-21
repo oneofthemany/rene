@@ -53,14 +53,13 @@ export const searchSourceSymbolsInputSchema = z.strictObject({
   limit: z.number().int().min(1).max(200).default(10),
 });
 
-export const sourceSymbolCallersInputSchema = z.strictObject({
+/** Callers and callees ask the same question of one symbol, in two directions. */
+export const sourceSymbolNeighborsInputSchema = z.strictObject({
   project_path: projectPath,
   symbol,
   file: file.optional(),
   limit: z.number().int().min(1).max(500).default(20),
 });
-
-export const sourceSymbolCalleesInputSchema = sourceSymbolCallersInputSchema;
 
 export const sourceChangeImpactInputSchema = z.strictObject({
   project_path: projectPath,

@@ -213,7 +213,3 @@ export const duckdbResultSchemas = {
     summary: z.array(summaryColumn).nullable(),
   }),
 } as const;
-
-export type DuckdbDatabase = z.infer<
-  (typeof duckdbResultSchemas)["inspect_duckdb_database"]
->;

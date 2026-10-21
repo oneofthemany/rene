@@ -10,8 +10,7 @@ import {
   sourceGraphMapResultSchema,
   sourceGraphQueryResultSchema,
   sourceGraphStatusInputSchema,
-  sourceSymbolCalleesInputSchema,
-  sourceSymbolCallersInputSchema,
+  sourceSymbolNeighborsInputSchema,
 } from "../domain/sourceGraph.js";
 import type { ToolContract } from "./toolContractTypes.js";
 import { toolContractMetadata } from "./toolEffects.js";
@@ -81,7 +80,7 @@ export const SOURCE_GRAPH_TOOL_CONTRACTS = [
     ...toolContractMetadata("find_source_callers"),
     kind: "codegraph-provider",
     description: `List the functions and methods that call a symbol, with their locations. ${QUERY}`,
-    inputSchema: sourceSymbolCallersInputSchema,
+    inputSchema: sourceSymbolNeighborsInputSchema,
     outputSchema: queryResult,
     examples: [
       {
@@ -95,7 +94,7 @@ export const SOURCE_GRAPH_TOOL_CONTRACTS = [
     ...toolContractMetadata("find_source_callees"),
     kind: "codegraph-provider",
     description: `List the functions and methods a symbol calls, with their locations. ${QUERY}`,
-    inputSchema: sourceSymbolCalleesInputSchema,
+    inputSchema: sourceSymbolNeighborsInputSchema,
     outputSchema: queryResult,
     examples: [
       {

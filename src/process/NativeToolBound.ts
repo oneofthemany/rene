@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { isAbsolute } from "node:path";
 import { AnalysisError } from "../domain/analysisErrorBase.js";
 import { AnalysisCapabilityUnavailableError } from "../domain/analysisErrorCore.js";
+import { prlimitCeilingArguments } from "./LinuxResourceLimits.js";
 import type { ArtifactAnalysisResources } from "./ArtifactAnalysisResources.js";
 import type { BoundedToolNativeBound } from "./BoundedToolCommand.js";
 
@@ -60,13 +61,7 @@ export const prepareNativeToolBound = async (
       nativeBound: {
         limiter: {
           command: limiter,
-          arguments: [
-            `--as=${limits.address_space_bytes}:${limits.address_space_bytes}`,
-            `--fsize=${limits.file_bytes}:${limits.file_bytes}`,
-            `--cpu=${limits.cpu_seconds}:${limits.cpu_seconds}`,
-            "--core=0:0",
-            "--",
-          ],
+          arguments: prlimitCeilingArguments(limits),
         },
       },
       limitations: [

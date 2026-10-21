@@ -176,6 +176,51 @@ describe("dependency install freshness", () => {
   }, 60_000);
 });
 
+/**
+ * The tasks of the cached build that keep their real scripts: the fixture
+ * copies those scripts, and the guard under test is one of them.
+ */
+const FIXTURE_BUILD_TASKS = new Set(["artifacts:skills", "metadata:check"]);
+
+/**
+ * Replace every other task the cached build depends on with a command that
+ * does nothing. The fixture holds only a handful of scripts, so a real task
+ * run here fails on a missing module; it survived only while turbo happened
+ * to replay a cached result, and failed as soon as one was missed. The set
+ * comes from the task graph, so a task added to the build later is covered
+ * without this fixture being edited again.
+ */
+const stubbedBuildTasks = async (
+  scripts: Record<string, unknown>,
+): Promise<Record<string, string>> => {
+  const cachedBuild = scripts["build:cached"];
+  const root =
+    typeof cachedBuild === "string"
+      ? /turbo run ([^\s]+)/.exec(cachedBuild)?.[1]
+      : undefined;
+  const tasks = asRecord(
+    asRecord(JSON.parse(await readFile(join(sourceRoot, "turbo.json"), "utf8")))
+      ?.tasks,
+  );
+  if (root === undefined || tasks === undefined)
+    throw new Error("the cached build no longer names a turbo task to run");
+  const reached = new Set<string>();
+  const visit = (task: string): void => {
+    if (reached.has(task)) return;
+    reached.add(task);
+    const dependsOn = asRecord(tasks[task])?.dependsOn;
+    if (Array.isArray(dependsOn))
+      for (const dependency of dependsOn)
+        if (typeof dependency === "string") visit(dependency);
+  };
+  visit(root);
+  return Object.fromEntries(
+    [...reached]
+      .filter((task) => !FIXTURE_BUILD_TASKS.has(task))
+      .map((task) => [task, "node -e 0"]),
+  );
+};
+
 const createBuildCacheFixture = async (): Promise<string> => {
   const root = await createTestTempDirectory("rea-build-cache-guard-");
   const packageJson = asRecord(
@@ -219,6 +264,7 @@ const createBuildCacheFixture = async (): Promise<string> => {
       ...packageJson,
       scripts: {
         ...scripts,
+        ...(await stubbedBuildTasks(scripts)),
         compile: "node scripts/cache-fixture-build.mjs",
       },
     }),

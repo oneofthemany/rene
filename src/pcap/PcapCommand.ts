@@ -1,6 +1,5 @@
 import {
   runBoundedToolCommand,
-  type BoundedToolCommandCleanup,
   type BoundedToolCommandLauncher,
   type BoundedToolCommandLimits,
   type BoundedToolCommandOutput,
@@ -9,7 +8,6 @@ import {
 import { pcapToolUnavailable } from "./PcapConfiguration.js";
 
 export type PcapCommandLauncher = BoundedToolCommandLauncher;
-export type PcapCommandCleanup = BoundedToolCommandCleanup;
 export type PcapCommandOutput = BoundedToolCommandOutput;
 export type PcapCommandLimits = BoundedToolCommandLimits;
 

@@ -23,6 +23,7 @@ import { delimiter, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "@lydell/node-pty";
 
+import { copilotToolkitArguments } from "../scripts/lib/copilot-tool-policy.mjs";
 import { startCliToolkit } from "./agentToolkit.mjs";
 
 /** Output kept for a page that attaches later. */
@@ -258,7 +259,7 @@ const SESSION_AGENTS = [
         args:
           toolkit === "mcp"
             ? ["--additional-mcp-config", `@${config}`, "--allow-tool", "rea"]
-            : ["--allow-tool", "shell(rene)", "--allow-tool", "shell(rea)"],
+            : copilotToolkitArguments(),
         env: { COPILOT_CUSTOM_INSTRUCTIONS_DIRS: dirs },
       };
     },

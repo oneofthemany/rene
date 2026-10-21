@@ -108,6 +108,65 @@ Finish these before the move off MCP is called done.
   `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`. Agents reading another file (Gemini
   CLI's `GEMINI.md`) still need their own way in, and none of them has a
   topic gate (that is Claude Code's hooks).
+- **rene call spends agent tokens on every call.** Each call prints the
+  whole Evidence envelope on stdout, so an agent reading one field pays for
+  all of it and has to pipe through `jq` to find it. An output selector
+  (`--field`, or a `--quiet` that prints only the normalised result) would
+  cut the cost of the common read materially; the complete Evidence stays
+  recorded in history either way.
+- **rene call cannot carry a long command.** `run_command` accepts a
+  `timeout_ms` up to 1,800,000, but the call itself gives up long before
+  that: a 45-second command returns, while 60-second and 150-second ones
+  came back `Request timed out` on a loaded machine. An agent therefore
+  cannot run the project's own gates through the toolbox, since
+  `npm run check:pr` takes tens of minutes, and is pushed into polling a
+  run it started and orphaned, which is how two of them ended up competing
+  for the artifacts lock. Either honour the caller's `timeout_ms`, or let
+  `run_command` start a long command and collect its result in a later
+  call.
+- **A long shell pipeline hides whether rene did the work.** The agent
+  terminal truncates the displayed command near 90 characters, so a line
+  that ends in a rene call can read as a plain `python3` or `grep`
+  invocation and claim a provenance the visible text contradicts. Writes
+  should use `--stdin-field` rather than building JSON in another
+  interpreter; the dependable signal is the workbench rene-call counter.
+- **knip cannot follow a dist import.** `scripts/rene.mjs` loads
+  `dist/mcp/agentCli.js` and `dist/mcp/toolCli.js`, which knip's `project`
+  globs do not reach, so both TypeScript sources and everything they pull
+  in looked unreachable and failed `npm run check` until they were declared
+  in `knip.json`. Any future runtime entry point added to `scripts/rene.mjs`
+  or `scripts/bundle-runtime.mjs` has to be added there too.
+- **`bin.rene` is not in the published package.** `package.json` declares
+  `"rene": "scripts/rene.mjs"`, but `files` lists only `scripts/rea.mjs` and
+  a few others, so a published tarball installs a `rene` command whose entry
+  point is absent; `scripts/lib/copilot-tool-policy.mjs`, which it now loads,
+  is missing too. Decide whether rene ships: add both to `files`, or drop the
+  `bin` entry and keep rene a working-tree tool.
+- **Nothing holds Claude Code to the toolkit.** `frontend/topicGate.mjs` is
+  wired to a `PreToolUse` matcher of `"Bash"` only, so Claude Code's own
+  `Read`, `Edit`, `Write`, `Grep` and `Glob` are ungated and leave no
+  Evidence. Copilot CLI is now held by denied tools
+  (`scripts/lib/copilot-tool-policy.mjs`); give Claude Code the same by
+  matching those tools in the gate, or by denying them in its settings.
+- **The tools denied to Copilot CLI are not verified end to end.** The
+  arguments are observed to reach the process, but a headless run cannot sign
+  in from a detached spawn, so that a denied `view` is actually refused has
+  not been observed. Confirm it on the next session the workbench starts, and
+  keep a check that fails if the policy stops being passed.
+- **A long command leaves no trace of its progress.** A build, a gate or a
+  test run is started detached and polled with `tail`, because `run_command`
+  cannot hold a request open for minutes. The history then shows only the
+  short poll commands: the user watching it cannot see that a build is
+  running, how far it has got, or what it finally said. Give rene a recorded
+  long-running command: one call starts it and returns a handle, its output
+  is streamed into the Evidence for that handle, and the history shows it as
+  running, with progress, until it ends with its status. The agent polls the
+  handle instead of inventing `sleep` and `tail`.
+- **`run_command` runs with a bare PATH.** It is `/usr/local/bin:/usr/bin`,
+  so a tool the user installed under `~/.local/bin` (`copilot`, `claude`,
+  `agy`) is not found and has to be called by absolute path. Decide which
+  PATH a recorded command should inherit, and say so in the tool's
+  description.
 - **A workbench setting for the toolkit.** It is chosen by
   `REA_AGENT_TOOLKIT` in the workbench's environment; put it in the settings
   page beside the model source (local or cloud) when that lands.

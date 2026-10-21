@@ -28,8 +28,7 @@ import {
   sourceChangeImpactInputSchema,
   sourceGraphQueryResultSchema,
   sourceGraphStatusInputSchema,
-  sourceSymbolCalleesInputSchema,
-  sourceSymbolCallersInputSchema,
+  sourceSymbolNeighborsInputSchema,
   type IndexSourceGraphInput,
 } from "../domain/sourceGraph.js";
 import {
@@ -86,12 +85,12 @@ const QUERIES = {
     args: rename({ query: "query", kind: "kind", limit: "limit" }),
   },
   find_source_callers: {
-    input: sourceSymbolCallersInputSchema,
+    input: sourceSymbolNeighborsInputSchema,
     upstream: "codegraph_callers",
     args: rename({ symbol: "symbol", file: "file", limit: "limit" }),
   },
   find_source_callees: {
-    input: sourceSymbolCalleesInputSchema,
+    input: sourceSymbolNeighborsInputSchema,
     upstream: "codegraph_callees",
     args: rename({ symbol: "symbol", file: "file", limit: "limit" }),
   },

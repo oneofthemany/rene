@@ -18,20 +18,27 @@ Run it from your shell:
 
 Use the toolkit's tool in place of your own, and of a plain shell command:
 
-| Instead of         | Use                                  |
-| ------------------ | ------------------------------------ |
-| a shell command    | `rene call run_command`              |
-| reading a file     | `rene call read_file`                |
-| writing a file     | `rene call write_file`               |
-| changing a file    | `rene call edit_file`                |
-| searching text     | `rene call search_text`              |
-| finding files      | `rene call find_files`               |
-| surveying a folder | `rene call survey_project_directory` |
+| Instead of                               | Use                                  |
+| ---------------------------------------- | ------------------------------------ |
+| a shell command (`bash`, `Bash`)         | `rene call run_command`              |
+| reading a file (`view`, `Read`)          | `rene call read_file`                |
+| writing a file (`create`, `Write`)       | `rene call write_file`               |
+| changing a file (`edit`, `Edit`)         | `rene call edit_file`                |
+| searching text (`grep`, `Grep`)          | `rene call search_text`              |
+| finding files (`glob`, `Glob`)           | `rene call find_files`               |
+| surveying a folder (a directory listing) | `rene call survey_project_directory` |
 
 Your shell runs only `rene` commands; you may pipe their output into `head`,
 `tail`, `wc` or `jq`. Where rene has no tool for an action you need, do not fall
 back to a built-in tool: say what is missing and propose it as a new rene tool,
 so the capability is added within the project's guidelines.
+
+This is enforced, not merely asked for. A Copilot CLI session the workbench
+starts is given rene's commands and denied its own `view`, `edit`, `create`,
+`grep` and `glob`, so an unrecorded read or write is not available to it.
+Start a session by hand the same way, with `rene copilot` (it accepts Copilot
+CLI's own arguments) rather than `copilot`, so that the same policy applies.
+The policy itself lives in `scripts/lib/copilot-tool-policy.mjs`.
 
 Other agents may have worked in this folder before you. Before picking up their
 work, read what they asked and did with `rene call list_agent_conversations` and
