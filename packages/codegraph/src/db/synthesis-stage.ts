@@ -1,48 +1,53 @@
 import { createDatabase, type SqliteDatabase } from './sqlite-adapter';
 import { QueryBuilder } from './queries';
 import { createYielder } from '../resolution/cooperative-yield';
+import type { DuckdbAdapter } from './duckdb-adapter';
 
 // Ownership is independent of provenance: Go method containment is structural.
-export const SYNTHESIZED_EDGE = "CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.synthesizedBy') END IS NOT NULL";
+export const SYNTHESIZED_EDGE = "CASE WHEN json_valid(metadata) THEN json_extract_string(metadata, '$.synthesizedBy') END IS NOT NULL";
 
-/** A private edge overlay: passes see base edges plus their new Go prerequisites. */
+/** Rows staged and published per statement, between yields. */
+const PUBLISH_BATCH = 2000;
+const EDGE_COLUMNS = 'source, target, kind, metadata, line, col, provenance';
+
+/**
+ * A private edge overlay: passes see base edges plus their new Go
+ * prerequisites.
+ *
+ * On its own connection, a TEMP view named `edges` shows the base edges
+ * without the synthesized ones, plus the edges staged so far; the builder's
+ * edge inserts go to the staging table (QueryBuilder.stageEdgeInserts),
+ * checked against that view, as SQLite's INSTEAD OF trigger did. The base
+ * tables are named through their catalog: inside the view, `main.edges`
+ * would name the view itself. The stage's own writes are to TEMP objects and
+ * stay out of the log; publish writes the base tables with self-contained
+ * statements, which a replay reproduces.
+ */
 export class SynthesisStage {
   readonly db: SqliteDatabase;
   readonly queries: QueryBuilder;
+  /** The base schema, qualified by catalog: `"memory".main`. */
+  private readonly base: string;
 
   constructor(dbPath: string) {
     this.db = createDatabase(dbPath).db;
     try {
-      this.db.pragma('busy_timeout = 5000');
-      this.db.pragma('foreign_keys = ON');
-      this.db.pragma('synchronous = NORMAL');
-      this.db.pragma('wal_autocheckpoint = 0');
+      (this.db as DuckdbAdapter).setLogging(false);
+      const catalog = (this.db.prepare('SELECT current_database() AS db').get() as { db: string }).db;
+      this.base = `"${catalog.replaceAll('"', '""')}".main`;
       this.db.exec(`
-        CREATE TEMP TABLE synthesis_inputs (file_path TEXT PRIMARY KEY);
+        CREATE TEMP TABLE synthesis_inputs (file_path VARCHAR PRIMARY KEY);
+        CREATE TEMP SEQUENCE synthesis_edges_id;
         CREATE TEMP TABLE synthesis_edges (
-          id INTEGER PRIMARY KEY, source TEXT, target TEXT, kind TEXT,
-          metadata TEXT, line INTEGER, col INTEGER, provenance TEXT
+          id BIGINT PRIMARY KEY DEFAULT nextval('synthesis_edges_id'), source VARCHAR, target VARCHAR, kind VARCHAR,
+          metadata VARCHAR, line BIGINT, col BIGINT, provenance VARCHAR
         );
-        CREATE UNIQUE INDEX temp.synthesis_identity ON synthesis_edges
-          (source, target, kind, IFNULL(line, -1), IFNULL(col, -1));
-        CREATE INDEX temp.synthesis_source ON synthesis_edges(source, kind);
-        CREATE INDEX temp.synthesis_target ON synthesis_edges(target, kind);
         CREATE TEMP VIEW edges AS
-          SELECT * FROM main.edges WHERE NOT COALESCE((${SYNTHESIZED_EDGE}), 0)
+          SELECT * FROM ${this.base}.edges WHERE NOT COALESCE((${SYNTHESIZED_EDGE}), false)
           UNION ALL SELECT * FROM synthesis_edges;
-        CREATE TEMP TRIGGER synthesis_insert INSTEAD OF INSERT ON edges BEGIN
-          INSERT OR IGNORE INTO synthesis_edges
-            (source, target, kind, metadata, line, col, provenance)
-          SELECT NEW.source, NEW.target, NEW.kind, NEW.metadata, NEW.line, NEW.col, NEW.provenance
-          WHERE NOT EXISTS (
-            SELECT 1 FROM main.edges WHERE source = NEW.source AND target = NEW.target
-              AND kind = NEW.kind AND IFNULL(line, -1) = IFNULL(NEW.line, -1)
-              AND IFNULL(col, -1) = IFNULL(NEW.col, -1)
-              AND NOT COALESCE((${SYNTHESIZED_EDGE}), 0)
-          );
-        END;
       `);
       this.queries = new QueryBuilder(this.db);
+      this.queries.stageEdgeInserts('synthesis_edges');
     } catch (error) {
       this.db.close();
       throw error;
@@ -52,30 +57,37 @@ export class SynthesisStage {
   async publish(backpressure?: () => Promise<void> | null): Promise<void> {
     await backpressure?.();
     const yieldToLoop = createYielder();
-    // Keep the replacement atomic for other connections. Yield between bounded
-    // writes, but checkpoint only OUTSIDE this transaction (uncommitted frames
-    // cannot be folded). Pass execution/staging above never writes the main WAL.
-    this.db.exec('BEGIN IMMEDIATE');
+    // One transaction, so other connections see the replacement whole. The
+    // writes are to the base tables and logged, each carrying its data.
+    (this.db as DuckdbAdapter).setLogging(true);
+    this.db.exec('BEGIN TRANSACTION');
     try {
-      const remove = this.db.prepare(`DELETE FROM main.edges WHERE id IN (
-        SELECT id FROM main.edges WHERE ${SYNTHESIZED_EDGE} LIMIT 2000
+      const remove = this.db.prepare(`DELETE FROM ${this.base}.edges WHERE id IN (
+        SELECT id FROM ${this.base}.edges WHERE ${SYNTHESIZED_EDGE} LIMIT ${PUBLISH_BATCH}
       )`);
       while (remove.run().changes > 0) await yieldToLoop();
-      const insert = this.db.prepare(`INSERT OR IGNORE INTO main.edges
-        (source, target, kind, metadata, line, col, provenance)
-        SELECT source, target, kind, metadata, line, col, provenance
-        FROM synthesis_edges WHERE id > ? AND id <= ?`);
-      const max = this.db.prepare('SELECT MAX(id) AS id FROM synthesis_edges').get()?.id ?? 0;
-      for (let i = 0; i < max; i += 2000) {
-        insert.run(i, i + 2000);
+      const staged = this.db.prepare(
+        `SELECT ${EDGE_COLUMNS} FROM synthesis_edges WHERE id > ? AND id <= ? ORDER BY id`
+      );
+      const max = (this.db.prepare('SELECT MAX(id) AS id FROM synthesis_edges').get() as { id: number | null })?.id ?? 0;
+      for (let i = 0; i < max; i += PUBLISH_BATCH) {
+        const rows = (staged.all(i, i + PUBLISH_BATCH) as Array<Record<string, unknown>>).map((row) => [
+          row.source, row.target, row.kind, row.metadata, row.line, row.col, row.provenance,
+        ]);
+        this.queries.insertEdgeRowsInto(`${this.base}.edges`, rows);
         await yieldToLoop();
       }
-      this.db.exec(`DELETE FROM main.synthesis_inputs;
-        INSERT INTO main.synthesis_inputs SELECT * FROM temp.synthesis_inputs`);
+      const inputs = (this.db.prepare('SELECT file_path FROM temp.synthesis_inputs').all() as Array<{ file_path: string }>)
+        .map((row) => row.file_path);
+      this.db.prepare(`DELETE FROM ${this.base}.synthesis_inputs`).run();
+      const insertInput = this.db.prepare(`INSERT INTO ${this.base}.synthesis_inputs (file_path) VALUES (?)`);
+      for (const filePath of inputs) insertInput.run(filePath);
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;
+    } finally {
+      (this.db as DuckdbAdapter).setLogging(false);
     }
     await backpressure?.();
   }

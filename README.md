@@ -61,7 +61,6 @@ flowchart LR
   subgraph Host["Your machine"]
     BRIDGE["Workbench bridge<br/>frontend/server.mjs"]
     AGENT["Your agent CLI<br/>(Claude Code, Copilot, ...)<br/>in a terminal"]
-    RELAY["Relay<br/>frontend/relay.mjs"]
     GATE["Topic + commit gate<br/>(Claude Code hooks)"]
     STORE[("Per-project store<br/>history · conversations")]
     TRANS[("Agent transcripts<br/>~/.claude/projects")]
@@ -70,7 +69,7 @@ flowchart LR
 
   subgraph Container["rene container (sees your home folder)"]
     REA1["rea mcp<br/>(for the page)"]
-    REA2["rea mcp<br/>(for the agent)"]
+    REA2["rene daemon<br/>(one per agent session)"]
     PROV["Providers<br/>Ghidra · rizin · JADX · DuckDB<br/>browsers · CodeGraph · ..."]
   end
 
@@ -78,9 +77,8 @@ flowchart LR
   BRIDGE <--> REA1
   MID -- "start agent" --> BRIDGE
   BRIDGE -- "pseudo-terminal" --> AGENT
-  AGENT <--> RELAY
-  RELAY <--> REA2
-  RELAY -- "call started / settled" --> BRIDGE
+  AGENT -- "rene call" --> REA2
+  AGENT -- "call started / settled" --> BRIDGE
   AGENT -. "hooks" .-> GATE
   AGENT -- "writes" --> TRANS
   BRIDGE -- "follows" --> TRANS
@@ -94,9 +92,10 @@ flowchart LR
 - **The bridge** is a small Node server on loopback. It runs one `rea mcp`
   for the page, starts your agent in a pseudo-terminal, and streams calls,
   history and terminal output to the browser.
-- **The relay** sits between the agent and its own `rea mcp`. It passes the
-  protocol through byte for byte and tells the bridge when each tool call
-  starts and settles, so agent calls land in History with their results.
+- **`rene call`** is how the agent uses rene: a command in its shell, never
+  an MCP server. Each call runs in the session's own `rene daemon` and tells
+  the bridge when it starts and settles, so agent calls land in History with
+  their results.
 - **Transcripts** are how the conversation gets in. The bridge follows the
   agent's transcript files for the project folder and ties each rene call in
   them to its recorded call by time and identical arguments, never by

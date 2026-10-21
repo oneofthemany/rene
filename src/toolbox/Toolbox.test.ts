@@ -301,7 +301,37 @@ describe("run_command", () => {
     expect(retained).toEqual([]);
   });
 
+  it.skipIf(process.platform !== "linux")(
+    "measures the peak memory and CPU of everything a command starts",
+    async () => {
+      // A child of the shell holds about 100 MiB and spins for 400 ms.
+      const hold = `const b = Buffer.alloc(100 * 1024 * 1024, 1); const end = Date.now() + 400; while (Date.now() < end); console.log(b[0]);`;
+      const result = await runToolboxCommand(
+        roots,
+        runCommandInputSchema.parse({
+          command: `${JSON.stringify(process.execPath)} -e '${hold}'`,
+          cwd: root,
+          measure: true,
+        }),
+        options,
+      );
+      expect(result.exit_code).toBe(0);
+      expect(result.usage).toMatchObject({ interval_ms: 50 });
+      expect(result.usage?.peak_rss_bytes).toBeGreaterThan(90 * 1024 * 1024);
+      expect(result.usage?.cpu_user_ms).toBeGreaterThan(200);
+      expect(result.usage?.processes_seen).toBeGreaterThanOrEqual(1);
+      // Unmeasured, the result carries no usage at all.
+      const plain = await runToolboxCommand(
+        roots,
+        runCommandInputSchema.parse({ command: "true", cwd: root }),
+        options,
+      );
+      expect(plain).not.toHaveProperty("usage");
+    },
+  );
+
   // Perl stretches $0 over the environment block on Linux, as Chromium's
+
   // child processes do, so procfs shows the child with no run token. The
   // command it belongs to must still be stopped as a whole.
   it.skipIf(process.platform !== "linux")(

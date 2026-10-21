@@ -5,8 +5,34 @@
 #
 # Provider settings (REA_*, JAVA_HOME, GHIDRA_INSTALL_DIR, ...) from the
 # caller's environment are forwarded; everything else comes from the image.
-# stdin/stdout pass through, so `rea mcp` works over stdio.
+# stdin/stdout pass through, so the workbench page's own `rea mcp` client
+# works over stdio.
+#
+# Agents reach rene with `rene call`, never as an MCP server: as MCP tools rene
+# sits beside the agent's own reader, writer and shell, which record nothing.
+# This launcher is what agent registrations on this machine name, so it refuses
+# MCP here, whatever an old or resumed session's configuration still says:
+# `rea mcp` (and its subcommands) unless the workbench page started it
+# (REA_WORKBENCH_MCP=page, set by frontend/server.mjs for its own client), and
+# `rea setup` unless it only plans (--dry-run), since setup registers agents'
+# MCP servers.
 set -euo pipefail
+
+refuse() {
+  echo "rea: $1 Agents reach rene through \`rene call <tool> '<json>'\` in their shell; see AGENTS.md." >&2
+  exit 77
+}
+case "${1:-}" in
+  mcp | --mcp)
+    [ "$#" -eq 1 ] && [ "${REA_WORKBENCH_MCP:-}" = page ] ||
+      refuse "rene isn't served over MCP to agents."
+    ;;
+  setup)
+    dry_run=
+    for argument in "$@"; do [ "$argument" = --dry-run ] && dry_run=1; done
+    [ -n "$dry_run" ] || refuse "rea setup registers rene as agents' MCP server, which this fork doesn't do."
+    ;;
+esac
 
 self="$(readlink -f "${BASH_SOURCE[0]}")"
 here="$(dirname "$self")"

@@ -31,7 +31,12 @@ import {
 import {
   declarationReceipt,
   declaredTopicIds,
+  parseCallWords,
 } from "./toolbox/ReaCallCommand.js";
+import {
+  readSavedSettings,
+  withSavedProviderSettings,
+} from "./toolbox/SavedProviderSettings.js";
 
 /**
  * Explicit command-line access to every REA tool, without an MCP client.
@@ -65,6 +70,12 @@ const USAGE = `Usage:
   rene call <name> [<json>|-]     Run one tool; '-' reads the JSON arguments from stdin
   rene call <name> <json> --stdin-field <field>
                                  Run one tool with <field> set to stdin's raw text
+                                 (the flag may also come before <json>)
+  rene skill status               Show the installed reverse-engineer-anything skill
+  rene skill install [--client <id>…]
+                                 Install or update the skill: the shared
+                                 ~/.agents/skills, every agent folder that
+                                 already has it, and each --client named
   rene daemon [--socket <path>] [--exit-with-stdin]
                                  Serve one persistent session on a Unix socket;
                                  --exit-with-stdin stops it when stdin closes
@@ -330,10 +341,76 @@ export const resultText = (result: ToolResult): string => {
     : JSON.stringify(result.structuredContent ?? result);
 };
 
+/** The wait for a tool that declares no deadline of its own. */
+const DEFAULT_CALL_MS = 120_000;
+/** Time a call that met its own deadline still needs to report it. */
+const DEADLINE_MARGIN_MS = 30_000;
+/** The arguments by which a tool takes its deadline. */
+const DEADLINE_ARGUMENTS = ["timeout_ms", "analysis_timeout_ms"] as const;
+
+const deadlineIn = (
+  values: Readonly<Record<string, unknown>>,
+): number | undefined =>
+  DEADLINE_ARGUMENTS.map((name) => values[name]).find(
+    (value): value is number =>
+      typeof value === "number" && Number.isFinite(value) && value > 0,
+  );
+
+/**
+ * How long rene call waits for one tool, after which it stops waiting and
+ * reports the call as timed out. The tool decides: the deadline the call
+ * names (`timeout_ms`, `analysis_timeout_ms`), else the default its schema
+ * declares for that argument, else two minutes; plus a margin for a call
+ * that met its deadline to report. The wait is fixed: progress from the
+ * tool doesn't extend it. (The SDK's own 60 s abandoned longer runs, such as
+ * a test suite through run_command, before their deadline.)
+ */
+export const callTimeoutMs = (
+  args: Readonly<Record<string, unknown>>,
+  schemaDefaults: Readonly<Record<string, unknown>> = {},
+): number => {
+  const deadline = deadlineIn(args) ?? deadlineIn(schemaDefaults);
+  return deadline === undefined
+    ? DEFAULT_CALL_MS
+    : deadline + DEADLINE_MARGIN_MS;
+};
+
+/**
+ * The defaults a tool's input schema declares for its deadline arguments,
+ * read only when the call names no deadline itself.
+ */
+const deadlineDefaults = async (
+  client: Client,
+  name: string,
+  args: Readonly<Record<string, unknown>>,
+): Promise<Record<string, unknown>> => {
+  if (deadlineIn(args) !== undefined) return {};
+  let cursor: string | undefined;
+  do {
+    const page = await client.listTools(
+      cursor === undefined ? undefined : { cursor },
+    );
+    const tool = page.tools.find((candidate) => candidate.name === name);
+    if (tool !== undefined) {
+      const properties = (tool.inputSchema.properties ?? {}) as Record<
+        string,
+        { default?: unknown }
+      >;
+      return Object.fromEntries(
+        DEADLINE_ARGUMENTS.map((argument) => [
+          argument,
+          properties[argument]?.default,
+        ]),
+      );
+    }
+    cursor = page.nextCursor;
+  } while (cursor !== undefined);
+  return {};
+};
+
 /**
  * Calls one tool and reports it to the workbench's history, started and
- * settled, as the MCP relay reports the calls it sees. A call that throws is
- * reported as failed and rethrown.
+ * settled. A call that throws is reported as failed and rethrown.
  */
 export const callRecorded = async (
   client: Client,
@@ -346,7 +423,11 @@ export const callRecorded = async (
   reports?.send({ type: "started", ref, name, args, startedAt });
   let result: ToolResult;
   try {
-    result = await client.callTool({ name, arguments: args });
+    const timeout = callTimeoutMs(
+      args,
+      await deadlineDefaults(client, name, args),
+    );
+    result = await client.callTool({ name, arguments: args }, { timeout });
   } catch (cause: unknown) {
     reports?.send({
       type: "settled",
@@ -388,19 +469,14 @@ const runCall = async (
   args: readonly string[],
   io: ToolCliIo,
 ): Promise<number> => {
-  const [name, input, ...extra] = args;
   // --stdin-field <field>: that field's value is stdin's raw text, so long
   // or multi-line text (a file's content, a script) needs no JSON escaping.
-  const stdinField =
-    extra.length === 2 && extra[0] === "--stdin-field" ? extra[1] : undefined;
-  if (
-    name === undefined ||
-    (extra.length > 0 && stdinField === undefined) ||
-    (stdinField !== undefined && (input === undefined || input === "-"))
-  ) {
+  const call = parseCallWords(args);
+  if (call === undefined) {
     io.writeStderr(USAGE);
     return 2;
   }
+  const { tool: name, input, stdinField } = call;
   const text =
     input === undefined ? "{}" : input === "-" ? await io.readStdin() : input;
   const parsed = parseArguments(text);
@@ -525,12 +601,120 @@ export const runToolCli = async (
     if (command === "tools") return await runTools(rest, io);
     if (command === "call") return await runCall(rest, io);
     if (command === "daemon") return await runDaemon(rest, io);
+    if (command === "skill") return await runSkill(rest, io);
   } catch (cause: unknown) {
     io.writeStderr(`${errorMessage(cause)}\n`);
     return 1;
   }
   io.writeStderr(USAGE);
   return 2;
+};
+
+/**
+ * `io` with the provider paths the workbench saved, for each variable its
+ * environment doesn't set: the file REA_WORKBENCH_SETTINGS names (an agent
+ * session's bridge sets it), or `defaultPath`, the checkout's own. rene run
+ * by hand then finds the providers the workbench was told about. A file that
+ * can't be read costs one line on stderr and applies nothing.
+ */
+export const withWorkbenchSettings = (
+  io: ToolCliIo,
+  defaultPath: string,
+): ToolCliIo => {
+  const path = io.env.REA_WORKBENCH_SETTINGS || defaultPath;
+  const saved = readSavedSettings(path);
+  if (!saved.ok) {
+    io.writeStderr(
+      `rene: ${path} could not be read (${saved.reason}); saved provider paths aren't applied.\n`,
+    );
+    return io;
+  }
+  return { ...io, env: withSavedProviderSettings(io.env, saved.environment) };
+};
+
+/**
+ * `rene skill status|install`: the reverse-engineer-anything skill for the
+ * agents on this machine, through setup's skill installer (atomic writes,
+ * backups and rollback), which outlives `rea setup`. The installer and the
+ * agents' skill folders load only for this command.
+ */
+const runSkill = async (
+  args: readonly string[],
+  io: ToolCliIo,
+): Promise<number> => {
+  const [action, ...rest] = args;
+  const clients: string[] = [];
+  for (let at = 0; at < rest.length; at += 2) {
+    const client = rest[at + 1];
+    if (rest[at] !== "--client" || client === undefined) {
+      io.writeStderr(USAGE);
+      return 2;
+    }
+    clients.push(client);
+  }
+  if (
+    (action !== "status" && action !== "install") ||
+    (action === "status" && clients.length > 0)
+  ) {
+    io.writeStderr(USAGE);
+    return 2;
+  }
+  const [skill, { clientSkillDirectories }, { homeDirectoryFromEnvironment }] =
+    await Promise.all([
+      import("./application/SetupSkill.js"),
+      import("./application/SupportedClients.js"),
+      import("./config/homeDirectory.js"),
+    ]);
+  const home = homeDirectoryFromEnvironment(io.env, process.platform);
+  const known = new Set(
+    clientSkillDirectories(home, undefined, io.env).map(({ client }) => client),
+  );
+  const unknown = clients.filter((client) => !known.has(client));
+  if (unknown.length > 0) {
+    io.writeStderr(
+      `rene skill: no skill folder is known for ${unknown.join(", ")}; choose from ${[...known].join(", ")}.\n`,
+    );
+    return 2;
+  }
+  const existing = await skill.existingSkillDestinations(home, io.env);
+  const status = async () => {
+    const identity = await skill.readInstalledSkillIdentity(
+      home,
+      undefined,
+      io.env,
+    );
+    return {
+      installed: identity !== undefined,
+      version: identity?.version ?? null,
+      tool_count: identity?.toolCount ?? null,
+      // Whether every installed copy matches this build's skill.
+      current: identity?.canonical ?? false,
+      issues: identity?.issues ?? [],
+      destinations: (await skill.existingSkillDestinations(home, io.env)).map(
+        ({ client, path }) => ({ client, path }),
+      ),
+      // Every skill folder install --client can name, with where it is.
+      folders: clientSkillDirectories(home, undefined, io.env).map(
+        ({ client, directory }) => ({ client, directory }),
+      ),
+    };
+  };
+  if (action === "status") {
+    io.writeStdout(`${JSON.stringify(await status(), null, 2)}\n`);
+    return 0;
+  }
+  const targets = [
+    ...new Set(["shared", ...existing.map(({ client }) => client), ...clients]),
+  ];
+  const installed = await skill.installCanonicalSkill(home, targets, io.env);
+  if (!installed.ok) {
+    io.writeStderr(`rene skill: ${installed.error.message}\n`);
+    return 1;
+  }
+  io.writeStdout(
+    `${JSON.stringify({ result: installed.value, ...(await status()) }, null, 2)}\n`,
+  );
+  return 0;
 };
 
 /** Read all of standard input as UTF-8. */

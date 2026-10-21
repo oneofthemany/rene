@@ -83,10 +83,24 @@ describe("rea, the older name, and --stdin-field", () => {
         `rene call write_file '{"path":"/x"}' --stdin-field content <<'EOF'\nline one\n$NOT_EXPANDED\nEOF`,
       ),
     ).toEqual([{ tool: "write_file", args: null }]);
-    // --stdin-field needs the other arguments on the line.
+    // The flag may come before the arguments, as rene call reads it.
+    expect(
+      parseReaCallCommands(
+        `rene call write_file --stdin-field content '{"path":"/x"}' <<'EOF'\nhi\nEOF`,
+      ),
+    ).toEqual([{ tool: "write_file", args: null }]);
+    // --stdin-field needs the other arguments on the line, once.
     expect(
       parseReaCallCommands(`rene call write_file - --stdin-field content`),
     ).toEqual([]);
+    expect(
+      parseReaCallCommands(
+        `rene call write_file '{"path":"/x"}' --stdin-field a --stdin-field b`,
+      ),
+    ).toEqual([]);
+    expect(parseReaCallCommands(`rene call write_file --stdin-field`)).toEqual(
+      [],
+    );
     expect(
       reaOnlyShellLine(
         `rene call write_file '{"path":"/x"}' --stdin-field content <<'EOF'\nhi\nEOF`,

@@ -1,15 +1,13 @@
-// How a workbench agent reaches rene's tools: its toolkit.
+// How a workbench agent reaches rene's tools: `rene call <tool> '<json>'` in
+// its shell. The session gets a `rene` command on its PATH and one
+// `rene daemon`, so every call shares a session (a target opened by one call
+// stays open for the next), named to `rene call` by REA_DAEMON_SOCKET. Every
+// call is recorded in the project's history by its rene tool name.
 //
-//   cli  `rene call <tool> '<json>'` in the agent's shell: the default. The
-//        session gets a `rea` command on its PATH and one `rene daemon`, so
-//        every call shares a session (a target opened by one call stays open
-//        for the next), named to `rene call` by REA_DAEMON_SOCKET. Claude
-//        Code's topic gate names each rene tool it runs in the console.
-//   mcp  rene as named tools from an MCP server, through the relay
-//        (relay.mjs).
-//
-// REA_AGENT_TOOLKIT=mcp in the workbench's environment selects MCP. Either
-// way every call is recorded in the project's history by its rene tool name.
+// Never as an MCP server: as MCP tools rene sits beside the agent's own
+// reader, writer and shell, which stay available and leave no Evidence, and a
+// session did exactly that. Reached as a command, the tools rene replaces can
+// be taken away, so a local action goes through `rene call` or not at all.
 //
 // The daemon is an owned process (src/process supervision) started through
 // the same rea command as everything else, so it runs in the container when
@@ -35,10 +33,6 @@ const DAEMON_CLOSE_MS = 10_000;
 const MAX_STDERR_BYTES = 8 * 1024;
 // sun_path holds 108 bytes on Linux, 104 on macOS.
 const MAX_SOCKET_PATH = 100;
-
-/** The session's toolkit from the workbench's environment: cli unless MCP is asked for. */
-export const agentToolkit = (env) =>
-  env.REA_AGENT_TOOLKIT === "mcp" ? "mcp" : "cli";
 
 const shellQuote = (text) => `'${text.replaceAll("'", "'\\''")}'`;
 
@@ -112,7 +106,7 @@ function daemonReady(child, socket, stderr) {
 }
 
 /**
- * Prepares the cli toolkit for one agent session: the `rea` shim and the
+ * Prepares rene for one agent session: the `rene` shim and the
  * session's daemon. Returns the environment the agent needs and the stop
  * that ends the daemon.
  * @param {{ rea: { command: string, args: string[] }, directory: string, env: NodeJS.ProcessEnv }} options

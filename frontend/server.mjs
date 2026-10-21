@@ -6,12 +6,7 @@
 // REA keeps ownership of validation, sessions, Evidence, and cleanup.
 
 import { execFile, spawn } from "node:child_process";
-import {
-  createHash,
-  randomBytes,
-  randomUUID,
-  timingSafeEqual,
-} from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync, readdirSync } from "node:fs";
 import {
   appendFile,
@@ -66,7 +61,6 @@ import {
   createTerminal,
   TerminalError,
 } from "./terminal.mjs";
-import { agentToolkit } from "./agentToolkit.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const publicRoot = join(here, "public");
@@ -93,8 +87,8 @@ const { values: options } = parseArgs({
       default: join(here, ".workbench-settings.json"),
     },
     "providers-dir": { type: "string", default: defaultProvidersDir() },
-    // The agent session's files (MCP config, settings, the relay token the
-    // agent's rene reports calls with). Per bridge, like the folders above:
+    // The agent session's files (settings, the `rene` shim, the report token
+    // the agent's rene reports calls with). Per bridge, like the folders above:
     // a second bridge writing the same files would redirect a running
     // session's reports to itself.
     "agent-dir": { type: "string", default: agentDirectory(here) },
@@ -240,7 +234,9 @@ async function startMcp() {
     ...reaCommand(["mcp"]),
     // REA reads provider configuration (REA_*, GHIDRA_*, PATH, ...) from its
     // environment: the bridge's environment as launched, plus saved paths.
-    env: settings.environment(process.env),
+    // REA_WORKBENCH_MCP marks this as the page's own client: the container
+    // launcher serves MCP to nothing else, agents included.
+    env: { ...settings.environment(process.env), REA_WORKBENCH_MCP: "page" },
     stderr: "pipe",
   });
   // REA advertises listChanged; the SDK refetches every page and hands back
@@ -344,24 +340,12 @@ function ensureMcp() {
 }
 
 // ---------------------------------------------------------------------------
-// Agent registration
-//
-// `rea setup` owns registration: client detection, additive config edits,
-// backups and recovery. The bridge only runs it as a short-lived child, one
-// at a time, and never edits an agent's configuration itself.
-
-const SETUP_TIMEOUT_MS = 120_000;
-const CLIENT_ID = /^[a-z][a-z0-9_]{0,40}$/;
-let setupBusy = false;
-
-/** Runs `rea setup` with JSON output; resolves to its parsed report. */
-const runSetup = (args, timeout = SETUP_TIMEOUT_MS) =>
-  runReaJson(["setup", "--format", "json", ...args], timeout);
+// Short-lived rea commands
 
 /**
  * Runs one short-lived rea command whose stdout is a JSON report. A failing
- * exit still resolves when the report parses: setup and doctor report refusals
- * and unhealthy checks that way.
+ * exit still resolves when the report parses: doctor reports unhealthy checks
+ * that way.
  */
 function runReaJson(args, timeout) {
   const command = args[0];
@@ -372,7 +356,7 @@ function runReaJson(args, timeout) {
       {
         timeout,
         maxBuffer: 16 * 1024 * 1024,
-        // Setup registers, and doctor checks, the same settings REA runs with.
+        // Doctor checks the same settings REA runs with.
         env: settings.environment(process.env),
       },
       (error, stdout, stderr) => {
@@ -389,97 +373,6 @@ function runReaJson(args, timeout) {
         resolvePromise(report);
       },
     ).stdin?.end();
-  });
-}
-
-/** Stable digest of what a plan would change, so apply can refuse a moved plan. */
-function planFingerprint(report) {
-  const actions = (report.plannedActions ?? []).map(
-    ({ id, kind, target, operation, detail, backupPath }) => ({
-      id,
-      kind,
-      target,
-      operation,
-      detail,
-      backupPath,
-    }),
-  );
-  return createHash("sha256").update(JSON.stringify(actions)).digest("hex");
-}
-
-function clientArgs(clients) {
-  return clients.flatMap((client) => ["--client", client]);
-}
-
-/** Validates { clients: string[] }; an empty list means every detected agent. */
-function readClients(body) {
-  const clients = body?.clients;
-  if (
-    !Array.isArray(clients) ||
-    clients.length > 40 ||
-    !clients.every(
-      (client) => typeof client === "string" && CLIENT_ID.test(client),
-    )
-  )
-    return undefined;
-  return [...new Set(clients)];
-}
-
-async function exclusiveSetup(response, work) {
-  if (setupBusy)
-    return sendJson(response, 409, {
-      error: "Another setup run is in progress.",
-    });
-  setupBusy = true;
-  try {
-    return await work();
-  } catch (cause) {
-    return sendJson(response, 502, { error: describeError(cause) });
-  } finally {
-    setupBusy = false;
-  }
-}
-
-/** Plans registration without applying it: detection, current state, changes. */
-async function setupPlan(request, response) {
-  const clients = readClients(await readJsonBody(request));
-  if (!clients)
-    return sendJson(response, 400, {
-      error: "Expected { clients: string[] } of client ids.",
-    });
-  return exclusiveSetup(response, async () => {
-    const report = await runSetup([
-      "--dry-run",
-      ...(clients.length === 0 ? ["--all-detected"] : clientArgs(clients)),
-    ]);
-    return sendJson(response, 200, {
-      report,
-      fingerprint: planFingerprint(report),
-    });
-  });
-}
-
-/** Applies the reviewed plan, refusing if a fresh plan no longer matches it. */
-async function setupApply(request, response) {
-  const body = await readJsonBody(request);
-  const clients = readClients(body);
-  if (!clients || clients.length === 0 || typeof body.fingerprint !== "string")
-    return sendJson(response, 400, {
-      error:
-        "Expected { clients: string[] (at least one), fingerprint: string }.",
-    });
-  return exclusiveSetup(response, async () => {
-    const fresh = await runSetup(["--dry-run", ...clientArgs(clients)]);
-    const fingerprint = planFingerprint(fresh);
-    if (fingerprint !== body.fingerprint)
-      return sendJson(response, 409, {
-        error:
-          "The plan changed since you reviewed it. Review the new plan before applying.",
-        report: fresh,
-        fingerprint,
-      });
-    const report = await runSetup(["--yes", ...clientArgs(clients)]);
-    return sendJson(response, 200, { report });
   });
 }
 
@@ -525,38 +418,15 @@ async function doctor(response) {
 // ---------------------------------------------------------------------------
 // Agent terminal (Claude Code, Copilot CLI, agy, Codex, ...)
 
-/** rea setup's registration state for each client it found registered. */
-function registrationStates(report) {
-  return Object.fromEntries(
-    (report.doctor?.identity?.registrations ?? []).map((entry) => [
-      entry.client,
-      entry.state,
-    ]),
-  );
-}
-
-/** One client's registration state, from a read-only setup plan. */
-async function registrationState(client) {
-  if (setupBusy)
-    throw new TerminalError(
-      "Agent setup is running; start the agent when it finishes.",
-    );
-  let report;
-  try {
-    report = await runSetup(["--dry-run", ...clientArgs([client])]);
-  } catch (cause) {
-    throw new TerminalError(
-      `Couldn't check rene's registration (${describeError(cause)}).`,
-    );
-  }
-  return registrationStates(report)[client] ?? "not registered";
-}
-
 const terminal = createTerminal({
   directory: options["agent-dir"],
   // Saved provider paths reach REA through the agent's environment.
-  environment: () => settings.environment(process.env),
-  registration: registrationState,
+  // REA_WORKBENCH_SETTINGS names this bridge's settings file to the session's
+  // rene, which applies it as a hand-run rene does the checkout's own.
+  environment: () => ({
+    ...settings.environment(process.env),
+    REA_WORKBENCH_SETTINGS: options.settings,
+  }),
   // The transcript gets one last read when the agent exits.
   onExit: (session) => void stopFollowing(session),
 });
@@ -580,14 +450,6 @@ const TERMINAL_ROUTES = {
       home: homedir(),
     }),
   "GET /api/terminal/stream": (_request, response) => terminal.stream(response),
-  "GET /api/terminal/registrations": (_request, response) =>
-    exclusiveSetup(response, async () =>
-      sendJson(
-        response,
-        200,
-        registrationStates(await runSetup(["--dry-run", "--all-detected"])),
-      ),
-    ),
   "POST /api/terminal/start": async (request, response) => {
     const body = (await readJsonBody(request)) ?? {};
     return terminalAction(response, async () => {
@@ -688,8 +550,67 @@ function upgradeTerminalSocket(request, socket, head) {
 }
 
 // Readiness and provider paths work while the MCP child is down.
+// ---------------------------------------------------------------------------
+// Agent skill
+//
+// `rene skill` owns the reverse-engineer-anything skill: where each agent
+// reads skills, what is installed and whether it is current, and the atomic
+// install with backups. The bridge runs it as a short-lived child, one
+// install at a time, and never writes an agent's skill folder itself.
+
+const SKILL_TIMEOUT_MS = 60_000;
+const SKILL_FOLDER = /^[a-z][a-z0-9_]{0,40}$/;
+let skillInstalling = false;
+
+async function skillStatus(response) {
+  try {
+    return sendJson(
+      response,
+      200,
+      await runReaJson(["skill", "status"], SKILL_TIMEOUT_MS),
+    );
+  } catch (cause) {
+    return sendJson(response, 502, { error: describeError(cause) });
+  }
+}
+
+/** Installs or updates the skill, adding the folders named in { clients }. */
+async function skillInstall(request, response) {
+  const clients = (await readJsonBody(request))?.clients ?? [];
+  if (
+    !Array.isArray(clients) ||
+    clients.length > 40 ||
+    !clients.every(
+      (client) => typeof client === "string" && SKILL_FOLDER.test(client),
+    )
+  )
+    return sendJson(response, 400, {
+      error: "Expected { clients: string[] } of skill folder ids.",
+    });
+  if (skillInstalling)
+    return sendJson(response, 409, {
+      error: "The skill is already being installed.",
+    });
+  skillInstalling = true;
+  try {
+    const args = clients.flatMap((client) => ["--client", client]);
+    return sendJson(
+      response,
+      200,
+      await runReaJson(["skill", "install", ...args], SKILL_TIMEOUT_MS),
+    );
+  } catch (cause) {
+    return sendJson(response, 502, { error: describeError(cause) });
+  } finally {
+    skillInstalling = false;
+  }
+}
+
 const PROVIDER_ROUTES = {
   "GET /api/doctor": (_request, response) => doctor(response),
+  "GET /api/skill": (_request, response) => skillStatus(response),
+  "POST /api/skill/install": skillInstall,
+
   ...TERMINAL_ROUTES,
   "GET /api/choices": (_request, response) =>
     sendJson(response, 200, describeChoices()),
@@ -1089,8 +1010,6 @@ async function routeApi(request, response, url) {
     return sendJson(response, 200, status());
   }
   // Registration doesn't need the MCP child, so it works while that is down.
-  if (route === "POST /api/setup/plan") return setupPlan(request, response);
-  if (route === "POST /api/setup/apply") return setupApply(request, response);
   if (route === "POST /api/fs/list") return listDirectory(request, response);
   if (route === "POST /api/page-log") return pageLog(request, response);
   if (Object.hasOwn(PROVIDER_ROUTES, route))
@@ -1636,18 +1555,17 @@ async function routeProjects(request, response, url) {
 }
 
 // ---------------------------------------------------------------------------
-// Agent sessions and their relays
+// Agent sessions and their reports
 //
 // Each agent session gets its own reporting token, written to a private file
-// the relay reads. A report is accepted only with a token the bridge issued,
-// and is recorded in that session's project; the page's token isn't needed
-// or given to the agent.
+// `rene call` reads (REA_HISTORY_REPORT). A report is accepted only with a
+// token the bridge issued, and is recorded in that session's project; the
+// page's token isn't needed or given to the agent.
 
 /** token -> { project, session, agent, live: Map<ref, entry> } */
 const relaySessions = new Map();
-const relayScript = join(here, "relay.mjs");
 
-/** Opens the folder's project and prepares the relay an agent session uses. */
+/** Opens the folder's project and prepares the reporting an agent session uses. */
 async function agentSession(cwd, agentId) {
   let project;
   try {
@@ -1676,13 +1594,10 @@ async function agentSession(cwd, agentId) {
   await rename(`${report}.tmp`, report);
   const relay = { project: project.manifest.id, session, live: new Map() };
   relaySessions.set(relayToken, relay);
-  const rea = reaCommand(["mcp"]);
-  const toolkit = agentToolkit(settings.environment(process.env));
   return {
     relay,
     relayToken,
-    toolkit,
-    // The command `rea` runs in the agent's shell with the cli toolkit.
+    // The command `rene` runs in the agent's shell.
     rea: reaCommand([]),
     project: project.manifest.id,
     session,
@@ -1690,15 +1605,10 @@ async function agentSession(cwd, agentId) {
     // folder (startFollowing), which also catches a resumed conversation.
     // Other agents' conversations aren't captured yet.
     conversationId: agentId === "claude" ? randomUUID() : undefined,
-    server: {
-      command: process.execPath,
-      args: [relayScript, "--report", report, "--", rea.command, ...rea.args],
-    },
-    // `rene call` in the agent's shell reports through the same file.
+    // `rene call` in the agent's shell reports through this file.
     report,
     instructions: agentInstructions(
       project.manifest.assessment === "enabled" ? ASSESSMENT_FILE : undefined,
-      toolkit,
     ),
   };
 }

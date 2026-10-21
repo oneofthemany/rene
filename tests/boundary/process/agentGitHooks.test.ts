@@ -98,7 +98,7 @@ describe("topic gate", () => {
       };
       expect(answer.hookSpecificOutput?.permissionDecision).toBe("deny");
       expect(answer.hookSpecificOutput?.permissionDecisionReason).toContain(
-        `mcp__rea__${replacement}`,
+        `rene call ${replacement} '`,
       );
     },
   );
@@ -107,8 +107,7 @@ describe("topic gate", () => {
     ["Read", { file_path: "/a/shot.png" }],
     ["Read", { file_path: "/a/report.PDF" }],
     ["WebFetch", { url: "https://example.invalid" }],
-    ["mcp__rea__read_file", { path: "/a/b.ts" }],
-    ["mcp__rea__run_command", { command: "ls", cwd: "/a" }],
+    ["mcp__other__read_file", { path: "/a/b.ts" }],
   ])("lets %s through the tool rule", (tool, toolInput) => {
     expect(topicGate.builtInToolRefusal(tool, toolInput)).toBeUndefined();
   });
@@ -140,11 +139,11 @@ describe("topic gate", () => {
     expect(context.hookEventName).toBe("UserPromptSubmit");
     // Declare the turn's topic first.
     expect(context.additionalContext).toContain(
-      "Declare this request's topic with the rene record_topic tool",
+      "Declare this request's topic before anything else with `rene call record_topic",
     );
     // Work through rene's tools, not the agent's built-in ones.
     expect(context.additionalContext).toContain(
-      "Work through rene's tools (mcp__rea__*), not your built-in ones",
+      "Work through rene's tools with `rene call <tool> '<json>'` in your shell",
     );
     // Close a limitation instead of working around it, unprompted.
     expect(context.additionalContext).toContain(

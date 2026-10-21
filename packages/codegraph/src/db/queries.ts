@@ -23,6 +23,7 @@ import { parseQuery, boundedEditDistance } from '../search/query-parser';
 import { isGeneratedFile } from '../extraction/generated-detection';
 import { splitIdentifierSegments } from '../search/identifier-segments';
 import { isModuleKey, referenceNameTail, MEMBER_TAIL_SQL, MODULE_PARKED_SQL } from './reference-tail';
+import { TokenIndex, type SearchFields, phraseOf, rankedSearchSql, matchingPhrases, matchingNames } from './token-search';
 
 /**
  * Files that should not be candidates for "dominant file" detection: tests,
@@ -72,9 +73,30 @@ const IS_INTERFACE_MEMBER = (alias: string): string => `EXISTS (
  * itself or as a member read through it (`Order.objects` through `Order`)?
  */
 const THROUGH_NAMES = (column: string): string => `(
-  ${column} IN (SELECT value FROM json_each(?))
-  OR (instr(${column}, '.') > 1 AND substr(${column}, 1, instr(${column}, '.') - 1) IN (SELECT value FROM json_each(?)))
+  ${column} IN (SELECT j.value ->> '$' FROM json_each(?) AS j)
+  OR (instr(${column}, '.') > 1 AND substr(${column}, 1, instr(${column}, '.') - 1) IN (SELECT j.value ->> '$' FROM json_each(?) AS j))
 )`;
+
+/**
+ * A batch's rows with each key (the first column) kept once, at its last row.
+ * SQLite's INSERT OR REPLACE applied a batch row by row, so a key written
+ * twice kept its last row; DuckDB resolves a key that occurs twice in one
+ * statement otherwise, so the batch says which row is meant.
+ */
+/** The search-indexed values of a row as insertNodes binds it. */
+const searchFieldsOfRow = (row: unknown[]): SearchFields => [
+  row[0] as string,
+  row[2] as string,
+  row[3] as string,
+  row[10] as string | null,
+  row[11] as string | null,
+];
+
+function lastRowPerKey(rows: unknown[][]): unknown[][] {
+  const last = new Map<unknown, number>();
+  rows.forEach((row, index) => last.set(row[0], index));
+  return last.size === rows.length ? rows : rows.filter((row, index) => last.get(row[0]) === index);
+}
 
 /**
  * How much of the exact-name bonus a `deprioritize`d path keeps (#982). Damped
@@ -251,6 +273,10 @@ export class QueryBuilder {
   // FTS5 availability flag — detected once at construction time (#1532)
   private _fts5Available: boolean | undefined;
 
+  // A DuckDB index searches its token tables instead of FTS5 (token-search.ts);
+  // the node writes keep them in step, as FTS5's triggers did.
+  private readonly tokens: TokenIndex | undefined;
+
   // Node cache for frequently accessed nodes (LRU-style, max 1000 entries)
   private nodeCache: Map<string, Node> = new Map();
   private readonly maxCacheSize = 1000;
@@ -262,12 +288,15 @@ export class QueryBuilder {
     | { stamp: string; value: { filePath: string; edgeCount: number; nextEdgeCount: number } | null }
     | undefined;
 
+  // Where edge inserts go: `edges`, or a synthesis stage's staging table
+  // (stageEdgeInserts), since DuckDB has no INSTEAD OF trigger to send them.
+  private edgeInsertTable = 'edges';
+  private edgeIdentityTable = 'edges';
+
   // Prepared statements (lazily initialized)
   private stmts: {
     insertNode?: SqliteStatement;
     updateNode?: SqliteStatement;
-    deleteNode?: SqliteStatement;
-    deleteNodesByFile?: SqliteStatement;
     getNodeById?: SqliteStatement;
     getNodesByFile?: SqliteStatement;
     getNodesByKind?: SqliteStatement;
@@ -281,7 +310,6 @@ export class QueryBuilder {
     getUnresolvedInFile?: SqliteStatement;
     insertFile?: SqliteStatement;
     updateFile?: SqliteStatement;
-    deleteFile?: SqliteStatement;
     getFileByPath?: SqliteStatement;
     getAllFiles?: SqliteStatement;
     hasFilesUnder?: SqliteStatement;
@@ -343,7 +371,35 @@ export class QueryBuilder {
    * Run `rows` through a multi-row `INSERT` built as `head + (tuple,)*n`,
    * decomposed greedily into the cached batch sizes. Preserves row order.
    */
-  private runBatched(kind: string, head: string, tuple: string, rows: unknown[][]): void {
+  /**
+   * Inserts edge rows (source, target, kind, metadata, line, col,
+   * provenance), skipping any whose identity is stored already, and keeping
+   * the first of a batch's duplicates: what SQLite's INSERT OR IGNORE did
+   * through its identity index, which DuckDB can't express (it indexes
+   * columns only and treats NULLs as distinct). The identity is checked
+   * against the table inserted into; a synthesis stage's staged inserts
+   * check it against its overlay of base and staged edges instead, as
+   * SQLite's INSTEAD OF trigger did.
+   */
+  private insertEdgeRows(
+    rows: unknown[][],
+    table = this.edgeInsertTable,
+    identity = table === this.edgeInsertTable ? this.edgeIdentityTable : table
+  ): void {
+    this.runBatched(
+      `insertEdges:${table}:${identity}`,
+      `INSERT INTO ${table} (source, target, kind, metadata, line, col, provenance) ` +
+        'SELECT source, target, kind, metadata, line, col, provenance FROM (VALUES ',
+      '(?,?,?,?,?,?,?,?)',
+      rows.map((row, position) => [...row, position]),
+      ') AS v(source, target, kind, metadata, line, col, provenance, position) ' +
+        `WHERE NOT EXISTS (SELECT 1 FROM ${identity} e WHERE e.source = v.source AND e.target = v.target ` +
+        'AND e.kind = v.kind AND COALESCE(e.line, -1) = COALESCE(v.line, -1) AND COALESCE(e.col, -1) = COALESCE(v.col, -1)) ' +
+        'QUALIFY row_number() OVER (PARTITION BY source, target, kind, COALESCE(line, -1), COALESCE(col, -1) ORDER BY position) = 1'
+    );
+  }
+
+  private runBatched(kind: string, head: string, tuple: string, rows: unknown[][], tail = ''): void {
     if (rows.length === 0) return;
     let i = 0;
     for (const size of QueryBuilder.BATCH_SIZES) {
@@ -351,7 +407,7 @@ export class QueryBuilder {
         const key = `${kind}:${size}`;
         let stmt = this.batchStmts.get(key);
         if (!stmt) {
-          stmt = this.db.prepare(head + new Array(size).fill(tuple).join(','));
+          stmt = this.db.prepare(head + new Array(size).fill(tuple).join(',') + tail);
           this.batchStmts.set(key, stmt);
         }
         if (size === 1) {
@@ -371,6 +427,7 @@ export class QueryBuilder {
 
   constructor(db: SqliteDatabase) {
     this.db = db;
+    this.tokens = TokenIndex.available(db) ? new TokenIndex(db) : undefined;
     // Detect FTS5 availability once (#1532)
     try {
       db.prepare("SELECT * FROM nodes_fts LIMIT 0").get();
@@ -378,6 +435,32 @@ export class QueryBuilder {
     } catch {
       this._fts5Available = false;
     }
+  }
+
+  /**
+   * SQL for a node's insertion order, `alias` naming its `nodes` row: SQLite's
+   * rowid, or on DuckDB the order its search row keeps (token-search.ts),
+   * which an insert or replace renews as a new rowid did. Queries SQLite
+   * answered in rowid order, from a scan or a seek on one index key, name it
+   * so that order is stated and DuckDB answers them the same way.
+   */
+  private insertionOrder(alias = 'nodes'): string {
+    return this.tokens ? `(SELECT s.seq FROM node_search s WHERE s.node_id = ${alias}.id)` : `${alias}.rowid`;
+  }
+
+  /**
+   * Sends this builder's edge inserts to `table` (a synthesis stage's
+   * staging table) instead of `edges`, which the stage overlays with a view.
+   */
+  stageEdgeInserts(table: string): void {
+    this.edgeInsertTable = table;
+    // The stage's `edges` is its overlay view: staged inserts are checked there.
+    this.edgeIdentityTable = 'edges';
+  }
+
+  /** Inserts edge rows into `table`, as insertEdges does into `edges`. */
+  insertEdgeRowsInto(table: string, rows: unknown[][]): void {
+    this.insertEdgeRows(rows, table);
   }
 
   /**
@@ -483,7 +566,9 @@ export class QueryBuilder {
     // deleteNode below).
     this.nodeCache.delete(node.id);
 
-    this.stmts.insertNode.run({
+    const insert = this.stmts.insertNode;
+    this.db.transaction(() => {
+    insert.run({
       id: node.id,
       kind: node.kind,
       name: node.name,
@@ -506,6 +591,10 @@ export class QueryBuilder {
       returnType: node.returnType ?? null,
       updatedAt: node.updatedAt ?? Date.now(),
     });
+    this.tokens?.inserted([
+      [node.id, node.name, node.qualifiedName ?? node.name, node.docstring ?? null, node.signature ?? null],
+    ]);
+    })();
 
     // Segment vocabulary rides the same write path (and transaction) so it can
     // never drift ahead of the nodes it describes. Deletes intentionally leave
@@ -587,6 +676,7 @@ export class QueryBuilder {
         ]);
         if (this.isSegmentableKind(node.kind)) this.collectNameSegmentRows(node.name, segmentRows);
       }
+      const written = lastRowPerKey(rows);
       this.runBatched(
         'insertNodes',
         `INSERT OR REPLACE INTO nodes (
@@ -597,8 +687,9 @@ export class QueryBuilder {
           decorators, type_parameters, return_type, updated_at
         ) VALUES `,
         '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-        rows
+        written
       );
+      this.tokens?.inserted(written.map(searchFieldsOfRow));
       this.runBatched(
         'insertNameSegments',
         'INSERT OR IGNORE INTO name_segment_vocab (segment, name) VALUES ',
@@ -649,12 +740,7 @@ export class QueryBuilder {
             edge.provenance ?? null,
           ]);
         }
-        this.runBatched(
-          'insertEdges',
-          'INSERT OR IGNORE INTO edges (source, target, kind, metadata, line, col, provenance) VALUES ',
-          '(?,?,?,?,?,?,?)',
-          rows
-        );
+        this.insertEdgeRows(rows);
       }
       if (bundle.refs.length > 0) this.insertUnresolvedRefsBatch(bundle.refs);
       this.upsertFile(bundle.file);
@@ -712,7 +798,9 @@ export class QueryBuilder {
       return;
     }
 
-    this.stmts.updateNode.run({
+    const update = this.stmts.updateNode;
+    this.db.transaction(() => {
+    const { changes } = update.run({
       id: node.id,
       kind: node.kind,
       name: node.name,
@@ -735,6 +823,12 @@ export class QueryBuilder {
       returnType: node.returnType ?? null,
       updatedAt: node.updatedAt ?? Date.now(),
     });
+    if (changes > 0) {
+      this.tokens?.updated([
+        node.id, node.name, node.qualifiedName ?? node.name, node.docstring ?? null, node.signature ?? null,
+      ]);
+    }
+    })();
 
     // updateNode is a second real write path to `nodes` — framework
     // post-extract passes rewrite names through it (NestJS route prefixing),
@@ -751,28 +845,42 @@ export class QueryBuilder {
    * Delete a node by ID
    */
   deleteNode(id: string): void {
-    if (!this.stmts.deleteNode) {
-      this.stmts.deleteNode = this.db.prepare('DELETE FROM nodes WHERE id = ?');
-    }
     // Invalidate cache
     this.nodeCache.delete(id);
-    this.stmts.deleteNode.run(id);
+    // A node's edges (either end) and the references made from it go with
+    // it, as SQLite's ON DELETE CASCADE removed them.
+    this.db.transaction(() => {
+      this.db.prepare('DELETE FROM edges WHERE source = ? OR target = ?').run(id, id);
+      this.db.prepare('DELETE FROM unresolved_refs WHERE from_node_id = ?').run(id);
+      this.tokens?.deleting('id = ?', [id]);
+      this.db.prepare('DELETE FROM nodes WHERE id = ?').run(id);
+    })();
   }
 
   /**
    * Delete all nodes for a file
    */
   deleteNodesByFile(filePath: string): void {
-    if (!this.stmts.deleteNodesByFile) {
-      this.stmts.deleteNodesByFile = this.db.prepare('DELETE FROM nodes WHERE file_path = ?');
-    }
     // Invalidate cache for nodes in this file
     for (const [id, node] of this.nodeCache) {
       if (node.filePath === filePath) {
         this.nodeCache.delete(id);
       }
     }
-    this.stmts.deleteNodesByFile.run(filePath);
+    // The file's nodes' edges (either end) and references go with them, as
+    // SQLite's ON DELETE CASCADE removed them.
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          'DELETE FROM edges WHERE source IN (SELECT id FROM nodes WHERE file_path = ?) OR target IN (SELECT id FROM nodes WHERE file_path = ?)'
+        )
+        .run(filePath, filePath);
+      this.db
+        .prepare('DELETE FROM unresolved_refs WHERE from_node_id IN (SELECT id FROM nodes WHERE file_path = ?)')
+        .run(filePath);
+      this.tokens?.deleting('file_path = ?', [filePath]);
+      this.db.prepare('DELETE FROM nodes WHERE file_path = ?').run(filePath);
+    })();
   }
 
   // ===========================================================================
@@ -846,7 +954,7 @@ export class QueryBuilder {
          WHERE segment IN (${placeholders})
          GROUP BY name
          HAVING matches >= ?
-         ORDER BY matches DESC, length(name) ASC
+         ORDER BY matches DESC, length(name) ASC, name
          LIMIT ?`,
       )
       .all(
@@ -1060,6 +1168,7 @@ export class QueryBuilder {
     if (!this.stmts.getNodeIdentitiesByFile) {
       this.stmts.getNodeIdentitiesByFile = this.db.prepare(
         'SELECT id, kind, name, qualified_name, signature, start_line, start_column FROM nodes WHERE file_path = ?'
+          + ` ORDER BY start_line, ${this.insertionOrder()}`
       );
     }
     const rows = this.stmts.getNodeIdentitiesByFile.all(filePath) as Array<
@@ -1087,7 +1196,7 @@ export class QueryBuilder {
       const chunk = unique.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
       const placeholders = chunk.map(() => '?').join(',');
       const rows = this.db
-        .prepare(`SELECT * FROM nodes WHERE file_path IN (${placeholders})`)
+        .prepare(`SELECT * FROM nodes WHERE file_path IN (${placeholders}) ORDER BY file_path, start_line, ${this.insertionOrder()}`)
         .all(...chunk) as NodeRow[];
       for (const row of rows) out.push(rowToNode(row));
     }
@@ -1169,7 +1278,7 @@ export class QueryBuilder {
         JOIN nodes m ON e.target = m.id
         WHERE n.file_path = m.file_path
         GROUP BY n.file_path
-        ORDER BY edge_count DESC
+        ORDER BY edge_count DESC, n.file_path
         LIMIT 20
       `);
     }
@@ -1216,7 +1325,9 @@ export class QueryBuilder {
       FROM edges e
       JOIN nodes m ON e.target = m.id
       WHERE e.kind = 'calls'
-      GROUP BY m.id
+      -- m.id is the key: its other columns have one value per group, which
+      -- DuckDB needs named (SQLite inferred it).
+      GROUP BY m.id, m.name, m.kind, m.file_path, m.start_line
       ORDER BY callers DESC, m.file_path, m.start_line
       LIMIT ?
     `).all(limit * 4) as Array<{
@@ -1258,7 +1369,7 @@ export class QueryBuilder {
         FROM nodes
         WHERE kind = 'route'
         GROUP BY file_path
-        ORDER BY cnt DESC
+        ORDER BY cnt DESC, file_path
         LIMIT 20
       `);
     }
@@ -1418,7 +1529,7 @@ export class QueryBuilder {
    * Get all nodes in the database
    */
   getAllNodes(): Node[] {
-    const rows = this.db.prepare('SELECT * FROM nodes').all() as NodeRow[];
+    const rows = this.db.prepare(`SELECT * FROM nodes ORDER BY ${this.insertionOrder()}`).all() as NodeRow[];
     return rows.map(rowToNode);
   }
 
@@ -1539,7 +1650,7 @@ export class QueryBuilder {
   getNodesByLowerName(name: string): Node[] {
     if (!this.stmts.getNodesByLowerName) {
       this.stmts.getNodesByLowerName = this.db.prepare(
-        'SELECT * FROM nodes WHERE lower(name) = lower(?)'
+        `SELECT * FROM nodes WHERE lower(name) = lower(?) ORDER BY ${this.insertionOrder()}`
       );
     }
     const rows = this.stmts.getNodesByLowerName.all(name) as NodeRow[];
@@ -1628,7 +1739,7 @@ export class QueryBuilder {
 
     // First try FTS5 with prefix matching (skip if FTS5 not available, #1532)
     let results = text
-      ? (this._fts5Available !== false ? this.searchNodesFTS(text, { kinds, languages, limit, offset }) : [])
+      ? (this.tokens || this._fts5Available !== false ? this.searchNodesFTS(text, { kinds, languages, limit, offset }) : [])
       // Over-fetch by 5× when running filter-only (no text). The
       // post-scoring path: + name: filters can be very selective, so
       // a smaller multiplier risks returning fewer than `limit`
@@ -1682,7 +1793,7 @@ export class QueryBuilder {
           sql += ` AND language IN (${languages.map(() => '?').join(',')})`;
           params.push(...languages);
         }
-        sql += ' LIMIT 20';
+        sql += ` ORDER BY ${this.insertionOrder()} LIMIT 20`;
         const rows = this.db.prepare(sql).all(...params) as NodeRow[];
         for (const row of rows) {
           if (!existingIds.has(row.id)) {
@@ -1821,7 +1932,7 @@ export class QueryBuilder {
         sql += ` AND language IN (${languages.map(() => '?').join(',')})`;
         params.push(...languages);
       }
-      sql += ' LIMIT 5';
+      sql += ` ORDER BY ${this.insertionOrder()} LIMIT 5`;
       const rows = this.db.prepare(sql).all(...params) as NodeRow[];
       for (const row of rows) {
         if (seen.has(row.id)) continue;
@@ -1843,6 +1954,33 @@ export class QueryBuilder {
     const checked = words.filter(w => w.length <= 64).slice(0, 16);
     const limited = checked.length !== words.length;
     if (checked.length === 0) return { matched: [], unmatched: [], candidates: [], limited };
+
+    if (this.tokens) {
+      // The FTS5 queries below on the token index: each word is the phrase
+      // "word"*, matched in name, qualified_name, signature and docstring
+      // (columns 1-4) for coverage and in name (column 1) for candidates.
+      // The vocab is keyed (segment, name), the order SQLite read it in.
+      const phrases = checked.map(phraseOf);
+      const inText = matchingPhrases(this.db, phrases, [1, 2, 3, 4]);
+      const vocabFilter = `v.segment IN (${checked.map(() => '?').join(', ')})
+        AND EXISTS (SELECT 1 FROM nodes n WHERE n.name = v.name AND n.kind NOT IN ('file', 'import'))`;
+      const inVocab = new Set(
+        (this.db.prepare(`SELECT DISTINCT v.segment FROM name_segment_vocab v WHERE ${vocabFilter}`).all(...checked) as Array<{
+          segment: string;
+        }>).map(r => r.segment)
+      );
+      const vocabNames = this.db
+        .prepare(`SELECT v.name FROM name_segment_vocab v WHERE ${vocabFilter} ORDER BY v.segment, v.name LIMIT 12`)
+        .all(...checked) as Array<{ name: string }>;
+      const names = [...vocabNames.map(r => r.name), ...matchingNames(this.db, phrases, [1], 12)];
+      const matched = (word: string, i: number) => inText.has(i) || inVocab.has(word);
+      return {
+        matched: checked.filter(matched),
+        unmatched: checked.filter((word, i) => !matched(word, i)),
+        candidates: [...new Set(names)].slice(0, 12),
+        limited,
+      };
+    }
 
     // EXISTS uses FTS postings and the segment primary key, never source scans.
     // Vocab rows can outlive deleted definitions, so verify them against nodes.
@@ -1893,19 +2031,22 @@ export class QueryBuilder {
     // so treat it as whitespace before the strip step. Otherwise queries
     // like `stage_apply::run` collapse to `stage_applyrun` (the colons
     // are stripped without splitting) and find nothing. See #173.
-    const ftsQuery = query
+    const terms = query
       .replace(/::/g, ' ') // Rust/C++/Ruby qualifier separator
       .replace(/['"*():^]/g, '') // Remove FTS5 special chars
       .split(/\s+/)
       .filter(term => term.length > 0)
       // Strip FTS5 boolean operators to prevent query manipulation
-      .filter(term => !/^(AND|OR|NOT|NEAR)$/i.test(term))
+      .filter(term => !/^(AND|OR|NOT|NEAR)$/i.test(term));
+    const ftsQuery = terms
       .map(term => `"${term}"*`) // Prefix match each term
       .join(' OR ');
 
     if (!ftsQuery) {
       return [];
     }
+
+    if (this.tokens) return this.searchNodeTokens(terms, options);
 
     // BM25 column weights: id=0, name=20, qualified_name=5, docstring=1, signature=2
     // Heavy name weight ensures exact/prefix name matches rank above incidental
@@ -1946,6 +2087,30 @@ export class QueryBuilder {
       // FTS query failed, return empty
       return [];
     }
+  }
+
+  /**
+   * searchNodesFTS on a DuckDB index: each term is FTS5's prefix phrase
+   * `"term"*`, OR-ed and ranked with the same bm25() (token-search.ts).
+   */
+  private searchNodeTokens(terms: string[], options: SearchOptions): SearchResult[] {
+    const { kinds, languages, limit = 100, offset = 0 } = options;
+    let filter = '';
+    const filterParams: unknown[] = [];
+    if (kinds && kinds.length > 0) {
+      filter += ` AND nodes.kind IN (${kinds.map(() => '?').join(',')})`;
+      filterParams.push(...kinds);
+    }
+    if (languages && languages.length > 0) {
+      filter += ` AND nodes.language IN (${languages.map(() => '?').join(',')})`;
+      filterParams.push(...languages);
+    }
+    const ranked = rankedSearchSql(terms.map(phraseOf), { sql: filter, params: filterParams });
+    if (!ranked) return [];
+    const rows = this.db
+      .prepare(`${ranked.sql} LIMIT ? OFFSET ?`)
+      .all(...ranked.params, Math.max(limit * 5, 100), offset) as (NodeRow & { score: number })[];
+    return rows.map((row) => ({ node: rowToNode(row), score: Math.abs(row.score) }));
   }
 
   /**
@@ -1997,7 +2162,9 @@ export class QueryBuilder {
       params.push(...languages);
     }
 
-    sql += ' ORDER BY score DESC, length(name) ASC LIMIT ? OFFSET ?';
+    // Ties in the order SQLite read the rows: its kind index when kinds
+    // filter, else the table.
+    sql += ` ORDER BY score DESC, length(name) ASC, ${kinds && kinds.length > 0 ? 'kind, file_path, start_line, id' : this.insertionOrder()} LIMIT ? OFFSET ?`;
     params.push(limit, offset);
 
     const rows = this.db.prepare(sql).all(...params) as (NodeRow & { score: number })[];
@@ -2037,13 +2204,14 @@ export class QueryBuilder {
     // the corpus and never reach either LIMIT.
     const nameToFiles = new Map<string, Set<string>>();
     for (const name of names) {
-      let sql = 'SELECT DISTINCT file_path FROM nodes WHERE lower(name) = lower(?)';
+      // Each file once, in the order its first such node was inserted.
+      let sql = 'SELECT file_path FROM nodes WHERE lower(name) = lower(?)';
       const params: (string | number)[] = [name];
       if (kinds && kinds.length > 0) {
         sql += ` AND kind IN (${kinds.map(() => '?').join(',')})`;
         params.push(...kinds);
       }
-      sql += ' LIMIT 100';
+      sql += ` GROUP BY file_path ORDER BY min(${this.insertionOrder()}) LIMIT 100`;
       const rows = this.db.prepare(sql).all(...params) as { file_path: string }[];
       nameToFiles.set(name.toLowerCase(), new Set(rows.map(r => r.file_path)));
     }
@@ -2080,7 +2248,7 @@ export class QueryBuilder {
       }
 
       // Fetch enough to find co-located results among common names
-      sql += ' LIMIT ?';
+      sql += ` ORDER BY ${this.insertionOrder()} LIMIT ?`;
       params.push(Math.max(perNameLimit * 3, 50));
 
       const rows = this.db.prepare(sql).all(...params) as (NodeRow & { score: number })[];
@@ -2142,7 +2310,9 @@ export class QueryBuilder {
       params.push(...languages);
     }
 
-    sql += ' ORDER BY length(name) ASC LIMIT ?';
+    // Ties in the order SQLite read the rows: its kind index when kinds
+    // filter, else the table.
+    sql += ` ORDER BY length(name) ASC, ${kinds && kinds.length > 0 ? 'kind, file_path, start_line, id' : this.insertionOrder()} LIMIT ?`;
     params.push(limit);
 
     const rows = this.db.prepare(sql).all(...params) as (NodeRow & { score: number })[];
@@ -2158,15 +2328,15 @@ export class QueryBuilder {
 
   /** Must run before file replacement/deletion cascades the endpoint edges. */
   hasSynthesizedEdgesTouchingFile(filePath: string): boolean {
-    const owned = "CASE WHEN json_valid(e.metadata) THEN json_extract(e.metadata, '$.synthesizedBy') END IS NOT NULL";
+    const owned = "CASE WHEN json_valid(e.metadata) THEN json_extract_string(e.metadata, '$.synthesizedBy') END IS NOT NULL";
     for (const endpoint of ['source', 'target']) {
       if (this.db.prepare(`SELECT 1 FROM nodes n JOIN edges e ON e.${endpoint} = n.id
         WHERE n.file_path = ? AND ${owned} LIMIT 1`).get(filePath)) return true;
     }
     // Wiring often lives in a third file, with neither endpoint in it.
     return !!this.db.prepare(`SELECT 1 FROM edges e WHERE ${owned}
-      AND CASE WHEN json_valid(e.metadata) THEN json_extract(e.metadata, '$.registeredAt') END >= ?
-      AND CASE WHEN json_valid(e.metadata) THEN json_extract(e.metadata, '$.registeredAt') END < ? LIMIT 1`
+      AND CASE WHEN json_valid(e.metadata) THEN json_extract_string(e.metadata, '$.registeredAt') END >= ?
+      AND CASE WHEN json_valid(e.metadata) THEN json_extract_string(e.metadata, '$.registeredAt') END < ? LIMIT 1`
     ).get(`${filePath}:`, `${filePath};`);
   }
 
@@ -2186,22 +2356,15 @@ export class QueryBuilder {
    * Insert a new edge
    */
   insertEdge(edge: Edge): void {
-    if (!this.stmts.insertEdge) {
-      this.stmts.insertEdge = this.db.prepare(`
-        INSERT OR IGNORE INTO edges (source, target, kind, metadata, line, col, provenance)
-        VALUES (@source, @target, @kind, @metadata, @line, @col, @provenance)
-      `);
-    }
-
-    this.stmts.insertEdge.run({
-      source: edge.source,
-      target: edge.target,
-      kind: edge.kind,
-      metadata: edge.metadata ? JSON.stringify(edge.metadata) : null,
-      line: edge.line ?? null,
-      col: edge.column ?? null,
-      provenance: edge.provenance ?? null,
-    });
+    this.insertEdgeRows([[
+      edge.source,
+      edge.target,
+      edge.kind,
+      edge.metadata ? JSON.stringify(edge.metadata) : null,
+      edge.line ?? null,
+      edge.column ?? null,
+      edge.provenance ?? null,
+    ]]);
   }
 
   /**
@@ -2233,12 +2396,7 @@ export class QueryBuilder {
           edge.provenance ?? null,
         ]);
       }
-      this.runBatched(
-        'insertEdges',
-        'INSERT OR IGNORE INTO edges (source, target, kind, metadata, line, col, provenance) VALUES ',
-        '(?,?,?,?,?,?,?)',
-        rows
-      );
+      this.insertEdgeRows(rows);
     })();
   }
 
@@ -2323,6 +2481,8 @@ export class QueryBuilder {
         sql += ` AND kind IN (${kinds.map(() => '?').join(',')})`;
         params.push(...kinds);
       }
+      // idx_edges_source_kind's order, as SQLite read it.
+      sql += ' ORDER BY source, kind, id';
       const rows = this.db.prepare(sql).all(...params) as EdgeRow[];
       for (const row of rows) out.push(rowToEdge(row));
     }
@@ -2377,6 +2537,8 @@ export class QueryBuilder {
         sql += ` AND kind IN (${kinds.map(() => '?').join(',')})`;
         params.push(...kinds);
       }
+      // idx_edges_target_kind's order, as SQLite read it.
+      sql += ' ORDER BY target, kind, id';
       const rows = this.db.prepare(sql).all(...params) as EdgeRow[];
       for (const row of rows) out.push(rowToEdge(row));
     }
@@ -2524,7 +2686,8 @@ export class QueryBuilder {
         .prepare(
           `SELECT DISTINCT from_node_id AS id, reference_name AS name FROM unresolved_refs
             WHERE from_node_id IN (${placeholders})
-              AND reference_kind IN (${kindPlaceholders})`
+              AND reference_kind IN (${kindPlaceholders})
+            ORDER BY id, name`
         )
         .all(...chunk, ...kinds) as Array<{ id: string; name: string }>;
       for (const row of rows) {
@@ -2553,9 +2716,12 @@ export class QueryBuilder {
       const placeholders = chunk.map(() => '?').join(',');
       const rows = this.db
         .prepare(
-          `SELECT DISTINCT reference_name AS name, from_node_id AS id FROM unresolved_refs
+          // Each pair once, in idx_unresolved_name's order as SQLite read it.
+          `SELECT reference_name AS name, from_node_id AS id FROM unresolved_refs
             WHERE reference_name IN (${placeholders})
-              AND reference_kind IN (${kindPlaceholders})`
+              AND reference_kind IN (${kindPlaceholders})
+            GROUP BY reference_name, from_node_id
+            ORDER BY reference_name, min(id)`
         )
         .all(...chunk, ...kinds) as Array<{ name: string; id: string }>;
       for (const row of rows) {
@@ -2671,7 +2837,9 @@ export class QueryBuilder {
            FROM edges
           WHERE kind != 'contains' AND source != target
        GROUP BY target
-       ORDER BY dependents DESC
+       -- Ties by id: equal counts would otherwise come back in any order, and
+       -- decide which nodes make the LIMIT.
+       ORDER BY dependents DESC, nodeId
           LIMIT ?`
       )
       .all(limit) as Array<{ nodeId: string; dependents: number }>;
@@ -2778,9 +2946,10 @@ export class QueryBuilder {
            JOIN nodes tn ON tn.id = e.target
            JOIN nodes sn ON sn.id = e.source
           WHERE e.kind != 'contains'
-            AND tn.file_path IN (SELECT value FROM json_each(?))
+            AND tn.file_path IN (SELECT j.value ->> '$' FROM json_each(?) AS j)
             AND sn.file_path <> tn.file_path
-       GROUP BY tn.file_path`
+       GROUP BY tn.file_path
+       ORDER BY tn.file_path`
       )
       .all(JSON.stringify(filePaths)) as Array<{ filePath: string; dependents: number }>;
   }
@@ -2806,10 +2975,11 @@ export class QueryBuilder {
            FROM nodes sn
            JOIN edges e ON e.source = sn.id
            JOIN nodes tn ON tn.id = e.target
-          WHERE sn.file_path IN (SELECT value FROM json_each(?))
+          WHERE sn.file_path IN (SELECT j.value ->> '$' FROM json_each(?) AS j)
             AND e.kind != 'contains'
             AND tn.file_path <> sn.file_path
-       GROUP BY sn.file_path`
+       GROUP BY sn.file_path
+       ORDER BY sn.file_path`
       )
       .all(JSON.stringify(filePaths)) as Array<{
       filePath: string;
@@ -2831,7 +3001,8 @@ export class QueryBuilder {
       .prepare(
         `SELECT * FROM nodes
           WHERE kind = 'file'
-            AND file_path IN (SELECT value FROM json_each(?))`
+            AND file_path IN (SELECT j.value ->> '$' FROM json_each(?) AS j)
+          ORDER BY file_path, start_line, id`
       )
       .all(JSON.stringify(filePaths)) as NodeRow[];
     return rows.map(rowToNode);
@@ -2898,10 +3069,10 @@ export class QueryBuilder {
   } {
     if (assignments.length === 0 || options.kinds.length === 0) return { links: [], pairs: [] };
 
-    const CONFIDENCE = `COALESCE(json_extract(e.metadata, '$.confidence'), 1)`;
-    const DECLARED = `(json_extract(e.metadata, '$.resolvedBy') IN ('import', 'qualified-name')
+    const CONFIDENCE = `COALESCE(TRY_CAST(json_extract_string(e.metadata, '$.confidence') AS DOUBLE), 1)`;
+    const DECLARED = `(json_extract_string(e.metadata, '$.resolvedBy') IN ('import', 'qualified-name')
                        OR e.kind IN ('extends', 'implements')
-                       OR (json_extract(e.metadata, '$.resolvedBy') = 'instance-method'
+                       OR (json_extract_string(e.metadata, '$.resolvedBy') = 'instance-method'
                            AND ${CONFIDENCE} >= 0.9))`;
 
     this.db.exec('DROP TABLE IF EXISTS temp.cg_module_map');
@@ -2938,7 +3109,7 @@ export class QueryBuilder {
              JOIN nodes tn ON tn.id = e.target
              JOIN cg_module_map ms ON ms.path = sn.file_path
              JOIN cg_module_map mt ON mt.path = tn.file_path
-            WHERE e.kind IN (SELECT value FROM json_each(?))
+            WHERE e.kind IN (SELECT j.value ->> '$' FROM json_each(?) AS j)
               AND ms.mod <> mt.mod
          GROUP BY ms.mod, mt.mod, e.kind, sn.name, tn.name`
         )
@@ -2981,13 +3152,16 @@ export class QueryBuilder {
   getCrossFileDependencyPairs(minConfidence: number): Array<{ source: string; target: string }> {
     return this.db
       .prepare(
-        `SELECT DISTINCT sn.file_path AS source, tn.file_path AS target
+        // Each pair once, in the order of its first edge (SQLite's scan order).
+        `SELECT sn.file_path AS source, tn.file_path AS target
            FROM edges e
            JOIN nodes sn ON sn.id = e.source
            JOIN nodes tn ON tn.id = e.target
           WHERE e.kind <> 'contains'
             AND sn.file_path <> tn.file_path
-            AND COALESCE(json_extract(e.metadata, '$.confidence'), 1) >= ?`
+            AND COALESCE(TRY_CAST(json_extract_string(e.metadata, '$.confidence') AS DOUBLE), 1) >= ?
+          GROUP BY sn.file_path, tn.file_path
+          ORDER BY min(e.id)`
       )
       .all(minConfidence) as Array<{ source: string; target: string }>;
   }
@@ -3038,7 +3212,8 @@ export class QueryBuilder {
   getUnresolvedReferencesFrom(fromNodeId: string): UnresolvedReference[] {
     if (!this.stmts.getUnresolvedFromNode) {
       this.stmts.getUnresolvedFromNode = this.db.prepare(
-        'SELECT * FROM unresolved_refs WHERE from_node_id = ?'
+        // idx_unresolved_from_name's order, as SQLite read it.
+        'SELECT * FROM unresolved_refs WHERE from_node_id = ? ORDER BY reference_name, id'
       );
     }
     const rows = this.stmts.getUnresolvedFromNode.all(fromNodeId) as UnresolvedRefRow[];
@@ -3063,13 +3238,15 @@ export class QueryBuilder {
     if (nodeIds.length === 0) return [];
 
     const idsJson = JSON.stringify(nodeIds);
-    let sql = `SELECT * FROM edges WHERE source IN (SELECT value FROM json_each(?)) AND target IN (SELECT value FROM json_each(?))`;
+    let sql = `SELECT * FROM edges WHERE source IN (SELECT j.value ->> '$' FROM json_each(?) AS j) AND target IN (SELECT j.value ->> '$' FROM json_each(?) AS j)`;
     const params: string[] = [idsJson, idsJson];
 
     if (kinds && kinds.length > 0) {
       sql += ` AND kind IN (${kinds.map(() => '?').join(',')})`;
       params.push(...kinds);
     }
+    // idx_edges_target_kind's order, as SQLite read it.
+    sql += ' ORDER BY target, kind, id';
 
     const rows = this.db.prepare(sql).all(...params) as EdgeRow[];
     return rows.map(rowToEdge);
@@ -3098,7 +3275,8 @@ export class QueryBuilder {
       JOIN nodes src ON src.id = e.source
       WHERE tgt.file_path = ?
         AND e.kind != 'contains'
-        AND src.file_path != ?`;
+        AND src.file_path != ?
+      ORDER BY fp`;
     const rows = this.db.prepare(sql).all(filePath, filePath) as Array<{ fp: string }>;
     return rows.map((r) => r.fp);
   }
@@ -3116,7 +3294,8 @@ export class QueryBuilder {
       JOIN nodes tgt ON tgt.id = e.target
       WHERE src.file_path = ?
         AND e.kind != 'contains'
-        AND tgt.file_path != ?`;
+        AND tgt.file_path != ?
+      ORDER BY fp`;
     const rows = this.db.prepare(sql).all(filePath, filePath) as Array<{ fp: string }>;
     return rows.map((r) => r.fp);
   }
@@ -3142,7 +3321,8 @@ export class QueryBuilder {
       JOIN nodes src ON src.id = e.source
       WHERE tgt.file_path = ?
         AND e.kind != 'contains'
-        AND src.file_path != ?`;
+        AND src.file_path != ?
+      ORDER BY tgt.start_line, ${this.insertionOrder('tgt')}, e.kind, e.id`;
     const rows = this.db.prepare(sql).all(filePath, filePath) as Array<
       EdgeRow & { target_name: string; target_kind: NodeKind; source_file_path: string; source_language: Language }
     >;
@@ -3169,14 +3349,16 @@ export class QueryBuilder {
       .prepare(
         `SELECT * FROM (
            SELECT e.*, src.file_path AS source_file_path, src.language AS source_language, tgt.file_path AS target_file_path,
-                  CASE WHEN json_valid(e.metadata) THEN json_extract(e.metadata, '$.refName') END AS ref_name
+                  CASE WHEN json_valid(e.metadata) THEN json_extract_string(e.metadata, '$.refName') END AS ref_name,
+                  src.start_line AS source_line, ${this.insertionOrder('src')} AS source_order
              FROM nodes src
              JOIN edges e ON e.source = src.id
              JOIN nodes tgt ON tgt.id = e.target
             WHERE src.file_path = ?
               AND e.kind != 'contains'
               AND (e.provenance IS NULL OR e.provenance != 'heuristic')
-         ) WHERE ${THROUGH_NAMES('ref_name')}`
+         ) WHERE ${THROUGH_NAMES('ref_name')}
+         ORDER BY source_line, source_order, kind, id`
       )
       .all(filePath, JSON.stringify(names), JSON.stringify(names)) as Array<
         EdgeRow & { source_file_path: string; source_language: Language; target_file_path: string }
@@ -3199,8 +3381,9 @@ export class QueryBuilder {
       .prepare(
         `SELECT id FROM unresolved_refs
           WHERE file_path = ? AND status = 'failed'
-            AND ((reference_kind = 'imports' AND reference_name IN (SELECT value FROM json_each(?)))
-                 OR ${THROUGH_NAMES('reference_name')})`
+            AND ((reference_kind = 'imports' AND reference_name IN (SELECT j.value ->> '$' FROM json_each(?) AS j))
+                 OR ${THROUGH_NAMES('reference_name')})
+          ORDER BY id`
       )
       .all(filePath, JSON.stringify(modules), JSON.stringify(names), JSON.stringify(names)) as Array<{ id: number }>)
       .map((row) => row.id);
@@ -3210,14 +3393,19 @@ export class QueryBuilder {
   getImportTargetsFromFile(filePath: string): string[] {
     return (this.db
       .prepare(
-        `SELECT DISTINCT e.target AS target
-           FROM nodes src
-           JOIN edges e ON e.source = src.id
-           JOIN nodes tgt ON tgt.id = e.target
-          WHERE src.file_path = ?
-            AND e.kind = 'imports'
-            AND (e.provenance IS NULL OR e.provenance != 'heuristic')
-            AND tgt.file_path != ?`
+        // Each target once, in the order of its first edge as SQLite read them
+        // (the file's nodes by line, then idx_edges_source_kind).
+        `SELECT target FROM (
+           SELECT e.target AS target,
+                  row_number() OVER (ORDER BY src.start_line, ${this.insertionOrder('src')}, e.kind, e.id) AS r
+             FROM nodes src
+             JOIN edges e ON e.source = src.id
+             JOIN nodes tgt ON tgt.id = e.target
+            WHERE src.file_path = ?
+              AND e.kind = 'imports'
+              AND (e.provenance IS NULL OR e.provenance != 'heuristic')
+              AND tgt.file_path != ?
+         ) GROUP BY target ORDER BY min(r)`
       )
       .all(filePath, filePath) as Array<{ target: string }>)
       .map((row) => row.target);
@@ -3235,10 +3423,11 @@ export class QueryBuilder {
     return (this.db
       .prepare(
         `SELECT src.file_path AS file_path, src.language AS language,
-                CASE WHEN json_valid(e.metadata) THEN json_extract(e.metadata, '$.refName') END AS ref_name
+                CASE WHEN json_valid(e.metadata) THEN json_extract_string(e.metadata, '$.refName') END AS ref_name
            FROM edges e
            JOIN nodes src ON src.id = e.source
-          WHERE e.target = ? AND e.kind = 'imports' AND src.file_path != ?`
+          WHERE e.target = ? AND e.kind = 'imports' AND src.file_path != ?
+          ORDER BY e.id`
       )
       .all(targetId, exceptFile) as Array<{ file_path: string; language: Language; ref_name: unknown }>)
       .map((row) => ({
@@ -3268,7 +3457,8 @@ export class QueryBuilder {
            JOIN edges e ON e.target = tgt.id AND e.kind = 'imports'
            JOIN nodes src ON src.id = e.source
           WHERE tgt.kind = 'file'
-            AND ((tgt.file_path >= ? AND tgt.file_path < ?) OR (tgt.file_path >= ? AND tgt.file_path < ?) OR tgt.file_path = ?)`
+            AND ((tgt.file_path >= ? AND tgt.file_path < ?) OR (tgt.file_path >= ? AND tgt.file_path < ?) OR tgt.file_path = ?)
+          ORDER BY tgt.file_path, tgt.start_line, tgt.id, e.id`
       )
       .all(`${base}.`, `${base}/`, `${base}/index.`, `${base}/index/`, `${base}/__init__.py`) as Array<
         EdgeRow & { target_file_path: string; source_file_path: string; source_language: Language }
@@ -3298,12 +3488,16 @@ export class QueryBuilder {
       const placeholders = chunk.map(() => '?').join(',');
       const rows = this.db
         .prepare(
-          `SELECT DISTINCT src.file_path AS file_path
-             FROM edges e
-             JOIN nodes src ON src.id = e.source
-            WHERE e.target IN (${placeholders})
-              AND e.kind != 'contains'
-              AND (e.provenance IS NULL OR e.provenance != 'heuristic')`
+          // Each file once, in the order of its first edge as SQLite read
+          // them (idx_edges_target_kind).
+          `SELECT file_path FROM (
+             SELECT src.file_path AS file_path, row_number() OVER (ORDER BY e.target, e.kind, e.id) AS r
+               FROM edges e
+               JOIN nodes src ON src.id = e.source
+              WHERE e.target IN (${placeholders})
+                AND e.kind != 'contains'
+                AND (e.provenance IS NULL OR e.provenance != 'heuristic')
+           ) GROUP BY file_path ORDER BY min(r)`
         )
         .all(...chunk) as Array<{ file_path: string }>;
       for (const row of rows) files.add(row.file_path);
@@ -3318,7 +3512,10 @@ export class QueryBuilder {
       const chunk = names.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
       const placeholders = chunk.map(() => '?').join(',');
       const rows = this.db
-        .prepare(`SELECT file_path, name, language FROM nodes WHERE name IN (${placeholders}) AND kind = 'import'`)
+        .prepare(
+          `SELECT file_path, name, language FROM nodes WHERE name IN (${placeholders}) AND kind = 'import'
+           ORDER BY name, ${this.insertionOrder()}`
+        )
         .all(...chunk) as Array<{ file_path: string; name: string; language: Language }>;
       for (const row of rows) out.push({ filePath: row.file_path, name: row.name, language: row.language });
     }
@@ -3479,6 +3676,7 @@ export class QueryBuilder {
           FROM nodes n
           WHERE n.file_path IN (${placeholders})
           GROUP BY n.file_path
+          ORDER BY n.file_path
         `)
         .all(...chunk) as Array<{ file_path: string; declared: number; typeDeclared: number }>;
       let candidates = rows
@@ -3541,10 +3739,9 @@ export class QueryBuilder {
   deleteFile(filePath: string): void {
     this.db.transaction(() => {
       this.deleteNodesByFile(filePath);
-      if (!this.stmts.deleteFile) {
-        this.stmts.deleteFile = this.db.prepare('DELETE FROM files WHERE path = ?');
-      }
-      this.stmts.deleteFile.run(filePath);
+      // A file's synthesis input goes with it (SQLite's ON DELETE CASCADE).
+      this.db.prepare('DELETE FROM synthesis_inputs WHERE file_path = ?').run(filePath);
+      this.db.prepare('DELETE FROM files WHERE path = ?').run(filePath);
     })();
   }
 
@@ -3726,7 +3923,7 @@ export class QueryBuilder {
   getUnresolvedByName(name: string): UnresolvedReference[] {
     if (!this.stmts.getUnresolvedByName) {
       this.stmts.getUnresolvedByName = this.db.prepare(
-        'SELECT * FROM unresolved_refs WHERE reference_name = ?'
+        'SELECT * FROM unresolved_refs WHERE reference_name = ? ORDER BY id'
       );
     }
     const rows = this.stmts.getUnresolvedByName.all(name) as UnresolvedRefRow[];
@@ -3747,7 +3944,7 @@ export class QueryBuilder {
    * Get all unresolved references
    */
   getUnresolvedReferences(): UnresolvedReference[] {
-    const rows = this.db.prepare('SELECT * FROM unresolved_refs').all() as UnresolvedRefRow[];
+    const rows = this.db.prepare('SELECT * FROM unresolved_refs ORDER BY id').all() as UnresolvedRefRow[];
     return rows.map((row) => ({
       fromNodeId: row.from_node_id,
       referenceName: row.reference_name,
@@ -3786,13 +3983,13 @@ export class QueryBuilder {
    */
   getUnresolvedReferencesBatch(offset: number, limit: number): UnresolvedReference[] {
     if (!this.stmts.getUnresolvedBatch) {
-      // ORDER BY rowid is load-bearing for the pipelined resolution loop: it
+      // ORDER BY id (the column SQLite's rowid aliased) is load-bearing for the pipelined resolution loop: it
       // prefetches batch k+1 at OFFSET batch_k.length while batch k's rows are
       // still pending, which is only exact under a stable enumeration. (A plain
       // scan and the status index both return rowid order anyway — this pins
       // it.)
       this.stmts.getUnresolvedBatch = this.db.prepare(
-        "SELECT * FROM unresolved_refs WHERE status = 'pending' ORDER BY rowid LIMIT ? OFFSET ?"
+        "SELECT * FROM unresolved_refs WHERE status = 'pending' ORDER BY id LIMIT ? OFFSET ?"
       );
     }
     const rows = this.stmts.getUnresolvedBatch.all(limit, offset) as UnresolvedRefRow[];
@@ -3861,7 +4058,7 @@ export class QueryBuilder {
    */
   getAllNodeNames(): string[] {
     if (!this.stmts.getAllNodeNames) {
-      this.stmts.getAllNodeNames = this.db.prepare('SELECT DISTINCT name FROM nodes');
+      this.stmts.getAllNodeNames = this.db.prepare('SELECT DISTINCT name FROM nodes ORDER BY name');
     }
     const rows = this.stmts.getAllNodeNames.all() as Array<{ name: string }>;
     return rows.map((r) => r.name);
@@ -3876,7 +4073,8 @@ export class QueryBuilder {
     if (!this.stmts.getCppIncludeNodes) {
       this.stmts.getCppIncludeNodes = this.db.prepare(
         `SELECT id, name, file_path AS filePath, language, start_line AS startLine, start_column AS startColumn
-           FROM nodes WHERE kind = 'import' AND language IN ('c', 'cpp')`
+           FROM nodes WHERE kind = 'import' AND language IN ('c', 'cpp')
+          ORDER BY file_path, start_line, id`
       );
     }
     return this.stmts.getCppIncludeNodes.all() as Array<Pick<Node, 'id' | 'name' | 'filePath' | 'language' | 'startLine' | 'startColumn'>>;
@@ -3889,7 +4087,7 @@ export class QueryBuilder {
    * indexes). Fresh statement per call: the iterator holds an open cursor.
    */
   *iterateNodeNames(): IterableIterator<string> {
-    const stmt = this.db.prepare('SELECT DISTINCT name FROM nodes');
+    const stmt = this.db.prepare('SELECT DISTINCT name FROM nodes ORDER BY name');
     for (const row of stmt.iterate()) {
       yield (row as { name: string }).name;
     }
@@ -3911,7 +4109,7 @@ export class QueryBuilder {
       const chunk = filePaths.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
       const placeholders = chunk.map(() => '?').join(',');
       const chunkRows = this.db
-        .prepare(`SELECT * FROM unresolved_refs WHERE status = 'pending' AND file_path IN (${placeholders})`)
+        .prepare(`SELECT * FROM unresolved_refs WHERE status = 'pending' AND file_path IN (${placeholders}) ORDER BY file_path, id`)
         .all(...chunk) as UnresolvedRefRow[];
       // Append with a loop, never a spread: the INPUT chunk is bounded, but
       // the RESULT rows per chunk are not — a dense recovery sync (e.g. the
@@ -4136,7 +4334,7 @@ export class QueryBuilder {
         const chunk = retryKeys.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
         const placeholders = chunk.map(() => '?').join(',');
         const chunkRows = this.db
-          .prepare(`SELECT * FROM unresolved_refs WHERE ${where} AND ${column} IN (${placeholders})`)
+          .prepare(`SELECT * FROM unresolved_refs WHERE ${where} AND ${column} IN (${placeholders}) ORDER BY ${column}, id`)
           .all(...chunk) as UnresolvedRefRow[];
         // Loop, not spread — same V8 argument-limit hazard as
         // getUnresolvedReferencesByFiles (#1558): a large definition delta can
@@ -4148,7 +4346,7 @@ export class QueryBuilder {
     // By receiver: one range of idx_unresolved_failed_module_name per name,
     // `store.` up to `store/` ('/' follows '.'), read one past the ceiling.
     const byReceiver = this.db.prepare(
-      `SELECT * FROM unresolved_refs WHERE ${MODULE_PARKED_SQL} AND reference_name >= ? AND reference_name < ? LIMIT ?`
+      `SELECT * FROM unresolved_refs WHERE ${MODULE_PARKED_SQL} AND reference_name >= ? AND reference_name < ? ORDER BY reference_name, id LIMIT ?`
     );
     for (const name of names) {
       if (!RECEIVER_NAME.test(name)) continue;
@@ -4225,7 +4423,7 @@ export class QueryBuilder {
         const chunk = retryKeys.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
         const placeholders = chunk.map(() => '?').join(',');
         const chunkRows = this.db
-          .prepare(`SELECT * FROM unresolved_refs WHERE ${where} AND ${column} IN (${placeholders})`)
+          .prepare(`SELECT * FROM unresolved_refs WHERE ${where} AND ${column} IN (${placeholders}) ORDER BY ${column}, id`)
           .all(...chunk) as UnresolvedRefRow[];
         for (const row of chunkRows) rows.set(row.id, row);
       }
@@ -4252,11 +4450,14 @@ export class QueryBuilder {
   getFailedScopedImports(): Array<{ name: string; filePath: string; language: Language }> {
     return (this.db
       .prepare(
-        `SELECT reference_name AS name, MIN(file_path) AS file_path, language
+        // The language of the row with that first file, as SQLite's bare
+        // column beside MIN() gave it.
+        `SELECT reference_name AS name, MIN(file_path) AS file_path, arg_min(language, file_path) AS language
            FROM unresolved_refs
           WHERE status = 'failed' AND reference_kind = 'imports'
-            AND reference_name GLOB '@?*/?*' AND reference_name NOT GLOB '@*/*/*'
-          GROUP BY reference_name`
+            AND regexp_full_match(reference_name, '@.+/.+') AND NOT regexp_full_match(reference_name, '@.*/.*/.*')
+          GROUP BY reference_name
+          ORDER BY reference_name`
       )
       .all() as Array<{ name: string; file_path: string; language: Language }>)
       .map((row) => ({ name: row.name, filePath: row.file_path, language: row.language }));
@@ -4271,7 +4472,8 @@ export class QueryBuilder {
     return (this.db
       .prepare(
         `SELECT * FROM unresolved_refs
-          WHERE status = 'failed' AND reference_kind = 'imports' AND reference_name IN ('.', './', '..', '../')`
+          WHERE status = 'failed' AND reference_kind = 'imports' AND reference_name IN ('.', './', '..', '../')
+          ORDER BY reference_name, id`
       )
       .all() as UnresolvedRefRow[])
       .map((row) => ({
@@ -4303,11 +4505,14 @@ export class QueryBuilder {
       const placeholders = chunk.map(() => '?').join(',');
       const rows = this.db
         .prepare(
-          `SELECT id, reference_name, file_path FROM unresolved_refs
-            WHERE status = 'failed' AND reference_kind = 'calls' AND name_tail IN (${placeholders})
-           UNION ALL
-           SELECT id, reference_name, file_path FROM unresolved_refs
-            WHERE ${MODULE_PARKED_SQL} AND reference_kind = 'calls' AND ${MEMBER_TAIL_SQL} IN (${placeholders})`
+          // Each index's rows in its order, the tail index's first.
+          `SELECT id, reference_name, file_path FROM (
+             SELECT 0 AS part, name_tail AS k, id, reference_name, file_path FROM unresolved_refs
+              WHERE status = 'failed' AND reference_kind = 'calls' AND name_tail IN (${placeholders})
+             UNION ALL
+             SELECT 1 AS part, ${MEMBER_TAIL_SQL} AS k, id, reference_name, file_path FROM unresolved_refs
+              WHERE ${MODULE_PARKED_SQL} AND reference_kind = 'calls' AND ${MEMBER_TAIL_SQL} IN (${placeholders})
+           ) ORDER BY part, k, id`
         )
         .all(...chunk, ...chunk) as Array<{ id: number; reference_name: string; file_path: string }>;
       for (const row of rows) out.push({ rowId: row.id, referenceName: row.reference_name, filePath: row.file_path });
@@ -4326,7 +4531,8 @@ export class QueryBuilder {
         `SELECT e.*, src.file_path AS source_file_path, src.language AS source_language
            FROM edges e
            JOIN nodes src ON src.id = e.source
-          WHERE e.kind = 'navigates' AND (e.provenance IS NULL OR e.provenance != 'heuristic')`
+          WHERE e.kind = 'navigates' AND (e.provenance IS NULL OR e.provenance != 'heuristic')
+          ORDER BY e.id`
       )
       .all() as Array<EdgeRow & { source_file_path: string; source_language: Language }>;
     return rows.map((row) => ({
@@ -4345,7 +4551,7 @@ export class QueryBuilder {
    */
   getFailedModuleKeys(): string[] {
     return (this.db
-      .prepare(`SELECT DISTINCT name_tail AS key FROM unresolved_refs WHERE status = 'failed' AND name_tail GLOB 'module:*'`)
+      .prepare(`SELECT DISTINCT name_tail AS key FROM unresolved_refs WHERE status = 'failed' AND name_tail LIKE 'module:%' ORDER BY key`)
       .all() as Array<{ key: string }>).map((row) => row.key);
   }
 
@@ -4447,7 +4653,8 @@ export class QueryBuilder {
              JOIN nodes tgt ON tgt.id = e.target
              JOIN nodes src ON src.id = e.source
             WHERE tgt.name IN (${placeholders})
-              AND (e.provenance IS NULL OR e.provenance != 'heuristic')`
+              AND (e.provenance IS NULL OR e.provenance != 'heuristic')
+            ORDER BY tgt.name, ${this.insertionOrder('tgt')}, e.kind, e.id`
         )
         .all(...chunk) as Array<EdgeRow & { source_file_path: string; source_language: Language }>;
       for (const row of rows) {
@@ -4488,8 +4695,8 @@ export class QueryBuilder {
           WHERE src.kind = 'route'
             AND e.kind != 'contains'
             AND (e.provenance IS NULL OR e.provenance != 'heuristic')
-            AND src.file_path NOT IN (SELECT value FROM json_each(?))
-            AND (tgt.file_path IN (SELECT value FROM json_each(?))
+            AND src.file_path NOT IN (SELECT j.value ->> '$' FROM json_each(?) AS j)
+            AND (tgt.file_path IN (SELECT j.value ->> '$' FROM json_each(?) AS j)
               OR (tgt.file_path = src.file_path AND tgt.kind IN ('constant', 'variable')))
           ORDER BY e.id`
       )
@@ -4544,7 +4751,7 @@ export class QueryBuilder {
       const chunk = filePaths.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
       const placeholders = chunk.map(() => '?').join(',');
       const rows = this.db
-        .prepare(`SELECT DISTINCT name FROM nodes WHERE file_path IN (${placeholders})${kindFilter}`)
+        .prepare(`SELECT DISTINCT name FROM nodes WHERE file_path IN (${placeholders})${kindFilter} ORDER BY name`)
         .all(...chunk, ...(kinds ?? [])) as Array<{ name: string }>;
       for (const row of rows) names.add(row.name);
     }
@@ -4685,7 +4892,9 @@ export class QueryBuilder {
     this.db.transaction(() => {
       this.db.exec('DELETE FROM unresolved_refs');
       this.db.exec('DELETE FROM edges');
+      this.tokens?.clear();
       this.db.exec('DELETE FROM nodes');
+      this.db.exec('DELETE FROM synthesis_inputs');
       this.db.exec('DELETE FROM files');
     })();
   }

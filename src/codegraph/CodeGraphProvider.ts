@@ -327,8 +327,12 @@ export class CodeGraphProvider {
       } catch (cause) {
         throw new ProviderAdapterError("codegraph", operation, {
           cause,
-          userMessage: `CodeGraph's ${spec.upstream} answer was not the expected JSON; is rene's CodeGraph built (npm run codegraph:build)?`,
-          diagnostics: { project_path: root, upstream_tool: spec.upstream },
+          userMessage: `CodeGraph's ${spec.upstream} answer was not the expected JSON. It said: ${reply.text.slice(0, 300)}`,
+          diagnostics: {
+            project_path: root,
+            upstream_tool: spec.upstream,
+            reply: reply.text.slice(0, 2000),
+          },
         });
       }
     }

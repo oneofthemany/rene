@@ -251,6 +251,22 @@ it("rene call writes stdin's raw text into one field, and receipts a declaration
   );
   expect(written.code).toBe(0);
   expect(await readFile(target, "utf8")).toBe(body);
+  // The flag may come first.
+  const first = join(root, "first.txt");
+  const flagFirst = await withInput(
+    RENE,
+    [
+      "call",
+      "write_file",
+      "--stdin-field",
+      "content",
+      JSON.stringify({ path: first }),
+    ],
+    env,
+    body,
+  );
+  expect(flagFirst.code).toBe(0);
+  expect(await readFile(first, "utf8")).toBe(body);
   // Without its other arguments on the line, --stdin-field is refused.
   const refused = await withInput(
     RENE,

@@ -313,21 +313,55 @@ export const toolkitArguments = (
   return undefined;
 };
 
+/** The words after `rene call`, as rene call reads them. */
+export interface CallWords {
+  readonly tool: string;
+  /** The JSON arguments, `-` for stdin, or undefined for none. */
+  readonly input: string | undefined;
+  /** The field `--stdin-field` fills with stdin's raw text. */
+  readonly stdinField: string | undefined;
+}
+
+/**
+ * Reads `<tool> [<json> | -] [--stdin-field <field>]`, the flag before or
+ * after the arguments; undefined for anything else. stdin can feed the
+ * arguments or one field, not both, so --stdin-field needs JSON on the line.
+ */
+export const parseCallWords = (
+  words: readonly string[],
+): CallWords | undefined => {
+  const [tool, ...rest] = words;
+  if (tool === undefined) return undefined;
+  let input: string | undefined;
+  let stdinField: string | undefined;
+  for (let at = 0; at < rest.length; at++) {
+    const word = rest[at] as string;
+    if (word === "--stdin-field") {
+      const field = rest[at + 1];
+      if (stdinField !== undefined || field === undefined) return undefined;
+      stdinField = field;
+      at++;
+    } else if (input === undefined) input = word;
+    else return undefined;
+  }
+  if (stdinField !== undefined && (input === undefined || input === "-"))
+    return undefined;
+  return { tool, input, stdinField };
+};
+
 /** The call one simple command makes, if it runs `rene call` with arguments rea accepts. */
 export const reaCallOf = (
   words: readonly string[],
 ): ReaCallCommand | undefined => {
   const rest = toolkitArguments(words);
   if (rest?.[0] !== "call") return undefined;
-  const [, tool, input, ...extra] = rest;
-  // --stdin-field <field> sets one field from stdin: the arguments are then
-  // not all on the line.
-  const stdinField = extra.length === 2 && extra[0] === "--stdin-field";
-  if (tool === undefined || !TOOL_NAME.test(tool)) return undefined;
-  if (extra.length > 0 && !stdinField) return undefined;
-  if (input === undefined) return stdinField ? undefined : { tool, args: {} };
-  if (input === "-") return stdinField ? undefined : { tool, args: null };
-  if (stdinField)
+  const call = parseCallWords(rest.slice(1));
+  if (call === undefined || !TOOL_NAME.test(call.tool)) return undefined;
+  const { tool, input, stdinField } = call;
+  if (input === undefined) return { tool, args: {} };
+  if (input === "-") return { tool, args: null };
+  // With --stdin-field the arguments are not all on the line.
+  if (stdinField !== undefined)
     return reaCallOf(["rea", "call", tool, input]) && { tool, args: null };
   let value: unknown;
   try {

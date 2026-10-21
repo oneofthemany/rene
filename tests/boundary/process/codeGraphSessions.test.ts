@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -102,6 +102,30 @@ it("replaces a warm server when another process rebuilt the index database", asy
   const next = await pidOf(sessions);
   expect(next).not.toBe(first);
   expect(alive(first)).toBe(false);
+});
+
+it("replaces a warm server when CodeGraph is rebuilt in place", async () => {
+  const first = await pidOf(sessions);
+  expect(await pidOf(sessions)).toBe(first);
+  // A rebuild rewrites the entry points at the same paths: the old server
+  // runs code that is gone (and the storage it chose), so it is replaced.
+  const later = new Date(Date.now() + 5_000);
+  await utimes(install.cli, later, later);
+  const next = await pidOf(sessions);
+  expect(next).not.toBe(first);
+  expect(alive(first)).toBe(false);
+});
+
+it("replaces a warm server when another process rebuilt a DuckDB index", async () => {
+  const store = join(folder, ".codegraph", "codegraph.db.store");
+  await mkdir(store, { recursive: true });
+  const first = await pidOf(sessions);
+  expect(await pidOf(sessions)).toBe(first);
+  // A build makes a new store folder; a reader of the old one is replaced.
+  await rm(store, { recursive: true });
+  await mkdir(store);
+  const next = await pidOf(sessions);
+  expect(next).not.toBe(first);
 });
 
 it("stops the server when a call is cancelled, and starts a fresh one for the next call", async () => {

@@ -2,7 +2,8 @@
 //
 // REA reads provider locations from its environment. The workbench keeps
 // the paths chosen on its Providers page in one JSON file and adds them to
-// the environment it gives REA (the MCP child, `rea doctor` and `rea setup`).
+// the environment it gives REA (the MCP child, `rea doctor` and agent
+// sessions), and `rene` run by hand applies them too.
 // The file is data, never shell: nothing evaluates it. A saved path takes
 // precedence over the same variable in the shell the bridge started from,
 // and clearing it falls back to that shell value. Each save keeps the
@@ -11,10 +12,12 @@
 import { existsSync } from "node:fs";
 import { copyFile, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { isAbsolute } from "node:path";
+import { parseSavedSettings } from "../dist/toolbox/SavedProviderSettings.js";
 import { cleanUse, effectiveUse, ENGINES } from "./choices.mjs";
 
 /**
- * Variables the page may set. `inspection` names the rea doctor provider
+ * Variables the page may set, the ones src/toolbox/SavedProviderSettings.ts
+ * lets the file set, with how the page shows them. `inspection` names the rea doctor provider
  * inspection whose `available` verdict covers the setting; Hopper has no
  * inspection, so `check` names its doctor check instead. Tools without
  * either have no readiness badge.
@@ -115,20 +118,20 @@ export function createSettings(path) {
   async function load() {
     let parsed;
     try {
-      parsed = JSON.parse(await readFile(path, "utf8"));
+      parsed = parseSavedSettings(await readFile(path, "utf8"));
     } catch (cause) {
       if (cause.code !== "ENOENT")
         loadError = `${path} could not be read (${cause.message}). Saving replaces it and keeps it as ${path}.bak.`;
       return;
     }
-    // Only known variables with string values are applied; anything else in
-    // the file is left in place but ignored.
-    saved = Object.fromEntries(
-      Object.entries(parsed?.environment ?? {}).filter(
-        ([name, value]) => BY_NAME.has(name) && typeof value === "string",
-      ),
-    );
-    use = cleanUse(parsed?.use);
+    if (!parsed.ok) {
+      loadError = `${path} could not be read (${parsed.reason}). Saving replaces it and keeps it as ${path}.bak.`;
+      return;
+    }
+    // Only known variables with string values are applied (the module above
+    // owns that); anything else in the file is left in place but ignored.
+    saved = { ...parsed.environment };
+    use = cleanUse(parsed.use);
   }
 
   /** Writes environment and choices together, keeping the previous file. */

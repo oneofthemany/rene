@@ -2,7 +2,7 @@
 name: reverse-engineer-anything
 description: Reverse engineer native, managed, Electron/JavaScript, packaged, firmware, and browser targets with REA. Use shipped-artifact or requested runtime evidence to explain features, compare versions, decompile code, or guide a reconstruction. Skip REA for ordinary source-repository architecture analysis.
 metadata:
-  version: "42"
+  version: "43"
 ---
 
 # REA
@@ -13,73 +13,37 @@ behavior not established by available source. For ordinary analysis of a
 complete source repository, use normal repository tools and do not run REA
 readiness or provider commands.
 
-## Connect only when needed
+## Reach REA with rene call
 
-Installing this skill supplies instructions; it does not register the REA MCP
-server, install analysis engines, or add tools to an already-running agent.
+On this machine REA is reached as rene, a command in your shell, never as an
+MCP server:
 
-If REA tools are available and their registration is not known to be stale,
-proceed directly to the target. Do not run diagnostics or setup before every
-investigation. Use the connected server's actual tool list and input schemas;
-a skill installed from repository main may describe capabilities absent from
-an older npm release. Keep complete inline Evidence when that server does not
-advertise retained references.
+- `rene tools search <words>` finds tools; `rene tools describe <tool>` shows
+  a tool's input schema. Use these schemas, not ones remembered from another
+  REA release.
+- `rene call <tool> '<json>'` runs one tool and prints its complete Evidence
+  record. `rene call <tool> -` reads the JSON arguments from stdin, and
+  `--stdin-field <field>` fills one field with stdin's raw text.
+- Calls in one agent session share a session daemon (`REA_DAEMON_SOCKET`),
+  so a target one call opens stays open for the next. Without it each call
+  starts and closes its own session; pass everything a call needs, or start
+  `rene daemon --socket <path>` and set `REA_DAEMON_SOCKET`.
 
-If tools are absent, a call is blocked by the client, or a required provider is
-unavailable, read [connection and recovery](references/connection-and-recovery.md).
-Diagnose the observed blocker, continue useful supported work, and resume the
-original task after repair. Client approval, shell PATH, registration and engine
-availability have different remedies; avoid repeating setup for all of them.
+Installing this skill (`rene skill install`) supplies instructions only; it
+installs no analysis engine. If `rene` is available, proceed directly to the
+target; do not run diagnostics before every investigation.
 
-1. Diagnose without changing REA or client configuration. `npx` may download
-   the package and write to npm's cache. For Codex, run
-   `npx -y rea-agents@latest doctor --client codex --json`. Substitute the current
-   supported client: `claude_code`, `claude_desktop`, `codex`, `cursor`,
-   `gemini_cli`, `windsurf`, `devin`, `opencode`, `antigravity`, `copilot_cli`,
-   `commandcode`, `vscode`, `grok_build`, `omp`, or `grok_bot`. `grok_bot` has no local
-   file registration: doctor reports the Grok Bot chat step, and setup does not
-   write `mcp.json`. If the client is unknown, use `doctor --json` and
-   inspect its registration results before choosing a setup scope.
-2. Distinguish the reason. Missing, malformed, or stale registration needs a
-   scoped configuration repair. An aligned registration with no tools in the
-   active session needs a restart/reconnection; doctor cannot prove that the
-   current agent has connected. A missing provider affects only tasks requiring
-   that provider: static JavaScript inspection needs neither Hopper nor Ghidra,
-   and Android inspection has separate bring-your-own JADX/Java prerequisites.
-3. For a configuration repair, prepare the read-only plan:
-   `npx -y rea-agents@latest setup --client codex --dry-run --json`.
-   Use the current client's ID, show its exact proposed paths, backups, and
-   changes, and obtain approval before setup writes configuration or installs
-   Hopper. Setup normally installs the matching bundled skill too; include that
-   replacement in the reviewed plan. After approval, apply the same scope with
-   `npx -y rea-agents@latest setup --client codex --yes`. Add `--install-hopper`
-   only if that separate installation was needed and explicitly approved.
-4. Restart/reconnect the affected agent. Verify that REA tools actually appear
-   in the session, then resume the original investigation. If they remain
-   absent, inspect the client's MCP launch error rather than repeating setup.
+If a call fails, read [connection and recovery](references/connection-and-recovery.md)
+and diagnose the observed blocker: a missing `rene` command, a missing
+provider and a refused command have different remedies. A missing provider
+affects only tasks requiring it: static JavaScript inspection needs neither
+Hopper nor Ghidra, and Android inspection has its own JADX/Java
+prerequisites. `rea doctor --json` reports provider readiness without
+changing anything. Provider paths saved on the workbench's Providers page
+apply to every `rene call`, including one run by hand.
 
-REA setup never installs or upgrades Node.js, npm, Homebrew, Java, Ghidra, IDA,
-JADX, Kuna, Binwalk, or Unblob. Use existing prerequisites; do not install unrelated
-software to repair
-MCP registration. For an unsupported client, use manual stdio registration
-with a version-pinned `rea-agents` package or continue through the CLI.
-
-A concrete CLI fallback for an operator-supplied JavaScript tree or ASAR is:
-
-```bash
-npx -y rea-agents@latest analyze-javascript-application /absolute/path/to/app --json
-```
-
-No MCP registration or native engine is required. Read the returned Evidence,
-graph, limitations, and unknowns with the same care as an MCP result; the CLI
-returns the Evidence record directly. This fallback does not establish that
-MCP is configured. Native CLI tasks still require their selected engine.
-Prefer an existing `rea` CLI. When none is installed and REA package acquisition
-is within the authorized scope, use `npx -y rea-agents@latest` in its place.
-Configuration repair starts with a read-only setup plan; show paths, backups and
-skill replacement before applying authorized changes. Preserve existing approval
-and target-execution boundaries. REA setup never installs or upgrades unrelated
-software, including Node.js, npm, Homebrew, Java, Ghidra, IDA, JADX, Kuna, Binwalk or Unblob.
+Do not register REA as an MCP server or run `rea setup`: this fork refuses
+both. Do not install software to repair a call without the user's approval.
 
 ## Route the target first
 
@@ -261,13 +225,12 @@ Recheck session state when a lifecycle change makes that status useful.
 Make a focused follow-up only when the
 returned result leaves a specific question unanswered.
 
-If MCP reports `resource_constraint` with `details.resource: "transport"`, call
+If a result reports `resource_constraint` with `details.resource: "transport"`, call
 `inspect_analysis_view` with its reported same-session Evidence reference for a
 summary, one section/module, or a stable page. Use `trace_application_feature`
 once a seed is known, or call `export_evidence_bundle` to write the complete
 session to a selected path. The analysis remains complete in the ledger; avoid
-repeating it merely to request the same oversized response. Complete CLI JSON
-output also streams without a single MCP frame.
+repeating it merely to request the same oversized response.
 
 When the retained parent ID is unknown, use `get_evidence_bundle` with
 `detail: "summary"` and exact filters for operation, target SHA-256,

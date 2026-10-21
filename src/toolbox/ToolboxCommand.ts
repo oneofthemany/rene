@@ -8,9 +8,14 @@ import {
   OwnedCommandFailure,
   runOwnedCommand,
 } from "../process/OwnedCommand.js";
-import type {
-  ProviderProcessSnapshot,
-  ProviderProcessSupervisor,
+import {
+  sampleProcessGroup,
+  type ProcessGroupUsage,
+} from "../process/ProcessGroupUsage.js";
+import {
+  spawnOwnedProviderProcess,
+  type ProviderProcessSnapshot,
+  type ProviderProcessSupervisor,
 } from "../process/ProviderProcess.js";
 import { confine } from "./ToolboxFiles.js";
 
@@ -51,6 +56,11 @@ export const runToolboxCommand = async (
   const cwd = await confine(roots, input.cwd, "cwd");
   const startedAt = performance.now();
   const duration = () => Math.round(performance.now() - startedAt);
+  // With measure, the sampler follows the command's process group from the
+  // moment it starts.
+  let sampler: ReturnType<typeof sampleProcessGroup> | undefined;
+  const usage = async (): Promise<{ usage?: ProcessGroupUsage | null }> =>
+    input.measure ? { usage: (await sampler?.stop()) ?? null } : {};
   try {
     const snapshot = await runOwnedCommand(
       {
@@ -72,6 +82,15 @@ export const runToolboxCommand = async (
       {
         signal: options.signal,
         retainCleanup: (owner) => options.retain(owner),
+        ...(input.measure
+          ? {
+              launcher: async (spawn) => {
+                const launched = await spawnOwnedProviderProcess(spawn);
+                sampler = sampleProcessGroup(launched.ownership.processGroupId);
+                return launched;
+              },
+            }
+          : {}),
       },
     );
     return {
@@ -80,6 +99,7 @@ export const runToolboxCommand = async (
       ...outcome(snapshot),
       stopped: null,
       duration_ms: duration(),
+      ...(await usage()),
     };
   } catch (cause: unknown) {
     if (!(cause instanceof OwnedCommandFailure)) throw cause;
@@ -98,6 +118,7 @@ export const runToolboxCommand = async (
       ...outcome(cause.snapshot),
       stopped: signalled ? null : cause.reason,
       duration_ms: duration(),
+      ...(await usage()),
     };
   }
 };

@@ -227,7 +227,8 @@ describe("doctor installation identity", () => {
       skill: {
         installed_version: "10",
         state: "stale",
-        remediation: "Run rea setup to update the installed REA skill.",
+        remediation:
+          "Run rene skill install (or use Agent skill in the workbench) to update the installed REA skill.",
       },
     });
   });
@@ -240,14 +241,16 @@ describe("doctor installation identity", () => {
     expect(result.healthy).toBe(false);
     expect(result.identity?.skill).toMatchObject({
       state: "missing",
-      remediation: "Run rea setup to update the installed REA skill.",
+      remediation:
+        "Run rene skill install (or use Agent skill in the workbench) to update the installed REA skill.",
     });
     expect(result.checks).toContainEqual({
       name: "skill:identity",
       ok: false,
       classification: "config_drift",
       detail: "Installed REA skill identity is missing.",
-      remediation: "Run rea setup to update the installed REA skill.",
+      remediation:
+        "Run rene skill install (or use Agent skill in the workbench) to update the installed REA skill.",
     });
   });
   it("reports stale client registration paths without claiming live state", async () => {
@@ -278,6 +281,46 @@ describe("doctor installation identity", () => {
         name: "registration:codex",
         classification: "config_drift",
       }),
+    );
+  });
+  it("asks for a current registration to be removed and is content with none", async () => {
+    // Agents reach rene with `rene call`; rea refuses to serve them over MCP,
+    // so a registration still present is the drift and a missing one is not.
+    const result = await runDoctor(
+      undefined,
+      host({
+        clientRegistrations: () =>
+          Promise.resolve([
+            {
+              client: "codex",
+              config_path: "/home/user/.codex/config.toml",
+              command: ["/opt/rea", "mcp"],
+              state: "aligned",
+              remediation: null,
+            },
+            {
+              client: "cursor",
+              config_path: "/home/user/.cursor/mcp.json",
+              command: [],
+              state: "missing",
+              remediation: "Run rea setup.",
+            },
+          ]),
+      }),
+    );
+
+    expect(result.checks).toContainEqual(
+      expect.objectContaining({
+        name: "registration:codex",
+        ok: false,
+        classification: "config_drift",
+        remediation: expect.stringContaining(
+          "Remove the rea MCP server from /home/user/.codex/config.toml",
+        ),
+      }),
+    );
+    expect(result.checks.map(({ name }) => name)).not.toContain(
+      "registration:cursor",
     );
   });
 });

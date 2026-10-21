@@ -104,4 +104,7 @@ export const codeGraphEnvironment = (
   // catch-up sync, so the bridge and every agent can query one project at
   // once. The index changes only through index_source_graph.
   CODEGRAPH_READ_ONLY: "1",
+  // rene's CodeGraph stores indexes in DuckDB (packages/codegraph-store):
+  // its SQL is DuckDB's, and readers follow the writer's log.
+  CODEGRAPH_STORAGE: "duckdb",
 });

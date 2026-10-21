@@ -6,6 +6,7 @@
 //   rene call <tool> [<json>|-]          run one rene tool
 //   rene tools [search|describe] …       find tools and their inputs
 //   rene daemon [--socket <path>] …      keep one session for many calls
+//   rene skill status|install …          the reverse-engineer-anything skill
 //   rene agent [options] [<request>…]    a local troubleshooting agent
 //   rene copilot [<copilot args>…]       Copilot CLI, held to rene's tools
 //
@@ -22,12 +23,14 @@ Commands:
   call     Run one rene tool:  rene call <tool> '<json>'  (rene call --help)
   tools    Find tools and show their inputs:  rene tools search <words>
   daemon   Keep one rene session for many calls:  rene daemon --socket <path>
+  skill    Install or check the reverse-engineer-anything skill for agents:
+           rene skill install | rene skill status
   agent    Troubleshoot and investigate with rene's tools on a local or cloud
            model (rene agent --help)
   copilot  Start GitHub Copilot CLI with rene's tools in place of its own:
            rene copilot [<copilot args>…]
 `;
-const TOOL_COMMANDS = new Set(["call", "tools", "daemon"]);
+const TOOL_COMMANDS = new Set(["call", "tools", "daemon", "skill"]);
 /** Exit status of a writer terminated by SIGPIPE (128 + 13). */
 const SIGPIPE_EXIT_STATUS = 141;
 
@@ -101,16 +104,31 @@ if (command === "copilot") {
     );
     process.exit(1);
   }
-  const { readProcessStdin, runToolCli } =
+  const { readProcessStdin, runToolCli, withWorkbenchSettings } =
     await import("../dist/mcp/toolCli.js");
-  const io = {
-    env: process.env,
-    writeStdout: (text) => {
-      if (!stdoutClosed) process.stdout.write(text);
+  // A dist built before this script last changed lacks what it added. rene
+  // is how agents act at all, so say so and carry on without it.
+  const applySettings =
+    typeof withWorkbenchSettings === "function"
+      ? withWorkbenchSettings
+      : (io) => {
+          io.writeStderr(
+            `rene: ${packageRoot}/dist is older than scripts/rene.mjs, so saved provider paths aren't applied; run \`npm run build:cached\`.\n`,
+          );
+          return io;
+        };
+  // Provider paths saved on the workbench's Providers page apply here too.
+  const io = applySettings(
+    {
+      env: process.env,
+      writeStdout: (text) => {
+        if (!stdoutClosed) process.stdout.write(text);
+      },
+      writeStderr: (text) => process.stderr.write(text),
+      readStdin: readProcessStdin,
     },
-    writeStderr: (text) => process.stderr.write(text),
-    readStdin: readProcessStdin,
-  };
+    resolve(packageRoot, "frontend/.workbench-settings.json"),
+  );
   if (command === "agent") {
     const { runAgentCli } = await import("../dist/mcp/agentCli.js");
     process.exitCode = await runAgentCli(args.slice(1), io);

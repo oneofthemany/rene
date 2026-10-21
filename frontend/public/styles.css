@@ -1281,57 +1281,6 @@ progress {
   font-weight: 600;
 }
 
-.setup-undetected td {
-  color: var(--muted);
-}
-
-.setup-path,
-.setup-command {
-  font-family: var(--mono);
-  font-size: 12px;
-  word-break: break-all;
-}
-
-.setup-command {
-  display: block;
-  margin-top: 3px;
-  color: var(--muted);
-}
-
-.setup-reg-current {
-  color: var(--derived);
-}
-
-.setup-reg-stale {
-  color: var(--accent);
-  font-weight: 600;
-}
-
-.setup-plan h3 {
-  margin: 18px 0 8px;
-}
-
-.setup-actions-list {
-  padding-left: 20px;
-}
-
-.setup-actions-list li {
-  margin-bottom: 12px;
-}
-
-.setup-op {
-  font-size: 12px;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.setup-detail {
-  margin: 4px 0 0;
-  color: var(--muted);
-  font-size: 13px;
-}
-
 /* ---- Path picker -------------------------------------------------------- */
 
 .path-control {

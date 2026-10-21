@@ -47,7 +47,6 @@ import { PRODUCT_IDENTITY, SDK_IDENTITY } from "../identity.js";
 import {
   readClientRegistrationStatuses,
   type ClientRegistrationStatus,
-  type UnhealthyClientRegistrationStatus,
 } from "./ClientRegistrationStatus.js";
 import type { ProviderRequestBudgetResolver } from "./ClientRegistrationEnvironment.js";
 import {
@@ -371,8 +370,8 @@ const collectDoctorIdentity = async (
       ...(skillAligned ? [] : [skillIdentityCheck(installedSkillIdentity)]),
       ...registrations
         .filter(
-          (registration): registration is UnhealthyClientRegistrationStatus =>
-            registration.state !== "aligned" && registration.state !== "manual",
+          (registration) =>
+            registration.state !== "missing" && registration.state !== "manual",
         )
         .map(registrationCheck),
     ],
@@ -434,8 +433,8 @@ const skillIdentityRemediation = (
 ): string => {
   const issues = identity?.issues;
   if (issues !== undefined && issues.length > 0)
-    return `${issues.map(({ path, detail }) => `${detail} (${path})`).join(" ")} Verify the reported paths and use regular skill directories, or run rea setup with --skill=false to configure the client without installing the skill.`;
-  return "Run rea setup to update the installed REA skill.";
+    return `${issues.map(({ path, detail }) => `${detail} (${path})`).join(" ")} Verify the reported paths and use regular skill directories, then run rene skill install.`;
+  return "Run rene skill install (or use Agent skill in the workbench) to update the installed REA skill.";
 };
 
 const skillIdentityCheck = (
@@ -456,15 +455,33 @@ const skillIdentityCheck = (
   };
 };
 
+/**
+ * Agents reach rene with `rene call`, and rea refuses to serve them over MCP
+ * (frontend/container/rea), so in this fork no registration is the healthy
+ * state: one still present, current or stale, is what needs fixing. A
+ * configuration that couldn't be read leaves that unknown.
+ */
 const registrationCheck = (
-  registration: UnhealthyClientRegistrationStatus,
-): DoctorCheck => ({
-  name: `registration:${registration.client}`,
-  ok: false,
-  classification: registration.state === "unknown" ? "unknown" : "config_drift",
-  detail: registration.config_path,
-  remediation: registration.remediation,
-});
+  registration: Exclude<
+    ClientRegistrationStatus,
+    { readonly state: "missing" | "manual" }
+  >,
+): DoctorCheck =>
+  registration.state === "aligned" || registration.state === "stale"
+    ? {
+        name: `registration:${registration.client}`,
+        ok: false,
+        classification: "config_drift",
+        detail: registration.config_path,
+        remediation: `Remove the rea MCP server from ${registration.config_path}: agents reach rene with \`rene call\` in their shell, and rea refuses to serve them over MCP.`,
+      }
+    : {
+        name: `registration:${registration.client}`,
+        ok: false,
+        classification: "unknown",
+        detail: registration.config_path,
+        remediation: registration.remediation,
+      };
 
 const installationState = (
   paths: readonly string[],

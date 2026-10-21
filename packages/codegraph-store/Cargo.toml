@@ -1,0 +1,26 @@
+[package]
+name = "codegraph-store"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "CodeGraph's index in DuckDB, as a synchronous Node addon (napi-rs)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Exact, as in packages/history-store. Parquet (segments) and JSON (CodeGraph's
+# JSON functions) are extensions the cached static library lacks, so DuckDB is
+# compiled from the crate's bundled source with both (DESIGN.md).
+duckdb = { version = "=1.10505.0", default-features = false, features = ["parquet", "json"] }
+napi = { version = "3", default-features = false, features = ["napi8"] }
+napi-derive = "3"
+# preserve_order: a row's object keeps its columns in the query's order.
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+strip = "symbols"

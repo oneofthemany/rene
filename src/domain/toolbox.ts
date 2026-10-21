@@ -206,6 +206,22 @@ export const runCommandInputSchema = z.strictObject({
     .record(z.string(), z.string())
     .default({})
     .describe("Extra environment variables for the command."),
+  measure: z
+    .boolean()
+    .default(false)
+    .describe(
+      "Also report the command's peak memory and CPU time, summed over every process it started (sampled from /proc; Linux only).",
+    ),
+});
+
+const processGroupUsageSchema = z.strictObject({
+  peak_rss_bytes: z.number().int().nonnegative(),
+  cpu_user_ms: z.number().int().nonnegative(),
+  cpu_system_ms: z.number().int().nonnegative(),
+  processes_seen: z.number().int().nonnegative(),
+  samples: z.number().int().nonnegative(),
+  interval_ms: z.number().int().positive(),
+  method: z.string(),
 });
 
 export const runCommandResultSchema = z.strictObject({
@@ -221,6 +237,12 @@ export const runCommandResultSchema = z.strictObject({
     .nullable()
     .describe("Why REA stopped the command, or null when it ended by itself."),
   duration_ms: z.number().int().nonnegative(),
+  usage: processGroupUsageSchema
+    .nullable()
+    .optional()
+    .describe(
+      "With measure: peak memory and CPU time of the command's processes, or null where they can't be read (anywhere but Linux).",
+    ),
 });
 
 /**

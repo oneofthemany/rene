@@ -3,15 +3,14 @@
 // The bridge runs the user's own agent CLI (Claude Code, Copilot CLI, agy,
 // Codex, ...) in a pseudo-terminal and relays it to the page: output as an
 // NDJSON stream, keystrokes and resizes as small POSTs. Each agent reaches
-// this fork's REA through the session's toolkit (agentToolkit.mjs): by
-// default `rene call` in its shell, with a `rea` command and a session daemon
-// set up for it; or, with REA_AGENT_TOOLKIT=mcp, as its `rea` MCP server.
-// Claude Code and Copilot CLI get either for the session, with the tools
-// pre-approved, their calls recorded in the project's history and a short
-// instruction to prefer them; with MCP the others get rene from their rea
-// setup registration, which must be current, and their calls aren't recorded.
-// Every agent keeps its usual tools and the user's own settings, login and
-// other MCP servers.
+// this fork's REA as `rene call` in its shell (agentToolkit.mjs), with a
+// `rene` command and a session daemon set up for it, and every call recorded
+// in the project's history. Never as an MCP server: as MCP tools rene sits
+// beside the agent's own reader, writer and shell, which record nothing.
+// Claude Code and Copilot CLI also get rene's commands pre-approved, the tools
+// rene replaces taken away and an instruction to use it; the other agents get
+// the command alone.
+// Every agent keeps the user's own settings, login and other MCP servers.
 //
 // One session runs at a time. It outlives page reloads (the page re-attaches
 // and replays recent output) and ends with Stop, when the agent exits, or when
@@ -30,23 +29,16 @@ import { startCliToolkit } from "./agentToolkit.mjs";
 const SCROLLBACK_CHARS = 512 * 1024;
 const MAX_INPUT_CHARS = 64 * 1024;
 
-/** How the agent reaches rene's tools, by toolkit. */
-const REACH_RENE = {
-  mcp: [
-    "For reverse-engineering, analysis and investigation questions, use the `rea` MCP tools",
-    "(this machine's fork of REA, called rene) and the reverse-engineer-anything skill if you have it,",
-    "rather than ad-hoc shell tools. Call binary_session first when unsure what is available.",
-  ],
-  cli: [
-    "rene (this machine's fork of REA) is your toolkit, used from your shell: `rene call <tool> '<json>'`",
-    "runs one tool and prints its result (`rene call <tool> -` reads the JSON from stdin, such as a",
-    "here-document), `rene tools search <words>` finds tools and `rene tools describe <tool>` shows a tool's",
-    "input schema. Your shell runs only rene commands, whose output you may pipe into head, tail, wc or jq.",
-    "Every call in this session shares one rene session, so a target one call opens stays open for the next.",
-    "For reverse-engineering, analysis and investigation questions, use rene's tools and the",
-    "reverse-engineer-anything skill if you have it. Call binary_session first when unsure what is available.",
-  ],
-};
+/** How the agent reaches rene's tools. */
+const REACH_RENE = [
+  "rene (this machine's fork of REA) is your toolkit, used from your shell: `rene call <tool> '<json>'`",
+  "runs one tool and prints its result (`rene call <tool> -` reads the JSON from stdin, such as a",
+  "here-document), `rene tools search <words>` finds tools and `rene tools describe <tool>` shows a tool's",
+  "input schema. Your shell runs only rene commands, whose output you may pipe into head, tail, wc or jq.",
+  "Every call in this session shares one rene session, so a target one call opens stays open for the next.",
+  "For reverse-engineering, analysis and investigation questions, use rene's tools and the",
+  "reverse-engineer-anything skill if you have it. Call binary_session first when unsure what is available.",
+];
 
 const BASE_INSTRUCTIONS = [
   "REA runs in a container that only sees the user's home folder, so analysis targets",
@@ -67,13 +59,13 @@ const BASE_INSTRUCTIONS = [
 ];
 
 /**
- * The instruction for one session, for its toolkit. With an assessment, the
+ * The instruction for one session. With an assessment, the
  * agent reads it first and keeps the parts that aren't generated up to date.
  */
-export const agentInstructions = (assessment, toolkit = "mcp") =>
+export const agentInstructions = (assessment) =>
   [
     "You are running inside the REA workbench.",
-    ...REACH_RENE[toolkit],
+    ...REACH_RENE,
     ...BASE_INSTRUCTIONS,
     ...(assessment
       ? [
@@ -87,9 +79,7 @@ export const agentInstructions = (assessment, toolkit = "mcp") =>
           "files: for a file of a listed type, use that tool rather than a shell command or a generic reader.",
         ]
       : []),
-    toolkit === "cli"
-      ? "When a request begins, declare it with `rene call record_topic`: a new feature, question, bug,"
-      : "When a request begins, declare it with the rene record_topic tool: a new feature, question, bug,",
+    "When a request begins, declare it with `rene call record_topic`: a new feature, question, bug,",
     "investigation and so on goes under the thread it belongs to (declare a thread first when none fits),",
     "and you update the topic with status done or abandoned, and a summary of what was found or decided,",
     "when it ends. The workbench files your turns and tool calls under the topic in force; when a turn",
@@ -150,12 +140,12 @@ const writePrivate = (path, text) => writeFile(path, text, { mode: 0o600 });
  * (topicGate.mjs), run with the bridge's own Node.js; the gate keeps its
  * per-session state in `stateDirectory`.
  */
-const topicGateSettings = (stateDirectory, toolkit) => {
+const topicGateSettings = (stateDirectory) => {
   const gate = fileURLToPath(new URL("./topicGate.mjs", import.meta.url));
   const hooks = [
     {
       type: "command",
-      command: `REA_AGENT_TOOLKIT=${toolkit} REA_TOPIC_GATE_DIR=${shellQuote(stateDirectory)} ${shellQuote(process.execPath)} ${shellQuote(gate)}`,
+      command: `REA_TOPIC_GATE_DIR=${shellQuote(stateDirectory)} ${shellQuote(process.execPath)} ${shellQuote(gate)}`,
       timeout: 10,
     },
   ];
@@ -163,10 +153,10 @@ const topicGateSettings = (stateDirectory, toolkit) => {
     hooks: {
       UserPromptSubmit: [{ hooks }],
       PreToolUse: [{ matcher: "*", hooks }],
-      // With the cli toolkit a declaration is a `rene call record_topic`.
+      // A declaration is a `rene call record_topic` in the shell.
       PostToolUse: [
         {
-          matcher: toolkit === "cli" ? "Bash" : "mcp__rea__record_topic",
+          matcher: "Bash",
           hooks,
         },
       ],
@@ -177,7 +167,7 @@ const topicGateSettings = (stateDirectory, toolkit) => {
 const shellQuote = (text) => `'${text.replaceAll("'", "'\\''")}'`;
 
 /**
- * Claude Code permission rules for the cli toolkit: rea, and the filters the
+ * Claude Code permission rules: rene, and the filters the
  * topic gate lets read rea's output; the gate refuses any other shell line.
  */
 const CLI_ALLOWED_TOOLS = ["rene", "rea", "head", "tail", "wc", "jq"].map(
@@ -187,8 +177,7 @@ const CLI_ALLOWED_TOOLS = ["rene", "rea", "head", "tail", "wc", "jq"].map(
 /**
  * Agents that can take rene for one session. `prepare` writes the agent's
  * session files under `directory` and returns its arguments and extra
- * environment; `server` is the rea MCP server's command and args. `client`
- * is the agent's `rea setup` client name.
+ * environment. `client` is the agent's `rea setup` client name.
  */
 const SESSION_AGENTS = [
   {
@@ -197,19 +186,7 @@ const SESSION_AGENTS = [
     command: "claude",
     client: "claude_code",
     install: "https://claude.com/claude-code",
-    async prepare({
-      server,
-      directory,
-      instructions,
-      conversationId,
-      toolkit,
-    }) {
-      const config = join(directory, "claude-mcp.json");
-      if (toolkit === "mcp")
-        await writePrivate(
-          config,
-          `${JSON.stringify({ mcpServers: { rea: { type: "stdio", ...server } } }, null, 2)}\n`,
-        );
+    async prepare({ directory, instructions, conversationId }) {
       // The topic gate's hooks, added to the user's own settings for this
       // session only.
       const settings = join(directory, "claude-settings.json");
@@ -217,15 +194,14 @@ const SESSION_AGENTS = [
       await mkdir(gateState, { recursive: true, mode: 0o700 });
       await writePrivate(
         settings,
-        `${JSON.stringify(topicGateSettings(gateState, toolkit), null, 2)}\n`,
+        `${JSON.stringify(topicGateSettings(gateState), null, 2)}\n`,
       );
       return {
         args: [
-          ...(toolkit === "mcp" ? ["--mcp-config", config] : []),
           "--settings",
           settings,
           "--allowedTools",
-          ...(toolkit === "mcp" ? ["mcp__rea"] : CLI_ALLOWED_TOOLS),
+          ...CLI_ALLOWED_TOOLS,
           "--append-system-prompt",
           instructions,
           // A known id names the transcript the bridge follows.
@@ -242,24 +218,15 @@ const SESSION_AGENTS = [
     install: "https://github.com/features/copilot/cli",
     // Copilot has no system-prompt flag; it reads AGENTS.md from the extra
     // instruction folders named in COPILOT_CUSTOM_INSTRUCTIONS_DIRS.
-    async prepare({ server, directory, env, instructions, toolkit }) {
-      const config = join(directory, "copilot-mcp.json");
+    async prepare({ directory, env, instructions }) {
       const folder = join(directory, "copilot-instructions");
       await mkdir(folder, { recursive: true, mode: 0o700 });
-      if (toolkit === "mcp")
-        await writePrivate(
-          config,
-          `${JSON.stringify({ mcpServers: { rea: { type: "stdio", ...server, tools: ["*"] } } }, null, 2)}\n`,
-        );
       await writePrivate(join(folder, "AGENTS.md"), `${instructions}\n`);
       const dirs = [env.COPILOT_CUSTOM_INSTRUCTIONS_DIRS, folder]
         .filter(Boolean)
         .join(",");
       return {
-        args:
-          toolkit === "mcp"
-            ? ["--additional-mcp-config", `@${config}`, "--allow-tool", "rea"]
-            : copilotToolkitArguments(),
+        args: copilotToolkitArguments(),
         env: { COPILOT_CUSTOM_INSTRUCTIONS_DIRS: dirs },
       };
     },
@@ -267,11 +234,11 @@ const SESSION_AGENTS = [
 ];
 
 /**
- * Terminal agents with no way to add an MCP server or pre-approve its tools
- * for one session (agy, for one, only has a switch that approves everything).
- * They get rene from their `rea setup` registration, which must be current
- * before they start; their tools ask for approval as the agent normally does,
- * and the instruction comes from the skill Agent setup installs.
+ * Terminal agents with no way to pre-approve commands or take tools away for
+ * one session (agy, for one, only has a switch that approves everything).
+ * Their shell has the session's `rene` command and daemon like any other, but
+ * nothing tells them to use it or stops their own tools, so only the calls
+ * they make through rene are recorded.
  */
 const REGISTERED_AGENTS = [
   ["antigravity", "agy", "Antigravity (agy)"],
@@ -323,9 +290,9 @@ const listAgents = ({ PATH }) =>
     command,
     client,
     install,
-    // "session": rene is added for the session; "registration": it comes
-    // from the agent's rea setup registration.
-    rene: prepare ? "session" : "registration",
+    // "session": rene is set up for the session, its tools pre-approved and
+    // the ones it replaces taken away; "shell": the `rene` command alone.
+    rene: prepare ? "session" : "shell",
     installed: onPath(command, PATH),
   }));
 
@@ -352,22 +319,9 @@ function startable(id, cwd, path) {
   return agent;
 }
 
-/**
- * An agent without a session flag needs a current rene registration to
- * reach rene over MCP.
- */
-async function requireRene(agent, registration, toolkit) {
-  if (agent.prepare || toolkit === "cli") return;
-  const state = await registration(agent.client);
-  if (state !== "aligned")
-    throw new TerminalError(
-      `rene isn't registered with ${agent.label} (${state}). Register it in Agent setup, then start again.`,
-    );
-}
-
 /** Writes the agent's session files and starts it in a pseudo-terminal. */
 async function launch(agent, { link, directory, environment }, cwd, size) {
-  const { server, instructions, conversationId, report, toolkit, rea } = link;
+  const { instructions, conversationId, report, rea } = link;
   await mkdir(directory, { recursive: true, mode: 0o700 });
   // The report file names the bridge and the session's token for `rene call`;
   // the variable carries the private file's path, not the token.
@@ -376,29 +330,25 @@ async function launch(agent, { link, directory, environment }, cwd, size) {
     ...(report ? { REA_HISTORY_REPORT: report } : {}),
   };
   let cli;
-  if (toolkit === "cli") {
-    try {
-      cli = await startCliToolkit({ rea, directory, env: base });
-    } catch (cause) {
-      throw new TerminalError(
-        `Couldn't start rene for the session: ${cause.message}`,
-      );
-    }
-    base = { ...base, ...cli.env };
+  try {
+    cli = await startCliToolkit({ rea, directory, env: base });
+  } catch (cause) {
+    throw new TerminalError(
+      `Couldn't start rene for the session: ${cause.message}`,
+    );
   }
+  base = { ...base, ...cli.env };
   const stopToolkit = () =>
     cli
-      ?.stop()
+      .stop()
       .catch((cause) => process.stderr.write(`${cause.message ?? cause}\n`));
   try {
     const { args = [], env } = agent.prepare
       ? await agent.prepare({
-          server,
           directory,
           env: base,
           instructions,
           conversationId,
-          toolkit,
         })
       : {};
     const { cols, rows } = size;
@@ -421,12 +371,11 @@ async function launch(agent, { link, directory, environment }, cwd, size) {
 }
 
 /**
- * @param {{ directory: string, environment: () => NodeJS.ProcessEnv, registration: (client: string) => Promise<string> }} options
- *   directory: where agents' generated session files go; registration: the
- *   agent's rea setup registration state ("aligned" when current).
+ * @param {{ directory: string, environment: () => NodeJS.ProcessEnv, onExit?: (session: string) => void }} options
+ *   directory: where agents' generated session files go.
  */
 export function createTerminal(options) {
-  const { directory, environment, registration, onExit } = options;
+  const { directory, environment, onExit } = options;
   let session;
   const listeners = new Set();
 
@@ -453,8 +402,8 @@ export function createTerminal(options) {
 
   /**
    * Starts an agent. `link` comes from the bridge: the project the session
-   * belongs to, its id, its toolkit, the rea command, the MCP server to give
-   * the agent (the relay), the history report file and the instruction text.
+   * belongs to, its id, the rea command, the history report file and the
+   * instruction text.
    */
   async function start({ agent: id = "claude", cwd, cols, rows }, link) {
     if (session && session.exitCode === undefined)
@@ -462,7 +411,6 @@ export function createTerminal(options) {
         `${session.agent.label} is already running here.`,
       );
     const agent = startable(id, cwd, environment().PATH);
-    await requireRene(agent, registration, link.toolkit);
     const pty = await launch(agent, { link, directory, environment }, cwd, {
       cols,
       rows,

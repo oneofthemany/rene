@@ -192,10 +192,10 @@ const selectedSkillCheck = (
       : {
           remediation:
             state === "unmanaged"
-              ? "Use regular skill directories, or run rea setup with --skill=false to configure the client without installing the skill."
+              ? "Use regular skill directories, then run rene skill install."
               : state === "unknown"
                 ? "Verify access to the reported skill files before retrying."
-                : "Run rea setup to update the installed REA skill.",
+                : "Run rene skill install (or use Agent skill in the workbench) to update the installed REA skill.",
         }),
   };
 

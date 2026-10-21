@@ -110,8 +110,18 @@ export function topicTree(
       { ...topic, children: [], turns: [], calls: [], facts: [] },
     ]),
   );
-  // Each turn joins the topic it declared.
+  const loose = fileTurns(nodes, turns, declaredBy, filed);
+  linkSharedTouches(nodes, calls);
+  return { threads: hierarchy(nodes), loose_turns: loose };
+}
+
+/**
+ * Files each turn under the topic it declared, or the one a declaration named
+ * it for; returns the turns no topic holds.
+ */
+function fileTurns(nodes, turns, declaredBy, filed) {
   const loose = [];
+
   const byTime = [...turns].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
   for (const turn of byTime) {
     let topicId;
@@ -142,7 +152,11 @@ export function topicTree(
     node.turns.push(summary);
     node.calls.push(...summary.calls);
   }
-  // Factual links: topics whose calls touched the same file or Evidence.
+  return loose;
+}
+
+/** The topics that touched each file or Evidence, by `kind\0value`. */
+function touchOwners(nodes, calls) {
   const owners = new Map();
   const own = (key, topicId) => {
     const k = `${key.kind}\u0000${key.value}`;
@@ -156,15 +170,15 @@ export function topicTree(
     for (const id of node.calls) {
       const entry = calls.get(id);
       if (!entry || entry.name === TOPIC_TOOL) continue;
-      for (const key of touched(entry)) {
-        const k = `${key.kind}\u0000${key.value}`;
-        const set = owners.get(k) ?? new Set();
-        set.add(node.topic_id);
-        owners.set(k, set);
-      }
+      for (const key of touched(entry)) own(key, node.topic_id);
     }
   }
-  for (const [k, ids] of owners) {
+  return owners;
+}
+
+/** Factual links: topics whose calls touched the same file or Evidence. */
+function linkSharedTouches(nodes, calls) {
+  for (const [k, ids] of touchOwners(nodes, calls)) {
     if (ids.size < 2) continue;
     const [kind, value] = k.split("\u0000");
     for (const id of ids)
@@ -180,8 +194,13 @@ export function topicTree(
         else fact.more += 1;
       }
   }
-  // The hierarchy: children under parents; topics whose parent is unknown
-  // stay at the top, marked, rather than disappearing.
+}
+
+/**
+ * The hierarchy: children under parents, oldest first; topics whose parent
+ * is unknown stay at the top, marked, rather than disappearing.
+ */
+function hierarchy(nodes) {
   const roots = [];
   for (const node of nodes.values()) {
     const parent = node.parent_id ? nodes.get(node.parent_id) : undefined;
@@ -195,5 +214,5 @@ export function topicTree(
           Date.parse(a.first_declared_at) - Date.parse(b.first_declared_at),
       )
       .map((node) => ({ ...node, children: order(node.children) }));
-  return { threads: order(roots), loose_turns: loose };
+  return order(roots);
 }

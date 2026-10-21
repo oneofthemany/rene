@@ -59,7 +59,10 @@ export const startMcpTransport = async (
       "Optional MCP adapter could not load; its peers remain available",
     );
   }
-  const androidProviders: AndroidAnalysisPort[] = [];
+  // Each server's own Android provider, until that server closes cleanly: a
+  // daemon serves every connection from the factory, so one is made per
+  // connection. One whose server cleanup failed stays for shutdown to retry.
+  const androidProviders = new Set<AndroidAnalysisPort>();
   const servers = new Set<ReturnType<typeof createServer>>();
   const closeServers = async (): Promise<void> => {
     const results = await Promise.allSettled(
@@ -73,7 +76,10 @@ export const startMcpTransport = async (
   };
   const closeAndroid = async (): Promise<void> => {
     const results = await Promise.allSettled(
-      androidProviders.map((provider) => provider.close()),
+      [...androidProviders].map(async (provider) => {
+        await provider.close();
+        androidProviders.delete(provider);
+      }),
     );
     for (const result of results)
       if (result.status === "rejected") throw result.reason;
@@ -116,7 +122,7 @@ export const startMcpTransport = async (
         const android = createAndroidAnalysisProvider(
           serverContext.environment,
         );
-        androidProviders.push(android);
+        androidProviders.add(android);
         const server = (dependencies.createServer ?? createServer)(
           { kind: "session", session },
           {
@@ -134,6 +140,8 @@ export const startMcpTransport = async (
         server.close = async () => {
           await closeServer();
           servers.delete(server);
+          // A server closes its providers (createServer), this one included.
+          androidProviders.delete(android);
         };
         return server;
       },

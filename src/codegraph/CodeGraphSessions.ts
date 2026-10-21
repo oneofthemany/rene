@@ -22,24 +22,47 @@ export interface CodeGraphReply {
 }
 
 /**
- * The identity (device and inode) of a project's index database, or
- * undefined when it can't be read. A build replaces the file, so a changed
- * identity means a server opened before it reads the old, deleted index.
+ * The identity (device and inode) of a project's index, or undefined when
+ * it can't be read: its DuckDB store folder (packages/codegraph-store), or
+ * an older SQLite file. A build replaces either, so a changed identity
+ * means a server opened before it reads the old index.
  */
 const databaseIdentity = (root: string): string | undefined => {
-  try {
-    const stats = statSync(join(root, ".codegraph", "codegraph.db"));
-    return `${stats.dev}:${stats.ino}`;
-  } catch {
-    return undefined;
+  for (const name of ["codegraph.db.store", "codegraph.db"]) {
+    try {
+      const stats = statSync(join(root, ".codegraph", name));
+      return `${name}:${stats.dev}:${stats.ino}`;
+    } catch {
+      // Not this kind of index.
+    }
   }
+  return undefined;
 };
+
+/**
+ * The identity of a CodeGraph build: when its entry points were last
+ * written. A rebuild in place keeps the paths and changes the code, so a
+ * server started before it runs code (and storage) that is gone.
+ */
+const buildIdentity = (install: CodeGraphInstall): string =>
+  [install.cli, install.library]
+    .map((path) => {
+      try {
+        const stats = statSync(path);
+        return `${stats.mtimeMs}:${stats.size}`;
+      } catch {
+        return "missing";
+      }
+    })
+    .join("|");
 
 interface Session {
   readonly root: string;
   readonly install: CodeGraphInstall;
   /** The index database the server opened (databaseIdentity at its start). */
   readonly database: string | undefined;
+  /** The CodeGraph build the server runs (buildIdentity at its start). */
+  readonly build: string;
   readonly transport: OwnedMcpTransport;
   readonly client: Client;
   connected: boolean;
@@ -127,13 +150,15 @@ export class CodeGraphSessions {
   #session(install: CodeGraphInstall, root: string): Session {
     const existing = this.#sessions.get(root);
     const database = databaseIdentity(root);
-    // A server started from another install, or on an index another process
-    // has since rebuilt (servers are read-only and never see that), is
-    // replaced, not reused.
+    const build = buildIdentity(install);
+    // A server started from another install or an older build of it, or on
+    // an index another process has since rebuilt (servers are read-only and
+    // never see that), is replaced, not reused.
     if (
       existing !== undefined &&
       existing.closing === undefined &&
       existing.install.cli === install.cli &&
+      existing.build === build &&
       existing.database === database
     )
       return existing;
@@ -159,6 +184,7 @@ export class CodeGraphSessions {
       root,
       install,
       database,
+      build,
       transport,
       client: new Client({ name: "rea-codegraph-adapter", version: "1" }),
       connected: false,

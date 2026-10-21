@@ -2,22 +2,20 @@ import { readFileSync } from "node:fs";
 
 /**
  * Reports of tool calls to the rene workbench bridge, which records them in
- * the project's history. Both ways an agent reaches rene report through
- * here: the MCP relay (frontend/relay.mjs), which reads calls off the stdio
- * traffic, and `rene call`, which makes them itself.
+ * the project's history, as `rene call` makes them.
  *
  * The bridge writes a private report file per agent session holding its URL
- * and the session's token, and names it to the relay with --report and to
- * the agent's shell with REA_HISTORY_REPORT. Reporting never changes or
+ * and the session's token, and names it to the agent's shell with
+ * REA_HISTORY_REPORT. Reporting never changes or
  * delays a call: a missing file or a bridge that is down costs one line on
  * stderr, and the call carries on.
  */
 
 /** Results larger than this are reported by size only; history keeps up to 8 MiB. */
-export const MAX_REPORTED_RESULT_BYTES = 8 * 1024 * 1024;
+const MAX_REPORTED_RESULT_BYTES = 8 * 1024 * 1024;
 
 /** How long a finishing caller waits for outstanding reports to land. */
-export const REPORT_DRAIN_MS = 2000;
+const REPORT_DRAIN_MS = 2000;
 
 const REPORT_TIMEOUT_MS = 10_000;
 

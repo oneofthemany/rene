@@ -11,6 +11,8 @@
  */
 
 import { toWslSharedIndexError } from './wsl-shared-index';
+// The adapter loads its native addon only when DuckDB storage is first used.
+import { createDuckdbDatabase } from './duckdb-adapter';
 
 export interface SqliteStatement {
   run(...params: any[]): { changes: number; lastInsertRowid: number | bigint };
@@ -37,10 +39,15 @@ export interface SqliteDatabase {
 }
 
 /**
- * The active SQLite backend. Only one now (`node:sqlite`); kept as a named type
- * so `codegraph status` and the per-instance reporting have a stable shape.
+ * The active storage backend: `node:sqlite`, or DuckDB through codegraph-store
+ * (duckdb-adapter.ts) when CODEGRAPH_STORAGE=duckdb, while it is checked
+ * against SQLite. Named so `codegraph status` and the per-instance reporting
+ * have a stable shape.
  */
-export type SqliteBackend = 'node-sqlite';
+export type SqliteBackend = 'node-sqlite' | 'duckdb';
+
+/** Whether this process stores indexes in DuckDB (CODEGRAPH_STORAGE=duckdb). */
+export const duckdbStorageSelected = (): boolean => process.env.CODEGRAPH_STORAGE === 'duckdb';
 
 /**
  * Wraps Node's built-in `node:sqlite` (`DatabaseSync`) to match the
@@ -197,6 +204,7 @@ class NodeSqliteAdapter implements SqliteDatabase {
  * a process-global would race.
  */
 export function createDatabase(dbPath: string, opts?: { readOnly?: boolean }): { db: SqliteDatabase; backend: SqliteBackend } {
+  if (duckdbStorageSelected()) return { db: createDuckdbDatabase(dbPath, opts), backend: 'duckdb' };
   try {
     return { db: new NodeSqliteAdapter(dbPath, opts), backend: 'node-sqlite' };
   } catch (error) {

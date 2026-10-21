@@ -1,21 +1,21 @@
 // The topic gate: Claude Code hooks that hold a workbench agent to declaring
 // the topic of every turn with rene's record_topic tool.
 //
-// An agent reaches rene's tools one of two ways, the session's toolkit
-// (REA_AGENT_TOOLKIT): "mcp", as MCP tools (mcp__rea__*), or "cli", as
-// `rene call <tool> '<json>'` in its shell. With "cli" the shell runs rea and
-// nothing else (reaOnlyShellLine), and a `rene call record_topic` is the
-// declaration; its printed Evidence is how the gate sees it succeed.
+// An agent reaches rene's tools as `rene call <tool> '<json>'` in its shell.
+// The shell runs rene and nothing else (reaOnlyShellLine), and a
+// `rene call record_topic` is the declaration; its printed Evidence is how the
+// gate sees it succeed. rene is never reached over MCP: an `mcp__rea__*` tool,
+// left by an old registration, is refused like the built-ins rene replaces.
 //
 // A turn belongs to the topic declared in it and to no other (topics.mjs), so
 // a turn without a declaration has no topic at all. The gate makes that
 // rare: when a prompt arrives the agent is reminded; until record_topic has
 // been called in the turn, every other tool is refused (ToolSearch stays
-// allowed, so a deferred record_topic can be loaded); and a turn that would
-// end without a successful declaration is sent back once to make one.
+// allowed); and a turn that would end without a successful declaration is
+// sent back once to make one.
 //
 // The bridge registers this file for UserPromptSubmit, PreToolUse,
-// PostToolUse (record_topic only) and Stop (terminal.mjs), with
+// PostToolUse (the shell only) and Stop (terminal.mjs), with
 // REA_TOPIC_GATE_DIR naming a private folder for the gate's state: one file
 // per Claude Code session, holding whether its current turn has a
 // declaration. The hooks see each event as it happens, which the transcript
@@ -64,10 +64,7 @@ const TOPIC_CHOICE =
   "pass the topic_id of the topic it continues (the project assessment's Topics section lists them, with their threads), " +
   "or declare a new feature, question, bug, investigation, refactor, docs, decision or other topic under its thread " +
   "(declare a thread first when none fits). Every turn needs its own declaration.";
-const DECLARE = {
-  mcp: `Declare this request's topic with the rene record_topic tool (mcp__rea__record_topic) before anything else: ${TOPIC_CHOICE}`,
-  cli: `Declare this request's topic before anything else with \`rene call record_topic '<json>'\` in your shell: ${TOPIC_CHOICE}`,
-};
+const DECLARE = `Declare this request's topic before anything else with \`rene call record_topic '<json>'\` in your shell: ${TOPIC_CHOICE}`;
 
 // The user's standing rule on limitations, given with every prompt so it
 // needn't be repeated: a missing tool, program or capability is closed, not
@@ -80,21 +77,13 @@ const CLOSE_GAPS =
 
 // The user's standing rule on tools: rene is the agent's toolbox, so every
 // action goes through it and its calls are recorded in the project history.
-const RENE_TOOLS =
+const USE_RENE =
+  "Work through rene's tools with `rene call <tool> '<json>'` in your shell (`rene call <tool> -` reads the JSON from stdin), " +
+  "not your built-in ones; `rene tools search <words>` finds a tool and `rene tools describe <tool>` shows its input. " +
+  "Your shell runs only rene commands, whose output you may pipe into head, tail, wc or jq. " +
   "run_command for shell commands, read_file, write_file and edit_file for files, " +
   "search_text and find_files to search, and the source graph (explore_source_graph) to understand code. " +
   "Where rene has no tool for an action, build it as a rene tool.";
-const USE_RENE = {
-  mcp: `Work through rene's tools (mcp__rea__*), not your built-in ones: ${RENE_TOOLS}`,
-  cli:
-    "Work through rene's tools with `rene call <tool> '<json>'` in your shell (`rene call <tool> -` reads the JSON from stdin), " +
-    "not your built-in ones; `rene tools search <words>` finds a tool and `rene tools describe <tool>` shows its input. " +
-    `Your shell runs only rene commands, whose output you may pipe into head, tail, wc or jq. ${RENE_TOOLS}`,
-};
-
-/** How the agent calls one rene tool in its toolkit. */
-const howToCall = (tool, toolkit) =>
-  toolkit === "cli" ? `\`rene call ${tool} '<json>'\`` : `mcp__rea__${tool}`;
 
 /**
  * Claude Code built-ins and the rene tool that replaces each. Built-ins with
@@ -113,13 +102,18 @@ const RENE_REPLACEMENTS = new Map([
   ["LS", "find_files"],
 ]);
 const SHOWN_BY_READ_ONLY = /\.(?:png|jpe?g|gif|webp|bmp|pdf)$/iu;
+/** rene's tools as an MCP server registered under the name rea. */
+const RENE_MCP_TOOL = /^mcp__rea__(.+)$/u;
 
 /**
- * The refusal for a built-in tool that a rene tool replaces, if it is one.
- * With the cli toolkit the shell tool is how rene is reached, so a line that
- * runs rea and nothing else passes.
+ * The refusal for a tool that a rene call replaces, if it is one: a built-in
+ * with a rene counterpart, or rene's own tool reached over MCP. The shell is
+ * how rene is reached, so a line that runs rene and nothing else passes.
  */
-export function builtInToolRefusal(toolName, toolInput, toolkit = "mcp") {
+export function builtInToolRefusal(toolName, toolInput) {
+  const overMcp = RENE_MCP_TOOL.exec(toolName ?? "");
+  if (overMcp)
+    return `${toolName} is refused: rene isn't reached over MCP. Run \`rene call ${overMcp[1]} '<json>'\` in your shell instead, so the call is recorded in the project history. ${USE_RENE}`;
   const replacement = RENE_REPLACEMENTS.get(toolName);
   if (replacement === undefined) return undefined;
   if (
@@ -127,12 +121,12 @@ export function builtInToolRefusal(toolName, toolInput, toolkit = "mcp") {
     SHOWN_BY_READ_ONLY.test(String(toolInput?.file_path ?? ""))
   )
     return undefined;
-  if (toolkit === "cli" && toolName === "Bash") {
+  if (toolName === "Bash") {
     const line = reaOnlyShellLine(String(toolInput?.command ?? ""));
     if (line.ok) return undefined;
-    return `This shell runs only rene commands, and this one doesn't (${line.reason}). Run a shell command with \`rene call run_command '{"command":"…","cwd":"…"}'\`, so it is recorded in the project history. ${USE_RENE.cli}`;
+    return `This shell runs only rene commands, and this one doesn't (${line.reason}). Run a shell command with \`rene call run_command '{"command":"…","cwd":"…"}'\`, so it is recorded in the project history. ${USE_RENE}`;
   }
-  return `${toolName} is refused: use rene's ${replacement} (${howToCall(replacement, toolkit)}) instead, so the call is recorded in the project history. ${USE_RENE[toolkit]}`;
+  return `${toolName} is refused: use rene's ${replacement} (\`rene call ${replacement} '<json>'\`) instead, so the call is recorded in the project history. ${USE_RENE}`;
 }
 
 const readStdin = async () => {
@@ -141,18 +135,15 @@ const readStdin = async () => {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 };
 
-const isTopicTool = (name) => /(?:^|__)record_topic$/.test(name ?? "");
-
-/** The rene calls a shell tool use makes, when its line runs only rea. */
+/** The rene calls a shell tool use makes, when its line runs only rene. */
 const reaCalls = (toolName, toolInput) => {
   if (toolName !== "Bash") return [];
   const line = reaOnlyShellLine(String(toolInput?.command ?? ""));
   return line.ok ? line.calls : [];
 };
 
-/** Whether a tool use declares the turn's topic, through MCP or rene call. */
+/** Whether a tool use declares the turn's topic with `rene call record_topic`. */
 const declaresTopic = (toolName, toolInput) =>
-  isTopicTool(toolName) ||
   reaCalls(toolName, toolInput).some(({ tool }) => tool === "record_topic");
 
 // The argument that says what a call was about, in the order tools use them.
@@ -181,9 +172,9 @@ const reneCallLine = ({ tool, args }) => {
 };
 
 /**
- * With the cli toolkit Claude Code shows a rene call only as a shell command,
- * and folds a run of them into one line. The gate names each rene tool the
- * line ran in the console (a hook's systemMessage), as an MCP client would.
+ * Claude Code shows a rene call only as a shell command, and folds a run of
+ * them into one line. The gate names each rene tool the line ran in the
+ * console (a hook's systemMessage).
  */
 const reneCallNote = (toolName, toolInput) => {
   const calls = reaCalls(toolName, toolInput);
@@ -192,11 +183,11 @@ const reneCallNote = (toolName, toolInput) => {
     : { systemMessage: calls.map(reneCallLine).join("\n") };
 };
 
-/** Whether a tool use's result shows a successful declaration. */
-
-const declared = (toolName, response) => {
-  if (isTopicTool(toolName)) return !failed(response);
-  // The receipt `rene call` writes to stderr survives a filter on stdout.
+/**
+ * Whether a shell result shows a successful declaration. The receipt
+ * `rene call` writes to stderr survives a filter on stdout.
+ */
+const declared = (response) => {
   const output =
     typeof response === "string"
       ? response
@@ -229,34 +220,28 @@ function stateStore(directory, session) {
 }
 
 /**
- * The user makes every commit, never the agent. Git subcommands that write
- * history or publish it (src/toolbox/GitHistory.ts finds them) are refused in
- * any shell command an agent sends through these tools: Claude Code's Bash or
- * rene's run_command. Checked before the topic gate and independent of its
- * state, so it holds even when that state can't be read.
+ * The commands a run_command on a shell line would run. One whose arguments
+ * aren't on the line (read from stdin) can't be checked, so it is reported
+ * as undefined.
  */
-const SHELL_TOOLS = new Set(["Bash", "mcp__rea__run_command"]);
-
-/**
- * The shell command lines a tool use runs: its own, and with the cli toolkit
- * the command of each `rene call run_command` on it. A run_command whose
- * arguments aren't on the line (read from stdin) can't be checked, so it is
- * reported as undefined and refused.
- */
-const shellCommands = (toolName, toolInput) => {
-  if (!SHELL_TOOLS.has(toolName)) return [];
-  const own = String(toolInput?.command ?? "");
-  const nested = reaCalls(toolName, toolInput)
+const runCommandLines = (toolName, toolInput) =>
+  reaCalls(toolName, toolInput)
     .filter(({ tool }) => tool === "run_command")
     .map(({ args }) =>
       args === null ? undefined : String(args.command ?? ""),
     );
-  return [own, ...nested];
-};
 
-/** The refusal for an agent's history-writing git command, if it sent one. */
+/**
+ * The user makes every commit, never the agent. Git subcommands that write
+ * history or publish it (src/toolbox/GitHistory.ts finds them) are refused in
+ * a shell line and in each `rene call run_command` on it. Checked before the
+ * topic gate and independent of its state, so it holds even when that state
+ * can't be read. A run_command read from stdin is refused, as unchecked.
+ */
 const gitHistoryRefusal = (toolName, toolInput) => {
-  for (const command of shellCommands(toolName, toolInput)) {
+  if (toolName !== "Bash") return undefined;
+  const own = String(toolInput?.command ?? "");
+  for (const command of [own, ...runCommandLines(toolName, toolInput)]) {
     if (command === undefined)
       return "run_command's arguments must be on the rene call line, not read from stdin, so the workbench can check the command it runs.";
     const subcommand = gitHistoryWrite(command);
@@ -264,19 +249,6 @@ const gitHistoryRefusal = (toolName, toolInput) => {
       return `git ${subcommand} is refused: ${GIT_HISTORY_RULE}`;
   }
   return undefined;
-};
-
-/**
- * The command lines run_command would run for a tool use: an MCP
- * run_command's own, or each `rene call run_command` on a shell line. (The
- * shell line itself runs rene alone, which the tool rule holds it to.)
- */
-const runCommandLines = (toolName, toolInput) => {
-  if (toolName === "mcp__rea__run_command")
-    return [String(toolInput?.command ?? "")];
-  return reaCalls(toolName, toolInput)
-    .filter(({ tool, args }) => tool === "run_command" && args !== null)
-    .map(({ args }) => String(args.command ?? ""));
 };
 
 /**
@@ -288,7 +260,7 @@ const runCommandLines = (toolName, toolInput) => {
  */
 const consentAnswer = (event, toolName, toolInput) => {
   for (const command of runCommandLines(toolName, toolInput)) {
-    const reason = consentNeeded(command);
+    const reason = command === undefined ? undefined : consentNeeded(command);
     if (reason !== undefined)
       return {
         hookSpecificOutput: {
@@ -301,22 +273,17 @@ const consentAnswer = (event, toolName, toolInput) => {
   return undefined;
 };
 
-/** A tool result that reports failure. */
-
-const failed = (response) =>
-  response?.isError === true || response?.is_error === true;
-
 /**
  * The hook's answer for one event, or undefined to let it through.
  * @param {object} input the hook's JSON
  * @param {string} directory the gate's state folder
  */
-export async function gate(input, directory, toolkit = "mcp") {
+export async function gate(input, directory) {
   const event = input.hook_event_name;
   if (event === "PreToolUse") {
     const refusal =
       gitHistoryRefusal(input.tool_name, input.tool_input) ??
-      builtInToolRefusal(input.tool_name, input.tool_input, toolkit);
+      builtInToolRefusal(input.tool_name, input.tool_input);
     if (refusal !== undefined)
       return {
         hookSpecificOutput: {
@@ -332,7 +299,7 @@ export async function gate(input, directory, toolkit = "mcp") {
     return {
       hookSpecificOutput: {
         hookEventName: event,
-        additionalContext: `${DECLARE[toolkit]} ${USE_RENE[toolkit]} ${CLOSE_GAPS}`,
+        additionalContext: `${DECLARE} ${USE_RENE} ${CLOSE_GAPS}`,
       },
     };
   }
@@ -349,14 +316,14 @@ export async function gate(input, directory, toolkit = "mcp") {
       hookSpecificOutput: {
         hookEventName: event,
         permissionDecision: "deny",
-        permissionDecisionReason: `No topic is declared for this turn yet. ${DECLARE[toolkit]}`,
+        permissionDecisionReason: `No topic is declared for this turn yet. ${DECLARE}`,
       },
     };
   }
   if (event === "PostToolUse") {
     if (
       declaresTopic(input.tool_name, input.tool_input) &&
-      declared(input.tool_name, input.tool_response)
+      declared(input.tool_response)
     ) {
       const state = await store.read();
       await store.write({ ...state, declared: true });
@@ -369,7 +336,7 @@ export async function gate(input, directory, toolkit = "mcp") {
     if ((await store.read()).declared) return;
     return {
       decision: "block",
-      reason: `This turn has no successful topic declaration. ${DECLARE[toolkit]} Then finish your answer.`,
+      reason: `This turn has no successful topic declaration. ${DECLARE} Then finish your answer.`,
     };
   }
 }
@@ -382,7 +349,6 @@ if (
     const answer = await gate(
       await readStdin(),
       process.env.REA_TOPIC_GATE_DIR,
-      process.env.REA_AGENT_TOOLKIT === "cli" ? "cli" : "mcp",
     );
     if (answer) process.stdout.write(`${JSON.stringify(answer)}\n`);
   } catch (cause) {

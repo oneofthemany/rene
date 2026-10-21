@@ -14,10 +14,12 @@ process.env.REA_PACKAGE_VERSION = packageJson.version;
 const isMcpMode =
   args.length === 1 && (args[0] === "--mcp" || args[0] === "mcp");
 const isMcpDoctorMode = args[0] === "mcp" && args[1] === "doctor";
-// rene's commands (call, tools, daemon, agent) belong to scripts/rene.mjs;
+// rene's commands (call, tools, daemon, agent, skill) belong to scripts/rene.mjs;
 // rea answers them too, because it is the command the workbench and its
 // container run. They are routed before Incur, like MCP.
-const isReneMode = ["call", "tools", "daemon", "agent"].includes(args[0]);
+const isReneMode = ["call", "tools", "daemon", "agent", "skill"].includes(
+  args[0],
+);
 /** Exit status of a writer terminated by SIGPIPE (128 + 13). */
 const SIGPIPE_EXIT_STATUS = 141;
 // Set once the reader of CLI output has closed the pipe.

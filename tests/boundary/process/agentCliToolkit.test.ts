@@ -7,10 +7,10 @@ import { describe, expect, it } from "vitest";
 
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 
-// A workbench agent session with the cli toolkit: the agent reaches rene
-// with `rene call` in its shell. The topic gate holds its shell to rea and
-// takes a `rene call record_topic` as the turn's declaration, and the session
-// gets a `rea` command and a daemon it shares (frontend/agentToolkit.mjs).
+// A workbench agent session: the agent reaches rene with `rene call` in its
+// shell, never over MCP. The topic gate holds its shell to rene and takes a
+// `rene call record_topic` as the turn's declaration, and the session gets a
+// `rene` command and a daemon it shares (frontend/agentToolkit.mjs).
 
 const frontend = new URL("../../../frontend/", import.meta.url);
 const execute = promisify(execFile);
@@ -26,11 +26,7 @@ type Answer =
     }
   | undefined;
 const { gate } = (await import(new URL("topicGate.mjs", frontend).href)) as {
-  gate(
-    input: Record<string, unknown>,
-    directory: string,
-    toolkit: string,
-  ): Promise<Answer>;
+  gate(input: Record<string, unknown>, directory: string): Promise<Answer>;
 };
 const { startCliToolkit } = (await import(
   new URL("agentToolkit.mjs", frontend).href
@@ -46,7 +42,7 @@ const { startCliToolkit } = (await import(
 };
 const { agentInstructions } = (await import(
   new URL("terminal.mjs", frontend).href
-)) as { agentInstructions(assessment?: string, toolkit?: string): string };
+)) as { agentInstructions(assessment?: string): string };
 
 const recordTopic = `rene call record_topic '{"kind":"thread","title":"T"}'`;
 const topicEvidence = JSON.stringify({
@@ -58,11 +54,7 @@ describe("cli toolkit", () => {
   it("holds a turn's shell to rea and takes rene call record_topic as its declaration", async () => {
     const directory = await createTestTempDirectory("rea-cli-gate-");
     const event = (name: string, extra: Record<string, unknown> = {}) =>
-      gate(
-        { hook_event_name: name, session_id: "s1", ...extra },
-        directory,
-        "cli",
-      );
+      gate({ hook_event_name: name, session_id: "s1", ...extra }, directory);
     const bash = (command: string, extra: Record<string, unknown> = {}) =>
       event("PreToolUse", {
         tool_name: "Bash",
@@ -122,7 +114,26 @@ describe("cli toolkit", () => {
     expect(decision(hidden)).toBe("deny");
   });
 
-  it("reads the session's toolkit from the hook's environment", async () => {
+  it("refuses rene's tools reached over MCP, naming the rene call", async () => {
+    const directory = await createTestTempDirectory("rea-mcp-gate-");
+    // An old registration can still hand a session rene's MCP tools; the
+    // refusal holds before any topic is declared, and after.
+    const answer = await gate(
+      {
+        hook_event_name: "PreToolUse",
+        session_id: "s",
+        tool_name: "mcp__rea__read_file",
+        tool_input: { path: "/a/b.ts" },
+      },
+      directory,
+    );
+    expect(answer?.hookSpecificOutput?.permissionDecision).toBe("deny");
+    expect(answer?.hookSpecificOutput?.permissionDecisionReason).toContain(
+      "rene isn't reached over MCP. Run `rene call read_file '<json>'`",
+    );
+  });
+
+  it("reminds the agent to use rene call when run as a hook", async () => {
     const directory = await createTestTempDirectory("rea-cli-hook-");
     const hook = execute(
       process.execPath,
@@ -131,7 +142,6 @@ describe("cli toolkit", () => {
         env: {
           ...process.env,
           REA_TOPIC_GATE_DIR: directory,
-          REA_AGENT_TOOLKIT: "cli",
         },
       },
     );
@@ -147,21 +157,11 @@ describe("cli toolkit", () => {
     expect(context).not.toContain("mcp__rea__record_topic");
   });
 
-  it("is the default: MCP only when asked for", async () => {
-    const { agentToolkit } = (await import(
-      new URL("agentToolkit.mjs", frontend).href
-    )) as { agentToolkit(env: Record<string, string>): string };
-    expect(agentToolkit({})).toBe("cli");
-    expect(agentToolkit({ REA_AGENT_TOOLKIT: "cli" })).toBe("cli");
-    expect(agentToolkit({ REA_AGENT_TOOLKIT: "mcp" })).toBe("mcp");
-  });
-
   it("tells the agent to use rene call, not MCP tools", () => {
-    const cli = agentInstructions(undefined, "cli");
-    expect(cli).toContain("`rene call <tool> '<json>'`");
-    expect(cli).toContain("declare it with `rene call record_topic`");
-    expect(cli).not.toContain("MCP tools");
-    expect(agentInstructions(undefined, "mcp")).toContain("`rea` MCP tools");
+    const instructions = agentInstructions(undefined);
+    expect(instructions).toContain("`rene call <tool> '<json>'`");
+    expect(instructions).toContain("declare it with `rene call record_topic`");
+    expect(instructions).not.toContain("MCP");
   });
 
   it("gives the session a rea command and a shared daemon that ends with it", async () => {
@@ -213,14 +213,31 @@ describe("cli toolkit", () => {
   });
 });
 
+// The launcher agent registrations on this machine name refuses MCP before it
+// reaches the container, so a stale registration fails instead of connecting.
+it.each([
+  [["mcp"], {}],
+  [["--mcp"], {}],
+  [["mcp", "add"], {}],
+  [["mcp", "add"], { REA_WORKBENCH_MCP: "page" }],
+  [["setup", "--client", "codex"], {}],
+  [["setup", "--yes"], { REA_WORKBENCH_MCP: "page" }],
+])("the container launcher refuses rea %j for agents", async (args, extra) => {
+  const launcher = fileURLToPath(new URL("container/rea", frontend));
+  const refused = await execute(launcher, args, {
+    env: { ...process.env, REA_WORKBENCH_MCP: "", ...extra },
+  }).then(
+    () => undefined,
+    (cause: { code?: number; stderr?: string }) => cause,
+  );
+  expect(refused?.code).toBe(77);
+  expect(refused?.stderr).toContain("Agents reach rene through `rene call");
+});
+
 it("counts a declaration whose output was filtered, from its stderr receipt", async () => {
   const directory = await createTestTempDirectory("rea-cli-receipt-");
   const event = (name: string, extra: Record<string, unknown> = {}) =>
-    gate(
-      { hook_event_name: name, session_id: "s1", ...extra },
-      directory,
-      "cli",
-    );
+    gate({ hook_event_name: name, session_id: "s1", ...extra }, directory);
   const filtered = `${recordTopic} | jq -r .normalized_result.topic_id`;
   await event("UserPromptSubmit");
   await event("PreToolUse", {
@@ -252,7 +269,6 @@ it("names each rene tool a shell line ran in the console", async () => {
       tool_response: { stdout: "", stderr: "" },
     },
     directory,
-    "cli",
   );
   expect(note).toEqual({
     systemMessage:

@@ -122,8 +122,8 @@ checks show as "Not used" rather than counting as something to fix; nothing
 is uninstalled. Everything starts on except IDA, which needs your own licence.
 The default engine is saved as `REA_ANALYSIS_PROVIDER` ("Let REA choose" is
 `auto`, which asks when several engines can open a program); only engines
-that are on can be chosen. Agents get it the next time you run Agent setup,
-which records it in their registration. Both are kept in the `--settings`
+that are on can be chosen. Agent sessions get it through the environment the
+bridge starts them with. Both are kept in the `--settings`
 file, with its `.bak`.
 
 ### Updates
@@ -170,11 +170,10 @@ so `npm run build:cached` takes effect without rebuilding the image.
 
 `frontend/container/rea` is the launcher: it starts the container if needed,
 forwards provider settings (`REA_*`, `JAVA_HOME`, `GHIDRA_*`, `HOPPER_*`) and
-runs `scripts/rea.mjs` inside it over stdio. The workbench bridge uses it, and
-it sets `REA_REGISTRATION_ENTRYPOINT`, so `rea setup` (the Agent setup page)
-registers agents to run the launcher. Agents registered earlier still run REA
-on the host; `rea doctor` reports them as `registration:<client>` until you
-register them again.
+runs `scripts/rea.mjs` inside it over stdio. The workbench bridge and every
+agent session's `rene` command use it. It refuses `rea mcp` to anything but
+the page's own client and refuses a writing `rea setup`: agents reach rene
+with `rene call`, never as a registered MCP server.
 
 `start.sh` builds the image when its recipe changed (it asks first; about
 2 GB), starts the container and points the bridge at the launcher.
@@ -190,7 +189,7 @@ from the container. Once you have IDA and an IDA MCP
 server installed, choose its registration file under **Provider paths**.
 
 Upstream REA's installers deliberately don't install Java or Ghidra (see
-`AGENTS.md`). This download step belongs to the workbench, not to `rea setup`.
+`AGENTS.md`). This download step belongs to the workbench.
 To change a built-in release, edit its version, URL, size and SHA-256 in
 `providerReleases.mjs`.
 
@@ -221,35 +220,40 @@ list.
 
 ### Agent calls
 
-An agent session reaches rene through its **toolkit** (`agentToolkit.mjs`):
+An agent session reaches rene as `rene call <tool> '<json>'` in its shell
+(`agentToolkit.mjs`). The session gets a `rene` command on its `PATH`
+(`frontend/.workbench-agent/bin/rene`, which runs the workbench's rea
+command, the container launcher by default) and one `rene daemon` of its own,
+named to `rene call` by `REA_DAEMON_SOCKET`, so every call shares one
+session: a target one call opens stays open for the next. The daemon is an
+owned process held by an open stdin pipe and ends with the agent. Claude Code
+shows these calls as shell commands, so its topic gate also prints a line for
+each one in the console naming the rene tool and its main argument
+(`rene · read_file /path`).
 
-- **cli** (the default): the agent runs `rene call <tool> '<json>'` in its
-  shell. The session gets a `rea` command on its `PATH`
-  (`frontend/.workbench-agent/bin/rea`, which runs the workbench's rea
-  command, the container launcher by default) and one `rene daemon` of its
-  own, named to `rene call` by `REA_DAEMON_SOCKET`, so every call shares one
-  session: a target one call opens stays open for the next. The daemon is an
-  owned process held by an open stdin pipe and ends with the agent. Claude
-  Code shows these calls as shell commands, so its topic gate also prints a
-  line for each one in the console naming the rene tool and its main
-  argument (`rene · read_file /path`).
-- **mcp** (`REA_AGENT_TOOLKIT=mcp` in the workbench's environment): the agent
-  runs `relay.mjs` as its `rea` MCP server, which starts REA and passes every
-  byte between them unchanged.
+rene is never an agent's MCP server. As MCP tools it sits beside the agent's
+own reader, writer and shell, which stay available and record nothing, so a
+session can work on the project and leave no Evidence, and one did. Three
+things hold that line, whatever an old or resumed session's configuration
+says: the container launcher (`container/rea`) refuses `rea mcp` to
+everything but the page's own client (`REA_WORKBENCH_MCP=page`), and refuses
+a `rea setup` that would write a registration; Claude Code's topic gate
+refuses any `mcp__rea__*` tool, naming the `rene call` that replaces it; and
+Copilot CLI sessions are started with the tools rene replaces denied
+(`scripts/lib/copilot-tool-policy.mjs`).
 
-Either way each call is reported to the bridge when it starts (shown as
-running in History) and when it settles, with the result: `rene call` reports
-its own calls, and the relay reads each `tools/call` off the JSON-RPC traffic
-(both through `src/toolbox/HistoryReport.ts`). Reports authenticate with a
+Each call is reported to the bridge when it starts (shown as running in
+History) and when it settles, with the result, by `rene call` itself
+(through `src/toolbox/HistoryReport.ts`). Reports authenticate with a
 token issued for that agent session only, written to
 `frontend/.workbench-agent/relay-report.json` (mode 0600) and named to
 `rene call` by `REA_HISTORY_REPORT` (the path, not the token); the page's token
 is never given to the agent. A report never changes or delays a call: if the
 bridge is down, one line goes to stderr and the call carries on. Calls REA
 never answers settle as failed when it exits. Results over 8 MiB are recorded
-by size only, as for page calls. With MCP, agents that get rene from their
-registration talk to REA directly, so their calls aren't recorded; the agent
-picker says so. The agent's chat and reasoning aren't recorded yet.
+by size only, as for page calls. Agents other than Claude Code and Copilot
+CLI get the `rene` command but no instruction or gate, so only the calls they
+make through it are recorded; the agent picker says so.
 
 ### Conversations and audit trail
 
@@ -264,8 +268,8 @@ finds for the project folder and keeps, per project, the prompts, the agent's
 reasoning (as the agent records it) and replies, its tool uses and the
 results it saw, with a cursor so a restart neither loses nor repeats
 anything; conversations written while the bridge was down are caught up when
-the project is opened. Agents that use their registration (Codex, Gemini CLI
-and others) aren't captured yet.
+the project is opened. Other agents' conversations (Codex, Gemini CLI and
+others) aren't captured yet.
 
 Each rene call in a transcript is tied to the call recorded for it by
 timestamp and identity: the same tool with identical arguments, recorded just
@@ -318,8 +322,8 @@ which Claude Code writes a little after the fact.
 ### The user makes every commit
 
 No agent writes git history, whichever agent it is and whatever tool it uses.
-The workbench starts every agent (Claude Code, Copilot CLI and the
-registration agents alike) with git's environment configuration
+The workbench starts every agent (Claude Code, Copilot CLI and the others
+alike) with git's environment configuration
 (`GIT_CONFIG_COUNT`/`KEY`/`VALUE`) pointing `core.hooksPath` at
 `frontend/agent-git-hooks/`. Every process the agent starts inherits it,
 including rene in its container, which the container launcher forwards it to.
@@ -339,7 +343,8 @@ run, since nothing they guard can happen there. For Claude Code the topic gate
 also refuses those git commands before they run, so the agent is told why
 straight away; the agent instructions and each project assessment's Rules say
 the same. While rene is disconnected the agent can't use tools until it is
-reconnected. Copilot CLI and registration agents only get the instruction.
+reconnected. Copilot CLI only gets the instruction, and the other agents
+not even that.
 
 Besides declared relations, topics are linked by fact: two topics whose calls
 read or changed the same file, or named or returned the same Evidence, show
@@ -434,22 +439,20 @@ rather than a submit. Pick it under
 come first, the rest are listed as not installed. Each is the same CLI you run
 in a terminal, with your login, settings, skills and other MCP servers, and
 each reaches this fork's REA through the session's toolkit (see
-[Agent calls](#agent-calls)), in one of two ways.
+[Agent calls](#agent-calls)). Every session gets the `rene` command on its
+`PATH` and a session daemon, launched the way the workbench launches REA (the
+container launcher by default).
 
-**For the session** (Claude Code, GitHub Copilot CLI): rene is added for that
-session only, launched the way the workbench launches REA (the container
-launcher by default), with its tools pre-approved and an instruction to use
-them. This works even where
-no registration exists.
+**Set up for the session** (Claude Code, GitHub Copilot CLI): rene's commands
+are pre-approved, the tools rene replaces are taken away, and the agent is
+told to use rene.
 
-| Agent              | Toolkit | rene added with                   | Pre-approved                                          | Instruction                                                         |
-| ------------------ | ------- | --------------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------- |
-| Claude Code        | cli     | `rea` on `PATH`, a session daemon | `--allowedTools Bash(rea:*)` (and head, tail, wc, jq) | `--append-system-prompt`                                            |
-| Claude Code        | mcp     | `--mcp-config`                    | `--allowedTools mcp__rea`                             | `--append-system-prompt`                                            |
-| GitHub Copilot CLI | cli     | `rea` on `PATH`, a session daemon | `--allow-tool shell(rea)`                             | `AGENTS.md` in a folder added to `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` |
-| GitHub Copilot CLI | mcp     | `--additional-mcp-config @file`   | `--allow-tool rea`                                    | `AGENTS.md` in a folder added to `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` |
+| Agent              | Pre-approved                                                | Taken away                                   | Instruction                                                         |
+| ------------------ | ----------------------------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------- |
+| Claude Code        | `--allowedTools Bash(rene:*)` (and rea, head, tail, wc, jq) | by the topic gate (`topicGate.mjs`)          | `--append-system-prompt`                                            |
+| GitHub Copilot CLI | `--allow-tool shell(rene)` and `shell(rea)`                 | `--deny-tool` view, edit, create, grep, glob | `AGENTS.md` in a folder added to `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` |
 
-With the cli toolkit, Claude Code's topic gate (`topicGate.mjs`) lets its
+Claude Code's topic gate (`topicGate.mjs`) lets its
 shell run rea and nothing else: every command on the line must be `rene call`
 or `rene tools`, or head, tail, wc or jq reading their output from a pipe, with
 no output redirected to a file but `/dev/null` and no command or process
@@ -457,19 +460,15 @@ substitution. Other shell commands go through `rene call run_command`, whose
 command the git rule checks too. A `rene call record_topic` is the turn's
 declaration once it prints record_topic's Evidence.
 
-**From its registration** (every other terminal agent `rea setup` supports):
-Antigravity (`agy`), Gemini CLI (`gemini`), Codex (`codex`), OpenCode
+**The command alone** (every other terminal agent): Antigravity (`agy`), Gemini CLI (`gemini`), Codex (`codex`), OpenCode
 (`opencode`), Cursor CLI (`cursor-agent`), Qwen Code (`qwen`), Kimi Code
 (`kimi`), Grok Build (`grok`), Factory Droid (`droid`), Qoder CLI
 (`qodercli`), Command Code (`cmd`), Devin (`devin`), DeepSeek Harness (`dsh`),
 ZCode (`zcode`), OMP (`omp`), Pi (`pi`) and Hermes (`hermes`). These have no
-way to add an MCP server or pre-approve one server's tools for a single
-session (agy's only switch approves every tool, which the workbench doesn't
-use), so rene comes from the registration **Agent setup** writes. The view
-shows each agent's registration, and the bridge checks it again (a read-only
-`rea setup --dry-run --client <name>`) and refuses to start the agent unless
-it is current. Their rene tools ask for approval as the agent normally does,
-and the guidance comes from the skill Agent setup installs. GUI-only clients
+way to pre-approve commands or take tools away for a single session (agy's
+only switch approves every tool, which the workbench doesn't use). Their
+shell has `rene`, but nothing tells them to use it or stops their own tools,
+so only the calls they make through rene are recorded. GUI-only clients
 (VS Code, Cursor's editor, Windsurf, Trae, WorkBuddy, Claude Desktop) aren't
 listed. Commands for agents not installed here were taken from REA's client
 verifiers and docs; only Claude Code, Copilot CLI and agy were run from the
@@ -588,8 +587,7 @@ API it is reachable only on loopback with the per-launch token.
   path never copies shell values into the file. Restarting REA cancels running
   calls, so the page asks for a second click when any are running. The
   bridge applies the file itself and never runs it as shell. `rea doctor` and
-  `rea setup` see the same paths, so agents you register afterwards get them
-  too. Use these fields for providers you installed yourself; the
+  agent sessions see the same paths. Use these fields for providers you installed yourself; the
   **Install providers** section above the checks downloads the common ones.
 - **Results.** Evidence records get a provenance panel: the
   observed/derived/inferred scale, subject digest, provider, authority,
@@ -603,15 +601,6 @@ API it is reachable only on loopback with the per-launch token.
   input never reveals a real path. Fields named `root` or `*_directory` pick a
   folder. Others pick a file or the current folder. Device paths, such as
   `device_path`, keep a plain text box.
-- **Agent setup.** Registers this REA build as an MCP server with Claude Code,
-  Codex, Cursor and the other agents `rea setup` supports. The view lists each
-  agent setup knows, detected ones first, with its current registration
-  (current or stale), and previews the exact changes and backup paths before
-  anything is written. Apply needs a second click, and the bridge re-plans
-  first, refusing if the plan changed since it was shown. `rea setup` makes
-  every edit, additively and with backups. REA_* provider settings in the
-  bridge's environment are registered with the server. Restart an agent after
-  registering it.
 - **Sessions.** Sessions live in the single MCP child, so `open_binary` state
   carries over between calls until `close_binary` or **Restart server**.
 
@@ -652,7 +641,6 @@ server.mjs          bridge: MCP child owner, call queue, HTTP boundary
 history.mjs         stored call history: summaries, results, pruning
 projects.mjs        projects: folder identity and per-project history
 assessment.mjs      Evidence links, pathways, .rene/assessment.md
-relay.mjs           MCP relay agents run; reports their tool calls
 conversations.mjs   agent transcripts: following, turns, audit trails
 settings.mjs        saved provider paths added to REA's environment
 choices.mjs            what the user uses, and the default analysis engine
@@ -676,7 +664,6 @@ public/results.js   result view, live call view, history
 public/calls.js     call lifecycle: start, queue/progress events, cancel
 public/app.js       state, tool view, render scheduling
 public/browse.js    host path picker over the bridge's directory listing
-public/setup.js     agent registration through rea setup's plan and apply
 public/doctor.js    provider readiness from rea doctor
 public/providerPaths.js  provider path fields, save and restart
 public/choices.js      "What you use" switches and default engine

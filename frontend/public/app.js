@@ -27,6 +27,7 @@ import { effectBadge, renderCatalog as drawCatalog } from "./catalog.js";
 import { initAgent } from "./agent.js";
 import { assessmentDocument, initProjects } from "./projects.js";
 import { refreshDoctor, showProviders } from "./doctor.js";
+import { showSkill } from "./skill.js";
 import { createForm, matchingArgs } from "./form.js";
 import { h, renderError } from "./render.js";
 import {
@@ -38,7 +39,6 @@ import {
   showTurn,
   updateLinks,
 } from "./results.js";
-import { showSetup } from "./setup.js";
 import { renderWorkflowPanel, showWorkflowForm } from "./workflows.js";
 
 const state = {
@@ -256,7 +256,7 @@ document.getElementById("open-agent").addEventListener("click", showAgentView);
 // Header views that replace both the tool and result panes.
 for (const [kind, show] of [
   ["providers", showProviders],
-  ["setup", showSetup],
+  ["skill", showSkill],
 ]) {
   document.getElementById(`open-${kind}`).addEventListener("click", () => {
     state.selected = { kind };

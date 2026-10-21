@@ -8,6 +8,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { isWslWindowsDrive } from './sync/watch-policy';
+import { duckdbIndexExists } from './db/duckdb-adapter';
+import { duckdbStorageSelected } from './db/sqlite-adapter';
 
 /** The default per-project data directory name. */
 export const DEFAULT_CODEGRAPH_DIR = '.codegraph';
@@ -145,6 +147,8 @@ export function isInitialized(projectRoot: string): boolean {
   }
   // Must have codegraph.db, not just .codegraph folder
   const dbPath = path.join(codegraphDir, 'codegraph.db');
+  // A DuckDB index is its store beside that name (db/duckdb-adapter.ts).
+  if (duckdbStorageSelected()) return duckdbIndexExists(dbPath);
   let st: fs.Stats;
   try {
     st = fs.statSync(dbPath);

@@ -91,7 +91,7 @@ export function isModuleKey(key: string): boolean {
 export const MEMBER_TAIL_SQL = "substr(reference_name, length(rtrim(reference_name, replace(reference_name, '.', ''))) + 1)";
 
 /** The rows parked under a module: the partial WHERE of the indexes that find them. */
-export const MODULE_PARKED_SQL = "status = 'failed' AND name_tail GLOB 'module:*'";
+export const MODULE_PARKED_SQL = "status = 'failed' AND name_tail LIKE 'module:%'";
 
 /**
  * The tail of a reference that waits for a module rather than for a name: the

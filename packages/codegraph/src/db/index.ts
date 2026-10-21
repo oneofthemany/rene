@@ -4,7 +4,34 @@
  * Handles SQLite database initialization and connection management.
  */
 
-import { SqliteDatabase, SqliteBackend, createDatabase } from './sqlite-adapter';
+import { SqliteDatabase, SqliteBackend, createDatabase, duckdbStorageSelected } from './sqlite-adapter';
+import { duckdbIndexExists, duckdbStoreDirectory, type DuckdbAdapter } from './duckdb-adapter';
+
+/** Bytes in a directory's files (a DuckDB store: its generations and log). */
+function directorySize(directory: string): number {
+  let total = 0;
+  const visit = (dir: string): void => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) visit(full);
+      else {
+        try {
+          total += fs.statSync(full).size;
+        } catch {
+          /* removed while counted */
+        }
+      }
+    }
+  };
+  visit(directory);
+  return total;
+}
 import * as fs from 'fs';
 import * as path from 'path';
 import { SchemaVersion } from '../types';
@@ -106,6 +133,7 @@ export class DatabaseConnection {
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
+    if (duckdbStorageSelected()) return DatabaseConnection.openDuckdb(dbPath, {});
 
     // Create and configure database
     const { db, backend } = createDatabase(dbPath);
@@ -160,9 +188,55 @@ export class DatabaseConnection {
   }
 
   /**
+   * A DuckDB index (packages/codegraph-store): its own schema, then the
+   * newest sealed generation and its log; a writer logs every committed
+   * write from then on, and a reader follows the log. No FTS5 (search uses
+   * the token table), no migrations (the schema is current), no pragmas.
+   */
+  private static openDuckdb(dbPath: string, options: { readOnly?: boolean }): DatabaseConnection {
+    if (options.readOnly && !duckdbIndexExists(dbPath)) {
+      throw new Error(`Database not found: ${dbPath}`);
+    }
+    const { db, backend } = createDatabase(dbPath, options);
+    const adapter = db as DuckdbAdapter;
+    adapter.exec(fs.readFileSync(path.join(__dirname, 'schema.duckdb.sql'), 'utf-8'));
+    try {
+      adapter.loadSealed();
+    } catch (error) {
+      // The store refuses an index sealed or logged under another schema
+      // before it changes anything (codegraph-store's check_schema).
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.startsWith('schema mismatch')) throw error;
+      if (options.readOnly) {
+        throw new Error(
+          `The index at ${dbPath} was built by a CodeGraph with another schema (${message}); ` +
+            'open it for writing (codegraph sync or index) to rebuild it.'
+        );
+      }
+      // The index is derived from the source: begin a new one, which the next
+      // sync fills with every file. The old store is moved aside first, so a
+      // process still holding it keeps a whole directory, then removed.
+      const store = duckdbStoreDirectory(dbPath);
+      const aside = `${store}.schema-${Date.now()}`;
+      fs.renameSync(store, aside);
+      console.warn(`[codegraph] ${dbPath} was built with another schema (${message}); starting a new index.`);
+      fs.rmSync(aside, { recursive: true, force: true });
+      adapter.loadSealed();
+    }
+    if (!options.readOnly) {
+      adapter.startLog();
+      db.prepare(
+        'INSERT OR IGNORE INTO schema_versions (version, applied_at, description) VALUES (?, ?, ?)'
+      ).run(CURRENT_SCHEMA_VERSION, Date.now(), 'DuckDB schema');
+    }
+    return new DatabaseConnection(db, dbPath, backend, false, options.readOnly);
+  }
+
+  /**
    * Open an existing database
    */
   static open(dbPath: string, options: { readOnly?: boolean } = {}): DatabaseConnection {
+    if (duckdbStorageSelected()) return DatabaseConnection.openDuckdb(dbPath, options);
     if (!fs.existsSync(dbPath)) {
       throw new Error(`Database not found: ${dbPath}`);
     }
@@ -218,6 +292,7 @@ export class DatabaseConnection {
    * row written by anyone during the window is captured by the rebuild.
    */
   beginBulkNodeLoad(): void {
+    if (this.backend === 'duckdb') return; // no SQLite triggers, indexes or WAL to tune
     if (!this.fts5Available) return;
     for (const t of DatabaseConnection.FTS_TRIGGER_NAMES) {
       this.db.exec(`DROP TRIGGER IF EXISTS ${t}`);
@@ -231,6 +306,7 @@ export class DatabaseConnection {
    * IF NOT EXISTS).
    */
   endBulkNodeLoad(): void {
+    if (this.backend === 'duckdb') return; // no SQLite triggers, indexes or WAL to tune
     if (!this.fts5Available) return;
     this.db.exec(`INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')`);
     this.recreateFtsTriggers();
@@ -279,6 +355,7 @@ export class DatabaseConnection {
    * EXISTS).
    */
   beginBulkParseLoad(): void {
+    if (this.backend === 'duckdb') return; // no SQLite triggers, indexes or WAL to tune
     for (const idx of DatabaseConnection.BULK_PARSE_INDEX_NAMES) {
       this.db.exec(`DROP INDEX IF EXISTS ${idx}`);
     }
@@ -295,6 +372,7 @@ export class DatabaseConnection {
    * beginBulkEdgeLoad simply re-drops them (DROP IF EXISTS — idempotent).
    */
   async endBulkParseLoad(): Promise<void> {
+    if (this.backend === 'duckdb') return; // no SQLite indexes to rebuild
     const schemaPath = path.join(__dirname, 'schema.sql');
     const schema = fs.readFileSync(schemaPath, 'utf-8');
     for (const idx of DatabaseConnection.BULK_PARSE_INDEX_NAMES) {
@@ -333,6 +411,7 @@ export class DatabaseConnection {
    * CREATE INDEX IF NOT EXISTS).
    */
   beginBulkRefLoad(): void {
+    if (this.backend === 'duckdb') return; // no SQLite triggers, indexes or WAL to tune
     for (const idx of DatabaseConnection.BULK_REF_INDEX_NAMES) {
       this.db.exec(`DROP INDEX IF EXISTS ${idx}`);
     }
@@ -340,6 +419,7 @@ export class DatabaseConnection {
 
   /** Leave bulk-ref mode: recreate each index in one scan (yield between). */
   async endBulkRefLoad(): Promise<void> {
+    if (this.backend === 'duckdb') return; // no SQLite indexes to rebuild
     const schemaPath = path.join(__dirname, 'schema.sql');
     const schema = fs.readFileSync(schemaPath, 'utf-8');
     for (const idx of DatabaseConnection.BULK_REF_INDEX_NAMES) {
@@ -376,6 +456,7 @@ export class DatabaseConnection {
    * re-applies CREATE INDEX IF NOT EXISTS).
    */
   beginBulkEdgeLoad(): void {
+    if (this.backend === 'duckdb') return; // no SQLite triggers, indexes or WAL to tune
     for (const idx of DatabaseConnection.BULK_EDGE_INDEX_NAMES) {
       this.db.exec(`DROP INDEX IF EXISTS ${idx}`);
     }
@@ -395,6 +476,7 @@ export class DatabaseConnection {
    * stays inside the window.
    */
   async endBulkEdgeLoad(options: { deferSynthesisSite?: boolean } = {}): Promise<void> {
+    if (this.backend === 'duckdb') return; // no SQLite indexes to rebuild
     const schemaPath = path.join(__dirname, 'schema.sql');
     const schema = fs.readFileSync(schemaPath, 'utf-8');
     for (const idx of DatabaseConnection.BULK_EDGE_INDEX_NAMES) {
@@ -414,6 +496,7 @@ export class DatabaseConnection {
    * busy with synthesis rather than on the critical path. Idempotent.
    */
   createSynthesisSiteIndex(): void {
+    if (this.backend === 'duckdb') return; // no SQLite triggers, indexes or WAL to tune
     const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf-8');
     const m = schema.match(new RegExp(`CREATE INDEX IF NOT EXISTS ${DatabaseConnection.SYNTHESIS_SITE_INDEX}\\b[^;]*;`));
     if (!m) throw new Error(`schema.sql: edge index ${DatabaseConnection.SYNTHESIS_SITE_INDEX} not found`);
@@ -512,6 +595,7 @@ export class DatabaseConnection {
    * writer; anything else ⇒ they can. See issue #238.
    */
   getJournalMode(): string {
+    if (this.backend === 'duckdb') return 'duckdb';
     const raw = this.db.pragma('journal_mode');
     const row = Array.isArray(raw) ? raw[0] : raw;
     const mode = row && typeof row === 'object'
@@ -548,6 +632,7 @@ export class DatabaseConnection {
    * Get database file size in bytes
    */
   getSize(): number {
+    if (this.backend === 'duckdb') return directorySize(duckdbStoreDirectory(this.dbPath));
     const stats = fs.statSync(this.dbPath);
     return stats.size;
   }
@@ -557,6 +642,7 @@ export class DatabaseConnection {
    * journal mode, in-memory DB, or no write since the last checkpoint+reset).
    */
   getWalSizeBytes(): number {
+    if (this.backend === 'duckdb') return 0; // the store's log is its own; sealing bounds it
     if (!this.dbPath || this.dbPath === ':memory:') return 0;
     try {
       return fs.statSync(`${this.dbPath}-wal`).size;
@@ -568,6 +654,7 @@ export class DatabaseConnection {
   /** Size of the main DB file in bytes (0 for in-memory/unknown) — the WAL
    * valve scales its fold caps with it (resolveWalValveMb). */
   getDbFileSizeBytes(): number {
+    if (this.backend === 'duckdb') return directorySize(duckdbStoreDirectory(this.dbPath));
     if (!this.dbPath || this.dbPath === ':memory:') return 0;
     try {
       return fs.statSync(this.dbPath).size;
@@ -578,6 +665,7 @@ export class DatabaseConnection {
 
   /** Current `wal_autocheckpoint` interval in pages (0 = disabled). */
   getWalAutocheckpoint(): number {
+    if (this.backend === 'duckdb') return 0;
     const v = this.db.pragma('wal_autocheckpoint', { simple: true });
     const n = Number(v);
     return Number.isFinite(n) ? n : 0;
@@ -592,6 +680,7 @@ export class DatabaseConnection {
    * deferral a {@link WalCheckpointValve} bounds WAL growth off-thread.
    */
   setWalAutocheckpoint(pages: number): void {
+    if (this.backend === 'duckdb') return; // no SQLite triggers, indexes or WAL to tune
     this.db.pragma(`wal_autocheckpoint = ${Math.max(0, Math.floor(pages))}`);
   }
 
@@ -736,6 +825,7 @@ export class DatabaseConnection {
    * Optimize database (vacuum and analyze)
    */
   optimize(): void {
+    if (this.backend === 'duckdb') { (this.db as DuckdbAdapter).seal(); return; } // compaction
     this.db.exec('VACUUM');
     this.db.exec('ANALYZE');
   }
@@ -770,6 +860,7 @@ export class DatabaseConnection {
    * CLI has already disarmed its watchdog).
    */
   async runMaintenance(): Promise<void> {
+    if (this.backend === 'duckdb') { if (!this.readOnly) (this.db as DuckdbAdapter).seal(); return; }
     // In-memory / test databases: nothing worth a worker round-trip.
     if (!this.dbPath || this.dbPath === ':memory:') {
       try { this.db.exec('PRAGMA optimize'); } catch { /* ignore */ }
@@ -851,6 +942,7 @@ export class DatabaseConnection {
    * unlink an open file and its st_ino is unreliable, so this never fires there).
    */
   isReplacedOnDisk(): boolean {
+    if (this.backend === 'duckdb') return false; // readers follow the manifest; nothing replaces a store's files in place
     if (this.openedInode === null) return false;
     const current = statInode(this.dbPath);
     return current !== null && current !== this.openedInode;

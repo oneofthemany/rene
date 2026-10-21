@@ -91,7 +91,7 @@ function agentSelect(agents) {
 }
 
 /** How the chosen agent gets rene, and whether it can start. */
-function connection(agent, registrations) {
+function connection(agent) {
   if (!agent.installed)
     return {
       ready: false,
@@ -109,31 +109,16 @@ function connection(agent, registrations) {
   if (agent.rene === "session")
     return {
       ready: true,
-      text: "rene is added for this session through the workbench, with its tools pre-approved. Every rea tool call it makes is recorded in the project's history.",
-    };
-  if (!registrations)
-    return { ready: true, text: "Checking rene's registration…" };
-  // The bridge checks again when the agent starts.
-  if (registrations.error)
-    return {
-      ready: true,
-      text: `Couldn't check rene's registration (${registrations.error}); Start checks it again.`,
-    };
-  const state = registrations[agent.client];
-  if (state === "aligned")
-    return {
-      ready: true,
-      text: `rene comes from its Agent setup registration (current). ${agent.label} asks before using its tools, as it normally does. Its tool calls go straight to REA, so they aren't recorded in the project's history.`,
+      text: "rene is set up for this session as `rene call` in its shell, pre-approved, and the tools it replaces are taken away. Every rene call it makes is recorded in the project's history.",
     };
   return {
-    ready: false,
-    text: `rene isn't registered with ${agent.label}${state ? ` (${state})` : ""}. Register it in Agent setup, then come back.`,
+    ready: true,
+    text: `${agent.label}'s shell has the session's \`rene call\` command, but nothing tells it to use rene or takes its own tools away, so only the calls it makes through rene are recorded.`,
   };
 }
 
 /** Agent picker, Start/Stop and status, reflecting the session and project. */
 function controls(agents, getProject) {
-  let registrations;
   const picker = agentSelect(agents);
   const label = (id) =>
     agents.find((agent) => agent.id === id)?.label ?? "The agent";
@@ -146,16 +131,12 @@ function controls(agents, getProject) {
     running: false,
     last: { running: false },
   };
-  parts.registrations = (value) => {
-    registrations = value;
-    parts.show(parts.last);
-  };
   parts.show = (state) => {
     parts.last = state;
     parts.running = state.running;
     if (state.agent) picker.select.value = state.agent;
     const chosen = agents.find((agent) => agent.id === picker.select.value);
-    const link = chosen && connection(chosen, registrations);
+    const link = chosen && connection(chosen);
     picker.help.replaceChildren(...[link?.text ?? ""].flat().filter(Boolean));
     const project = getProject();
     parts.start.disabled = state.running || !link?.ready || !project;
@@ -316,11 +297,6 @@ export async function initAgent({ host, getProject, onState, onStarted }) {
   ui.show(initial);
   onState(initial);
   void follow(term, ui, onState);
-  const loadRegistrations = () =>
-    apiJson("/api/terminal/registrations")
-      .then(ui.registrations)
-      .catch((cause) => ui.registrations({ error: cause.message }));
-  void loadRegistrations();
 
   const element = h(
     "section",
@@ -341,8 +317,6 @@ export async function initAgent({ host, getProject, onState, onStarted }) {
     /** Shows the terminal view in `container`. */
     show(container) {
       container.replaceChildren(element);
-      // Registrations can change in Agent setup while the view is hidden.
-      void loadRegistrations();
       if (!term.element) term.open(screen);
       requestAnimationFrame(() => {
         resize();
