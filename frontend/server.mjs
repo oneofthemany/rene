@@ -66,6 +66,7 @@ import {
   createTerminal,
   TerminalError,
 } from "./terminal.mjs";
+import { agentToolkit } from "./agentToolkit.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const publicRoot = join(here, "public");
@@ -1676,9 +1677,13 @@ async function agentSession(cwd, agentId) {
   const relay = { project: project.manifest.id, session, live: new Map() };
   relaySessions.set(relayToken, relay);
   const rea = reaCommand(["mcp"]);
+  const toolkit = agentToolkit(settings.environment(process.env));
   return {
     relay,
     relayToken,
+    toolkit,
+    // The command `rea` runs in the agent's shell with the cli toolkit.
+    rea: reaCommand([]),
     project: project.manifest.id,
     session,
     // Claude Code gets a fresh session id; its transcripts are followed by
@@ -1693,6 +1698,7 @@ async function agentSession(cwd, agentId) {
     report,
     instructions: agentInstructions(
       project.manifest.assessment === "enabled" ? ASSESSMENT_FILE : undefined,
+      toolkit,
     ),
   };
 }

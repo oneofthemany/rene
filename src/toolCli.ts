@@ -34,7 +34,11 @@ import {
  *   rea tools [search <words…>]    one line per tool: name and summary
  *   rea tools describe <name>      the tool's description and input schema
  *   rea call <name> [<json>|-]     run one tool; arguments as JSON or stdin
- *   rea daemon [--socket <path>]   keep one session for many calls
+ *   rea daemon [--socket <path>] [--exit-with-stdin]
+ *                                  keep one session for many calls; with
+ *                                  --exit-with-stdin it stops when its
+ *                                  stdin closes, so the process that started
+ *                                  it owns its lifetime across a container
  *
  * Tools run in the same server composition `rea mcp` serves, so contracts,
  * admission, Evidence and result delivery have one owner. Without
@@ -54,7 +58,9 @@ const USAGE = `Usage:
   rea tools [search <words…>]    List tools (name and summary)
   rea tools describe <name>      Show a tool's description and input schema
   rea call <name> [<json>|-]     Run one tool; '-' reads the JSON arguments from stdin
-  rea daemon [--socket <path>]   Serve one persistent session on a Unix socket
+  rea daemon [--socket <path>] [--exit-with-stdin]
+                                 Serve one persistent session on a Unix socket;
+                                 --exit-with-stdin stops it when stdin closes
 
 Set REA_DAEMON_SOCKET to send tools and call to a running daemon; without it
 each command starts and closes its own session.
@@ -70,6 +76,7 @@ const runtimeDependencies = (
   io: ToolCliIo,
   serve: RuntimeDependencies["serve"],
   onShutdown: (request: () => void) => void,
+  exitWithStdin = false,
 ): RuntimeDependencies => ({
   // Per-call info logs would land in the agent's context with every result;
   // an explicit REA_LOG_LEVEL still wins.
@@ -84,7 +91,11 @@ const runtimeDependencies = (
   },
   registerShutdown: (handler) => {
     onShutdown(handler);
-    return registerProcessShutdown(handler, signalShutdownEvents);
+    if (!exitWithStdin)
+      return registerProcessShutdown(handler, signalShutdownEvents);
+    // stdin only reports its end while it is read; nothing else reads it.
+    process.stdin.on("data", () => undefined);
+    return registerProcessShutdown(handler);
   },
 });
 
@@ -392,10 +403,16 @@ const runDaemon = async (
   io: ToolCliIo,
 ): Promise<number> => {
   let socketPath = io.env.REA_DAEMON_SOCKET;
-  if (args.length === 2 && args[0] === "--socket") socketPath = args[1];
-  else if (args.length !== 0) {
-    io.writeStderr(USAGE);
-    return 2;
+  let exitWithStdin = false;
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === "--socket" && args[index + 1] !== undefined) {
+      socketPath = args[index + 1];
+      index += 1;
+    } else if (args[index] === "--exit-with-stdin") exitWithStdin = true;
+    else {
+      io.writeStderr(USAGE);
+      return 2;
+    }
   }
   if (socketPath === undefined || socketPath === "") {
     io.writeStderr(
@@ -451,7 +468,7 @@ const runDaemon = async (
       },
     };
   };
-  return run(runtimeDependencies(io, serve, () => undefined));
+  return run(runtimeDependencies(io, serve, () => undefined, exitWithStdin));
 };
 
 /** Run `rea tools`, `rea call` or `rea daemon` and return the exit status. */

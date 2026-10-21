@@ -1,16 +1,17 @@
 /**
- * Recognize a `rea call <tool> [<json>|-]` invocation in a shell command
- * line an agent ran, so a transcript's shell tool use can be tied to the
- * call `rea call` recorded, as an MCP tool use is.
+ * What a shell command line an agent ran does with rea: which `rea call`s
+ * it makes, and whether it runs anything but rea.
  *
- * The line is split into words with POSIX quoting (single quotes, double
- * quotes with their backslash escapes, and backslashes outside quotes), and
- * into simple commands at unquoted control operators (| & ; < > ( ) and
- * newlines). Each simple command is checked after its leading VAR=value
- * assignments. Expansions ($VAR, $(…), `…`) are not performed: arguments
- * that are not JSON but hold a $ or ` are reported as unknown, and other
- * arguments that are not a JSON object mean rea call refused them, so the
- * command is not a call.
+ * Two readers depend on this: the transcript parser, which ties an agent's
+ * shell tool use to the call `rea call` recorded, and the workbench's topic
+ * gate, which lets an agent's shell run rea and nothing else. The line is
+ * read with POSIX quoting (single quotes, double quotes with their backslash
+ * escapes, backslashes outside quotes) into simple commands separated by
+ * control operators (| || & && ; newline and parentheses). Redirections are
+ * taken out of the words they follow, with their targets; a here-document's
+ * body is skipped. Expansions are not performed: a $ or ` stays in its word,
+ * and a command or process substitution ($(…), `…`, <(…), >(…)) is noted,
+ * since it runs a command this reading doesn't see.
  */
 
 export interface ReaCallCommand {
@@ -19,85 +20,271 @@ export interface ReaCallCommand {
   readonly args: Readonly<Record<string, unknown>> | null;
 }
 
-const OPERATORS = new Set(["|", "&", ";", "<", ">", "(", ")", "\n"]);
+export interface Redirection {
+  readonly operator: string;
+  readonly target: string;
+}
+
+export interface SimpleCommand {
+  /** The control operator before this command; "" for the first. */
+  readonly after: string;
+  readonly words: readonly string[];
+  readonly redirections: readonly Redirection[];
+}
+
+export interface ShellLine {
+  readonly commands: readonly SimpleCommand[];
+  /** A command or process substitution runs a command not in `commands`. */
+  readonly substitutes: boolean;
+}
+
+const CONTROL = ["&&", "||", ";;", "|&", "|", "&", ";", "\n", "(", ")"];
+const REDIRECT = [
+  "<<<",
+  "<<-",
+  "&>>",
+  "<<",
+  ">>",
+  ">&",
+  "<&",
+  "&>",
+  ">|",
+  "<>",
+  "<",
+  ">",
+];
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/u;
 const TOOL_NAME = /^[a-z][a-z0-9_]*$/u;
+const FD = /^\d+$/u;
+
+type Token = {
+  readonly kind: "word" | "control" | "redirect";
+  readonly value: string;
+};
 
 /**
- * The text of the double-quoted string opening at `start`, with the
- * backslash escapes that work inside double quotes applied, and the index of
- * its closing quote; undefined when it is never closed.
+ * The double-quoted string opening at `start`: its text with the escapes
+ * that work inside double quotes applied, the index of its closing quote,
+ * and whether it holds a command substitution; undefined when never closed.
  */
 const doubleQuoted = (
   line: string,
   start: number,
-): { text: string; end: number } | undefined => {
+): { text: string; end: number; substitutes: boolean } | undefined => {
   let text = "";
+  let substitutes = false;
   for (let index = start + 1; index < line.length; index += 1) {
     const char = line[index] as string;
-    if (char === '"') return { text, end: index };
+    if (char === '"') return { text, end: index, substitutes };
     if (char === "\\" && '"\\$`\n'.includes(line[index + 1] ?? "")) {
       index += 1;
       if (line[index] !== "\n") text += line[index];
-    } else text += char;
+      continue;
+    }
+    if (char === "`" || (char === "$" && line[index + 1] === "("))
+      substitutes = true;
+    text += char;
   }
   return undefined;
 };
 
+const operatorAt = (line: string, index: number, operators: string[]) =>
+  operators.find((operator) => line.startsWith(operator, index));
+
+/** The here-document delimiters still to be read, with their tab handling. */
+interface PendingHeredoc {
+  readonly delimiter: string;
+  readonly stripTabs: boolean;
+}
+
+/** The index just past a here-document body that starts at `start`. */
+const skipHeredoc = (
+  line: string,
+  start: number,
+  { delimiter, stripTabs }: PendingHeredoc,
+): number => {
+  let index = start;
+  while (index < line.length) {
+    const end = line.indexOf("\n", index);
+    const text = line.slice(index, end === -1 ? line.length : end);
+    index = end === -1 ? line.length : end + 1;
+    if ((stripTabs ? text.replace(/^\t+/u, "") : text) === delimiter) break;
+  }
+  return index;
+};
+
+/** The tokenizer's state while it reads one line. */
+interface Lexer {
+  readonly line: string;
+  readonly tokens: Token[];
+  readonly heredocs: PendingHeredoc[];
+  substitutes: boolean;
+  word: string;
+  inWord: boolean;
+  quoted: boolean;
+  /** Set after << or <<-: the next word is a here-document delimiter. */
+  awaitingDelimiter: boolean | undefined;
+}
+
+const endWord = (lexer: Lexer) => {
+  if (!lexer.inWord) return;
+  if (lexer.awaitingDelimiter !== undefined) {
+    lexer.heredocs.push({
+      delimiter: lexer.word,
+      stripTabs: lexer.awaitingDelimiter,
+    });
+    lexer.awaitingDelimiter = undefined;
+  }
+  lexer.tokens.push({ kind: "word", value: lexer.word });
+  lexer.word = "";
+  lexer.inWord = false;
+  lexer.quoted = false;
+};
+
+const addQuoted = (lexer: Lexer, text: string) => {
+  lexer.word += text;
+  lexer.inWord = true;
+  lexer.quoted = true;
+};
+
 /**
- * Simple commands of a line, each as its words. The shell refuses a line
- * with an unterminated quote, so none of its commands ran.
+ * Reads the quote or backslash escape at `index` into the current word.
+ * Returns the index of its last character, undefined when the character
+ * doesn't quote, or null when a quote is never closed.
  */
-const simpleCommands = (line: string): string[][] => {
-  const commands: string[][] = [];
-  let words: string[] = [];
-  let word = "";
-  let inWord = false;
-  const endWord = () => {
-    if (inWord) words.push(word);
-    word = "";
-    inWord = false;
-  };
-  const endCommand = () => {
-    endWord();
-    if (words.length > 0) commands.push(words);
-    words = [];
+const readQuoting = (
+  lexer: Lexer,
+  index: number,
+): number | null | undefined => {
+  const { line } = lexer;
+  const char = line[index];
+  if (char === "'") {
+    const end = line.indexOf("'", index + 1);
+    if (end === -1) return null;
+    addQuoted(lexer, line.slice(index + 1, end));
+    return end;
+  }
+  if (char === '"') {
+    const string = doubleQuoted(line, index);
+    if (string === undefined) return null;
+    addQuoted(lexer, string.text);
+    lexer.substitutes ||= string.substitutes;
+    return string.end;
+  }
+  if (char !== "\\") return undefined;
+  const next = line[index + 1];
+  if (next !== undefined && next !== "\n") addQuoted(lexer, next);
+  return index + 1;
+};
+
+/**
+ * Reads the redirection or control operator at `index`, ending the word
+ * before it, and skips the bodies of here-documents a newline starts.
+ * Returns the index of its last character, or undefined when there is none.
+ */
+const readOperator = (lexer: Lexer, index: number): number | undefined => {
+  const { line } = lexer;
+  const redirect = operatorAt(line, index, REDIRECT);
+  const value = redirect ?? operatorAt(line, index, CONTROL);
+  if (value === undefined) return undefined;
+  // A file descriptor number written against its redirection (2>…).
+  if (redirect && lexer.inWord && !lexer.quoted && FD.test(lexer.word)) {
+    lexer.word = "";
+    lexer.inWord = false;
+  } else endWord(lexer);
+  lexer.tokens.push({ kind: redirect ? "redirect" : "control", value });
+  if (value === "<<" || value === "<<-")
+    lexer.awaitingDelimiter = value === "<<-";
+  let last = index + value.length - 1;
+  if (value === "\n")
+    for (const heredoc of lexer.heredocs.splice(0))
+      last = skipHeredoc(line, last + 1, heredoc) - 1;
+  return last;
+};
+
+/** Tokens of a line; undefined when a quote is never closed (the shell refuses it). */
+const tokenize = (
+  line: string,
+): { tokens: Token[]; substitutes: boolean } | undefined => {
+  const lexer: Lexer = {
+    line,
+    tokens: [],
+    heredocs: [],
+    substitutes: false,
+    word: "",
+    inWord: false,
+    quoted: false,
+    awaitingDelimiter: undefined,
   };
   for (let index = 0; index < line.length; index += 1) {
+    const quoting = readQuoting(lexer, index);
+    if (quoting === null) return undefined;
+    if (quoting !== undefined) {
+      index = quoting;
+      continue;
+    }
     const char = line[index] as string;
-    if (char === "'") {
-      const end = line.indexOf("'", index + 1);
-      if (end === -1) return [];
-      word += line.slice(index + 1, end);
-      inWord = true;
-      index = end;
-    } else if (char === '"') {
-      const quoted = doubleQuoted(line, index);
-      if (quoted === undefined) return [];
-      word += quoted.text;
-      inWord = true;
-      index = quoted.end;
-    } else if (char === "\\") {
+    const next = line[index + 1];
+    if (char === "`" || (char === "$" && next === "(")) {
+      // A command substitution: noted, and kept in the word.
+      lexer.substitutes = true;
+      lexer.word += char;
+      lexer.inWord = true;
+    } else if ((char === "<" || char === ">") && next === "(") {
+      // A process substitution runs its list like a subshell.
+      lexer.substitutes = true;
+      endWord(lexer);
+      lexer.tokens.push({ kind: "control", value: "(" });
       index += 1;
-      if (index < line.length && line[index] !== "\n") {
-        word += line[index];
-        inWord = true;
-      }
-    } else if (char === " " || char === "\t") endWord();
-    else if (OPERATORS.has(char)) endCommand();
+    } else if (char === " " || char === "\t") endWord(lexer);
     else {
-      word += char;
-      inWord = true;
+      const operator = readOperator(lexer, index);
+      if (operator !== undefined) index = operator;
+      else {
+        lexer.word += char;
+        lexer.inWord = true;
+      }
     }
   }
-  endCommand();
-  return commands;
+  endWord(lexer);
+  return { tokens: lexer.tokens, substitutes: lexer.substitutes };
+};
+
+/** Read a shell command line; undefined when the shell would refuse it. */
+export const parseShellLine = (line: string): ShellLine | undefined => {
+  const read = tokenize(line);
+  if (read === undefined) return undefined;
+  const commands: SimpleCommand[] = [];
+  let after = "";
+  let words: string[] = [];
+  let redirections: Redirection[] = [];
+  const end = (next: string) => {
+    if (words.length > 0 || redirections.length > 0)
+      commands.push({ after, words, redirections });
+    after = next;
+    words = [];
+    redirections = [];
+  };
+  for (let index = 0; index < read.tokens.length; index += 1) {
+    const token = read.tokens[index] as Token;
+    if (token.kind === "control") end(token.value);
+    else if (token.kind === "redirect") {
+      const target = read.tokens[index + 1];
+      redirections.push({
+        operator: token.value,
+        target: target?.kind === "word" ? target.value : "",
+      });
+      if (target?.kind === "word") index += 1;
+    } else words.push(token.value);
+  }
+  end("");
+  return { commands, substitutes: read.substitutes };
 };
 
 const basename = (word: string) => word.slice(word.lastIndexOf("/") + 1);
 
 /** The words after the program when a simple command runs rea, else undefined. */
-const reaArguments = (
+export const reaArguments = (
   words: readonly string[],
 ): readonly string[] | undefined => {
   let start = 0;
@@ -120,38 +307,134 @@ const reaArguments = (
   return undefined;
 };
 
-const parseObject = (
-  text: string,
-): Readonly<Record<string, unknown>> | null | undefined => {
+/** The call one simple command makes, if it runs `rea call` with arguments rea accepts. */
+export const reaCallOf = (
+  words: readonly string[],
+): ReaCallCommand | undefined => {
+  const rest = reaArguments(words);
+  if (rest?.[0] !== "call") return undefined;
+  const [, tool, input, ...extra] = rest;
+  if (tool === undefined || !TOOL_NAME.test(tool) || extra.length > 0)
+    return undefined;
+  if (input === undefined) return { tool, args: {} };
+  if (input === "-") return { tool, args: null };
   let value: unknown;
   try {
-    value = JSON.parse(text);
+    value = JSON.parse(input);
   } catch {
     // Text the shell would have expanded is unknown; other text that is not
     // JSON was refused by rea call, so no call was made.
-    return /[$`]/u.test(text) ? null : undefined;
+    return /[$`]/u.test(input) ? { tool, args: null } : undefined;
   }
   // rea call refuses anything but an object, so no call was made.
   if (typeof value !== "object" || value === null || Array.isArray(value))
     return undefined;
-  return value as Record<string, unknown>;
+  return { tool, args: value as Record<string, unknown> };
 };
 
 /** The first `rea call` in a shell command line, if it has one. */
 export const parseReaCallCommand = (
   line: string,
 ): ReaCallCommand | undefined => {
-  for (const words of simpleCommands(line)) {
-    const rest = reaArguments(words);
-    if (rest?.[0] !== "call") continue;
-    const [, tool, input, ...extra] = rest;
-    if (tool === undefined || !TOOL_NAME.test(tool) || extra.length > 0)
-      continue;
-    if (input === undefined) return { tool, args: {} };
-    if (input === "-") return { tool, args: null };
-    const args = parseObject(input);
-    if (args === undefined) continue;
-    return { tool, args };
+  for (const command of parseShellLine(line)?.commands ?? []) {
+    const call = reaCallOf(command.words);
+    if (call !== undefined) return call;
   }
   return undefined;
 };
+
+/** Programs that may read a rea command's output from a pipe. */
+const OUTPUT_FILTERS = new Set(["head", "tail", "wc", "jq"]);
+const OUTPUT_REDIRECT = new Set([">", ">>", "&>", "&>>", ">|", "<>"]);
+const OPTION_OR_COUNT = /^(?:-.*|\d+)$/u;
+
+export type ReaOnlyLine =
+  | { readonly ok: true; readonly calls: readonly ReaCallCommand[] }
+  | { readonly ok: false; readonly reason: string };
+
+/** Why a redirection would let a command write past rea, if it would. */
+const redirectionProblem = ({ operator, target }: Redirection) => {
+  if (operator === ">&" || operator === "<&")
+    return FD.test(target) || target === "-"
+      ? undefined
+      : `${operator}${target} writes to a file`;
+  if (OUTPUT_REDIRECT.has(operator) && target !== "/dev/null")
+    return `${operator} ${target} writes a file rea doesn't record`;
+  return undefined;
+};
+
+/** Why a filter reading rea's output would do more than filter it, if it would. */
+const filterProblem = ([program, ...args]: readonly string[]) => {
+  const operands = args.filter((word) => !OPTION_OR_COUNT.test(word));
+  // jq takes its filter as one operand; a further operand is a file.
+  const allowed = program === "jq" ? 1 : 0;
+  return operands.length > allowed
+    ? `${program} ${operands.slice(allowed).join(" ")} reads a file`
+    : undefined;
+};
+
+/**
+ * Whether a shell command line runs rea and nothing else: every simple
+ * command is `rea call` or `rea tools`, or head, tail, wc or jq reading a
+ * rea command's output from a pipe; no output is redirected to a file but
+ * /dev/null, and no command or process substitution runs. With the calls the
+ * line makes, so the gate can see a record_topic among them.
+ */
+export const reaOnlyShellLine = (line: string): ReaOnlyLine => {
+  const parsed = parseShellLine(line);
+  if (parsed === undefined)
+    return { ok: false, reason: "it has an unterminated quote" };
+  if (parsed.substitutes)
+    return { ok: false, reason: "it runs a command or process substitution" };
+  if (parsed.commands.length === 0)
+    return { ok: false, reason: "it runs no command" };
+  const calls: ReaCallCommand[] = [];
+  for (const command of parsed.commands) {
+    const redirected = command.redirections
+      .map(redirectionProblem)
+      .find((problem) => problem !== undefined);
+    if (redirected !== undefined) return { ok: false, reason: redirected };
+    const rest = reaArguments(command.words);
+    if (rest !== undefined) {
+      if (rest[0] === "tools") continue;
+      const call = reaCallOf(command.words);
+      if (call === undefined)
+        return {
+          ok: false,
+          reason: `\`${command.words.join(" ")}\` isn't a rea call or rea tools command`,
+        };
+      calls.push(call);
+      continue;
+    }
+    const program = basename(command.words[0] ?? "");
+    const piped = command.after === "|" || command.after === "|&";
+    if (!piped || !OUTPUT_FILTERS.has(program))
+      return { ok: false, reason: `${program || "it"} isn't rea` };
+    const filtered = filterProblem([program, ...command.words.slice(1)]);
+    if (filtered !== undefined) return { ok: false, reason: filtered };
+  }
+  return { ok: true, calls };
+};
+
+/**
+ * The topics a shell command's output shows were declared: each line that
+ * is record_topic's Evidence, as `rea call record_topic` prints it on
+ * success, names one. A failed declaration prints no such Evidence.
+ */
+export const declaredTopicIds = (output: string): string[] =>
+  output.split("\n").flatMap((line) => {
+    if (!line.startsWith("{")) return [];
+    let evidence: unknown;
+    try {
+      evidence = JSON.parse(line);
+    } catch {
+      return [];
+    }
+    const { operation, normalized_result: result } = (evidence ?? {}) as {
+      operation?: unknown;
+      normalized_result?: { topic_id?: unknown } | null;
+    };
+    return operation === "record_topic" && typeof result?.topic_id === "string"
+      ? [result.topic_id]
+      : [];
+  });

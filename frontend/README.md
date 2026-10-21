@@ -221,19 +221,32 @@ list.
 
 ### Agent calls
 
-Claude Code and Copilot CLI don't run `rea mcp` directly. They run
-`relay.mjs`, which starts REA and passes every byte between them unchanged.
-Alongside, it reads the JSON-RPC messages and reports each `tools/call` to the
-bridge when it starts (shown as running in History) and when it settles, with
-the result. Reports authenticate with a token issued for that agent session
-only, written to `frontend/.workbench-agent/relay-report.json` (mode 0600); the
-page's token is never given to the agent. A report never changes or delays the
-agent's traffic: if the bridge is down, the relay prints one line on stderr and
-the agent carries on. Calls REA never answers settle as failed when it exits.
-Results over 8 MiB are recorded by size only, as for page calls. Agents that
-get rene from their registration talk to REA directly, so their calls aren't
-recorded; the agent picker says so. The agent's chat and reasoning aren't
-recorded yet.
+An agent session reaches rene through its **toolkit** (`agentToolkit.mjs`):
+
+- **cli** (the default): the agent runs `rea call <tool> '<json>'` in its
+  shell. The session gets a `rea` command on its `PATH`
+  (`frontend/.workbench-agent/bin/rea`, which runs the workbench's rea
+  command, the container launcher by default) and one `rea daemon` of its
+  own, named to `rea call` by `REA_DAEMON_SOCKET`, so every call shares one
+  session: a target one call opens stays open for the next. The daemon is an
+  owned process held by an open stdin pipe and ends with the agent.
+- **mcp** (`REA_AGENT_TOOLKIT=mcp` in the workbench's environment): the agent
+  runs `relay.mjs` as its `rea` MCP server, which starts REA and passes every
+  byte between them unchanged.
+
+Either way each call is reported to the bridge when it starts (shown as
+running in History) and when it settles, with the result: `rea call` reports
+its own calls, and the relay reads each `tools/call` off the JSON-RPC traffic
+(both through `src/toolbox/HistoryReport.ts`). Reports authenticate with a
+token issued for that agent session only, written to
+`frontend/.workbench-agent/relay-report.json` (mode 0600) and named to
+`rea call` by `REA_HISTORY_REPORT` (the path, not the token); the page's token
+is never given to the agent. A report never changes or delays a call: if the
+bridge is down, one line goes to stderr and the call carries on. Calls REA
+never answers settle as failed when it exits. Results over 8 MiB are recorded
+by size only, as for page calls. With MCP, agents that get rene from their
+registration talk to REA directly, so their calls aren't recorded; the agent
+picker says so. The agent's chat and reasoning aren't recorded yet.
 
 ### Conversations and audit trail
 
@@ -251,9 +264,12 @@ anything; conversations written while the bridge was down are caught up when
 the project is opened. Agents that use their registration (Codex, Gemini CLI
 and others) aren't captured yet.
 
-Each rene call in a transcript is tied to the call the relay recorded by
+Each rene call in a transcript is tied to the call recorded for it by
 timestamp and identity: the same tool with identical arguments, recorded just
-after the tool use (the closest such call, within a short window). That gives
+after the tool use (the closest such call, within a short window). A shell
+tool use that runs `rea call` counts as a call of the tool it names
+(`src/toolbox/ReaCallCommand.ts` reads the command line); when its arguments
+aren't on the line (read from stdin), it is matched by tool and time alone. That gives
 every recorded agent call an **audit trail**, shown under its result: what was
 asked, why the call was made (the reasoning and replies just before it), what
 the agent saw, and what came of it (what it said and did next, up to its next
@@ -414,18 +430,29 @@ rather than a submit. Pick it under
 **Agent**: installed agents (found on the workbench's `PATH`)
 come first, the rest are listed as not installed. Each is the same CLI you run
 in a terminal, with your login, settings, skills and other MCP servers, and
-each runs with this fork's REA as its `rea` MCP server, in one of two ways.
+each reaches this fork's REA through the session's toolkit (see
+[Agent calls](#agent-calls)), in one of two ways.
 
 **For the session** (Claude Code, GitHub Copilot CLI): rene is added for that
-session only, through the relay (see [Agent calls](#agent-calls)) and launched
-the way the workbench launches REA (the container launcher by default), with
-its tools pre-approved and an instruction to use them. This works even where
+session only, launched the way the workbench launches REA (the container
+launcher by default), with its tools pre-approved and an instruction to use
+them. This works even where
 no registration exists.
 
-| Agent              | rene added with                                  | Pre-approved              | Instruction                                                         |
-| ------------------ | ------------------------------------------------ | ------------------------- | ------------------------------------------------------------------- |
-| Claude Code        | `--mcp-config`                                   | `--allowedTools mcp__rea` | `--append-system-prompt`                                            |
-| GitHub Copilot CLI | `--additional-mcp-config @file` (`tools: ["*"]`) | `--allow-tool rea`        | `AGENTS.md` in a folder added to `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` |
+| Agent              | Toolkit | rene added with                   | Pre-approved                                          | Instruction                                                         |
+| ------------------ | ------- | --------------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------- |
+| Claude Code        | cli     | `rea` on `PATH`, a session daemon | `--allowedTools Bash(rea:*)` (and head, tail, wc, jq) | `--append-system-prompt`                                            |
+| Claude Code        | mcp     | `--mcp-config`                    | `--allowedTools mcp__rea`                             | `--append-system-prompt`                                            |
+| GitHub Copilot CLI | cli     | `rea` on `PATH`, a session daemon | `--allow-tool shell(rea)`                             | `AGENTS.md` in a folder added to `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` |
+| GitHub Copilot CLI | mcp     | `--additional-mcp-config @file`   | `--allow-tool rea`                                    | `AGENTS.md` in a folder added to `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` |
+
+With the cli toolkit, Claude Code's topic gate (`topicGate.mjs`) lets its
+shell run rea and nothing else: every command on the line must be `rea call`
+or `rea tools`, or head, tail, wc or jq reading their output from a pipe, with
+no output redirected to a file but `/dev/null` and no command or process
+substitution. Other shell commands go through `rea call run_command`, whose
+command the git rule checks too. A `rea call record_topic` is the turn's
+declaration once it prints record_topic's Evidence.
 
 **From its registration** (every other terminal agent `rea setup` supports):
 Antigravity (`agy`), Gemini CLI (`gemini`), Codex (`codex`), OpenCode
