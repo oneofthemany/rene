@@ -4,8 +4,12 @@
 -- sequences for row ids, no triggers or FTS5 (search uses node_tokens).
 -- DuckDB's foreign keys don't cascade, so QueryBuilder's delete methods
 -- remove dependent rows themselves, and none are declared here.
--- Indexes: DuckDB scans; only keys that enforce uniqueness, or that
--- INSERT OR REPLACE / OR IGNORE need, are declared.
+-- Indexes: keys that enforce uniqueness or that INSERT OR REPLACE / OR
+-- IGNORE need, and ART indexes for the point lookups indexing and queries
+-- make one row at a time (by name, qualified name, lowered name, file, edge
+-- end): DuckDB uses them for an equality filter, bound or literal (on 100k
+-- rows, about 170 us a lookup against 900 us scanning; .cache/spike/
+-- point-lookup.mjs). They are declared after the tables, below.
 
 CREATE TABLE IF NOT EXISTS schema_versions (
     version BIGINT PRIMARY KEY,
@@ -115,6 +119,13 @@ CREATE TABLE IF NOT EXISTS project_metadata (
     value VARCHAR NOT NULL,
     updated_at BIGINT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS nodes_name ON nodes(name);
+CREATE INDEX IF NOT EXISTS nodes_qualified_name ON nodes(qualified_name);
+CREATE INDEX IF NOT EXISTS nodes_lower_name ON nodes((lower(name)));
+CREATE INDEX IF NOT EXISTS nodes_file_path ON nodes(file_path);
+CREATE INDEX IF NOT EXISTS edges_source ON edges(source);
+CREATE INDEX IF NOT EXISTS edges_target ON edges(target);
 
 INSERT OR IGNORE INTO schema_versions (version, applied_at, description)
 VALUES (1, epoch_ms(now()), 'Initial schema');

@@ -252,6 +252,37 @@ sync fills (the index is derived from the source); a read-only open is
 refused with the reason. Checked by .cache/spike/schema-smoke.mjs and by
 opening a copy of rene's index from before the token tables.
 
+### Indexing speed (2026-10-22)
+
+CodeGraph asked DuckDB SQLite's way, one row per query: resolution looked up
+nodes by name, qualified name, lowered name and id one reference at a time
+(about 0.5-1.5 ms each, the cost being the row fetch from every column, not
+the scan), and wrote each failed reference's status with its own UPDATE.
+On rene's index, 2,000 names asked one by one took 1,083 ms; in one query,
+37 ms; every reference against every same-named node as one join, 47 ms.
+Done: the resolver prefetches each slice of 400 references' lookups in one
+query per kind (QueryBuilder.getNodesByNames and siblings, keeping each
+lookup's order, [] for an absent key) into the caches it already had;
+failed references are written in one UPDATE ... FROM (VALUES) per chunk;
+ART indexes serve the remaining point lookups. Store time for CodeGraph's
+source went from 71 s to 25 s, indexing from 33 s to 24 s, parity identical.
+
+Next, the inserts (about 14 s): measured on a 338k-row table, one Appender
+call of 21 rows costs about 250 us (12 us a row) and 2,000 rows 2.2 us a row,
+and each index adds to it (pk, unique key and one index: 18.5 and 3.7 us).
+The telemetry journal's seal shows the cheap shape: large batches into a
+table without indexes. So: buffer a full index's rows across files into
+large appends, and build the lookup indexes once after a full index rather
+than maintaining them row by row. Edge identity needs a check that doesn't
+scan all edges per batch (NOT EXISTS: 3.3 ms a batch at 338k edges).
+
+From comparing with the journal (its notes: telemetry_journal/
+DUCKDB_NOTES_FROM_CODEGRAPH.md): CodeGraph's readers load a whole
+generation into memory (1.5 s and its memory for rene's index, per query
+server), where the journal's readers query the sealed Parquet in place; for
+CodeGraph's point lookups in-memory is the right trade, but it is a cost per
+reader process to keep in mind.
+
 Indexing cost on storage-parity's five projects: DuckDB 109 s user CPU
 against SQLite's 34 s; peak memory about 5 GB on both (CodeGraph's parse
 workers).

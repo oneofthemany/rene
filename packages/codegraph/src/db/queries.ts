@@ -1623,6 +1623,42 @@ export class QueryBuilder {
   /**
    * Get nodes by exact qualified name match (uses idx_nodes_qualified_name index)
    */
+  /**
+   * getNodesByName, getNodesByQualifiedNameExact and getNodesByLowerName for
+   * many keys in one query each: every key's nodes in the order its own
+   * lookup returns them, and [] for a key without any. DuckDB answers a set
+   * of keys in one query about as fast as one key (DESIGN.md, Indexing
+   * speed); the resolver prefetches its lookups with these.
+   */
+  getNodesByNames(names: readonly string[]): Map<string, Node[]> {
+    return this.nodesByKeys(names, 'n.name = k.key', 'n.file_path, n.start_line, n.id');
+  }
+
+  getNodesByQualifiedNamesExact(qualifiedNames: readonly string[]): Map<string, Node[]> {
+    return this.nodesByKeys(qualifiedNames, 'n.qualified_name = k.key', 'n.file_path, n.start_line, n.id');
+  }
+
+  getNodesByLowerNames(lowerNames: readonly string[]): Map<string, Node[]> {
+    return this.nodesByKeys(lowerNames, 'lower(n.name) = lower(k.key)', this.insertionOrder('n'));
+  }
+
+  /** Each of `keys`' nodes `n`, matched by `match` and in `order`. */
+  private nodesByKeys(keys: readonly string[], match: string, order: string): Map<string, Node[]> {
+    const out = new Map<string, Node[]>();
+    for (const key of keys) out.set(key, []);
+    if (out.size === 0) return out;
+    const rows = this.db
+      .prepare(
+        `SELECT k.key AS lookup_key, n.*
+           FROM (SELECT DISTINCT unnest(from_json(?, '["VARCHAR"]')) AS key) k
+           JOIN nodes n ON ${match}
+          ORDER BY k.key, ${order}`
+      )
+      .all(JSON.stringify([...out.keys()])) as Array<NodeRow & { lookup_key: string }>;
+    for (const row of rows) out.get(row.lookup_key)!.push(rowToNode(row));
+    return out;
+  }
+
   getNodesByQualifiedNameExact(qualifiedName: string): Node[] {
     if (!this.stmts.getNodesByQualifiedNameExact) {
       this.stmts.getNodesByQualifiedNameExact = this.db.prepare(
@@ -4227,17 +4263,36 @@ export class QueryBuilder {
    */
   markReferencesFailed(refs: Array<{ fromNodeId: string; referenceName: string; referenceKind: string; nameTail?: string }>): number {
     if (refs.length === 0) return 0;
-    const stmt = this.db.prepare(
-      "UPDATE unresolved_refs SET status = 'failed', name_tail = ? WHERE from_node_id = ? AND reference_name = ? AND reference_kind = ?"
-    );
-    let changed = 0;
-    const markMany = this.db.transaction((items: typeof refs) => {
-      for (const ref of items) {
-        changed += stmt.run(ref.nameTail ?? referenceNameTail(ref.referenceName, ref.referenceKind), ref.fromNodeId, ref.referenceName, ref.referenceKind).changes;
+    // One UPDATE per chunk, not per ref. Each key's last tail wins, as the
+    // per-ref updates applied in order left it; the count is per ref, as
+    // theirs summed (a key named twice counts its rows twice).
+    const key = (ref: (typeof refs)[number]) => `${ref.fromNodeId}\0${ref.referenceName}\0${ref.referenceKind}`;
+    const tails = new Map<string, unknown[]>();
+    for (const ref of refs) {
+      tails.set(key(ref), [ref.fromNodeId, ref.referenceName, ref.referenceKind, ref.nameTail ?? referenceNameTail(ref.referenceName, ref.referenceKind)]);
+    }
+    const rowsPerKey = new Map<string, number>();
+    this.db.transaction(() => {
+      const keyed = [...tails.values()];
+      for (let i = 0; i < keyed.length; i += SQLITE_PARAM_CHUNK_SIZE) {
+        const chunk = keyed.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
+        const updated = this.db
+          .prepare(
+            `UPDATE unresolved_refs SET status = 'failed', name_tail = v.tail
+               FROM (VALUES ${chunk.map(() => '(?, ?, ?, ?)').join(', ')}) AS v(from_node_id, reference_name, reference_kind, tail)
+              WHERE unresolved_refs.from_node_id = v.from_node_id
+                AND unresolved_refs.reference_name = v.reference_name
+                AND unresolved_refs.reference_kind = v.reference_kind
+            RETURNING unresolved_refs.from_node_id, unresolved_refs.reference_name, unresolved_refs.reference_kind`
+          )
+          .all(...chunk.flat()) as Array<{ from_node_id: string; reference_name: string; reference_kind: string }>;
+        for (const row of updated) {
+          const k = `${row.from_node_id}\0${row.reference_name}\0${row.reference_kind}`;
+          rowsPerKey.set(k, (rowsPerKey.get(k) ?? 0) + 1);
+        }
       }
-    });
-    markMany(refs);
-    return changed;
+    })();
+    return refs.reduce((changed, ref) => changed + (rowsPerKey.get(key(ref)) ?? 0), 0);
   }
 
   /**
@@ -4250,17 +4305,28 @@ export class QueryBuilder {
    */
   markReferencesFailedByRowIds(refs: Array<{ rowId: number; referenceName: string; referenceKind: string; nameTail?: string }>): number {
     if (refs.length === 0) return 0;
-    const stmt = this.db.prepare(
-      "UPDATE unresolved_refs SET status = 'failed', name_tail = ? WHERE id = ?"
-    );
-    let changed = 0;
-    const markMany = this.db.transaction((items: typeof refs) => {
-      for (const ref of items) {
-        changed += stmt.run(ref.nameTail ?? referenceNameTail(ref.referenceName, ref.referenceKind), ref.rowId).changes;
+    // One UPDATE per chunk, not per ref. Each row's last tail wins, as the
+    // per-ref updates applied in order left it; the count is per ref, as
+    // theirs summed (a row named twice counts twice).
+    const tails = new Map<number, string>();
+    for (const ref of refs) tails.set(ref.rowId, ref.nameTail ?? referenceNameTail(ref.referenceName, ref.referenceKind));
+    const found = new Set<number>();
+    this.db.transaction(() => {
+      const rows = [...tails];
+      for (let i = 0; i < rows.length; i += SQLITE_PARAM_CHUNK_SIZE) {
+        const chunk = rows.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
+        const updated = this.db
+          .prepare(
+            `UPDATE unresolved_refs SET status = 'failed', name_tail = v.tail
+               FROM (VALUES ${chunk.map(() => '(?, ?)').join(', ')}) AS v(id, tail)
+              WHERE unresolved_refs.id = v.id
+            RETURNING unresolved_refs.id`
+          )
+          .all(...chunk.flat()) as Array<{ id: number }>;
+        for (const row of updated) found.add(Number(row.id));
       }
-    });
-    markMany(refs);
-    return changed;
+    })();
+    return refs.reduce((changed, ref) => changed + (found.has(ref.rowId) ? 1 : 0), 0);
   }
 
   /**

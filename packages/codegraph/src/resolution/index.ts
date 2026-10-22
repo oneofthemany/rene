@@ -96,6 +96,12 @@ const PHP_PROP_SHAPE = /^this->\w+\.\w+$/;
  * caches) when tuning for very large or very small projects.
  */
 const DEFAULT_CACHE_LIMIT = 5_000;
+
+/**
+ * References resolved per lookup prefetch (ReferenceResolver.prefetchLookups):
+ * a slice's keys, a few per reference, fit the caches with room to spare.
+ */
+const PREFETCH_REFS = 400;
 function resolveCacheLimit(): number {
   const raw = process.env.CODEGRAPH_RESOLVER_CACHE_SIZE;
   if (!raw) return DEFAULT_CACHE_LIMIT;
@@ -524,6 +530,54 @@ export class ReferenceResolver {
     this.knownNames = names;
 
     this.cachesWarmed = true;
+  }
+
+  /**
+   * Fills the name, qualified-name, lowered-name and id caches for `refs` with
+   * one query per kind of lookup, where resolving them asks for each key
+   * alone: DuckDB answers a set of keys in one query about as fast as one
+   * (packages/codegraph-store/DESIGN.md, Indexing speed). The keys are each
+   * reference's name and the parts it splits into (`a.b`, `A::b`, `a->b`, a
+   * capitalized receiver), and its source node. A cached answer is the one
+   * the single lookup gives, in its order (an absent name is []), and the
+   * caches already assume nodes stay put while a batch resolves; a key a
+   * strategy derives some other way still misses and asks alone.
+   */
+  private prefetchLookups(refs: readonly UnresolvedReference[]): void {
+    const names = new Set<string>();
+    const lowerNames = new Set<string>();
+    const qualifiedNames = new Set<string>();
+    const ids = new Set<string>();
+    const addName = (name: string) => {
+      if (!name) return;
+      if (!this.nameCache.has(name)) names.add(name);
+      const lower = name.toLowerCase();
+      if (!this.lowerNameCache.has(lower)) lowerNames.add(lower);
+    };
+    for (const ref of refs) {
+      const name = ref.referenceName;
+      addName(name);
+      if (!this.qualifiedNameCache.has(name)) qualifiedNames.add(name);
+      for (const part of name.split(/::|->|[.#\\/:]/)) {
+        addName(part);
+        if (part) addName(part[0]!.toUpperCase() + part.slice(1));
+      }
+      if (!this.nodeByIdCache.has(ref.fromNodeId)) ids.add(ref.fromNodeId);
+    }
+    const remember = (nodes: Node[]) => {
+      for (const node of nodes) if (!this.nodeByIdCache.has(node.id)) this.nodeByIdCache.set(node.id, node);
+    };
+    for (const [name, nodes] of this.queries.getNodesByNames([...names])) {
+      this.nameCache.set(name, nodes);
+      remember(nodes);
+    }
+    for (const [lower, nodes] of this.queries.getNodesByLowerNames([...lowerNames])) this.lowerNameCache.set(lower, nodes);
+    for (const [qualified, nodes] of this.queries.getNodesByQualifiedNamesExact([...qualifiedNames])) {
+      this.qualifiedNameCache.set(qualified, nodes);
+      remember(nodes);
+    }
+    for (const id of ids) if (this.nodeByIdCache.has(id)) ids.delete(id);
+    for (const node of this.queries.getNodesByIds([...ids]).values()) this.nodeByIdCache.set(node.id, node);
   }
 
   /** `queries.getNodeById` through the resolver's own id → node cache. */
@@ -1952,7 +2006,8 @@ export class ReferenceResolver {
     const unresolved: UnresolvedRef[] = [];
     const byMethod: Record<string, number> = {};
 
-    for (const raw of batch) {
+    for (const [index, raw] of batch.entries()) {
+      if (index % PREFETCH_REFS === 0) this.prefetchLookups(batch.slice(index, index + PREFETCH_REFS));
       const ref: UnresolvedRef = {
         fromNodeId: raw.fromNodeId,
         referenceName: raw.referenceName,
@@ -2072,7 +2127,8 @@ export class ReferenceResolver {
     const resolved: ResolvedRef[] = [];
     const unresolved: UnresolvedRef[] = [];
     const byMethod: Record<string, number> = {};
-    for (const raw of refs) {
+    for (const [index, raw] of refs.entries()) {
+      if (index % PREFETCH_REFS === 0) this.prefetchLookups(refs.slice(index, index + PREFETCH_REFS));
       const ref: UnresolvedRef = {
         fromNodeId: raw.fromNodeId,
         referenceName: raw.referenceName,

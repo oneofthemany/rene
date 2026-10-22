@@ -14,7 +14,35 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { threadId } from 'worker_threads';
 import type { SqliteDatabase, SqliteStatement } from './sqlite-adapter';
+
+/**
+ * CODEGRAPH_STORE_PROFILE=<dir>: each thread's time in the store per
+ * statement (calls, milliseconds, rows), written to <dir> as the thread
+ * exits; a diagnostic for finding the statements indexing spends its time on.
+ */
+const profile = process.env.CODEGRAPH_STORE_PROFILE
+  ? (() => {
+      const dir = process.env.CODEGRAPH_STORE_PROFILE!;
+      const spent = new Map<string, { calls: number; ms: number; rows: number }>();
+      process.on('exit', () => {
+        const sorted = [...spent].sort((a, b) => b[1].ms - a[1].ms).map(([sql, s]) => ({ ...s, sql }));
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, `store-${process.pid}-${threadId}.json`), JSON.stringify(sorted, null, 1));
+      });
+      return <T>(sql: string, work: () => T, count: (result: T) => number): T => {
+        const started = performance.now();
+        const result = work();
+        const entry = spent.get(sql) ?? { calls: 0, ms: 0, rows: 0 };
+        entry.calls += 1;
+        entry.ms += performance.now() - started;
+        entry.rows += count(result);
+        spent.set(sql, entry);
+        return result;
+      };
+    })()
+  : undefined;
 
 interface NativeStore {
   exec(sql: string): void;
@@ -183,10 +211,15 @@ class DuckdbAdapter implements SqliteDatabase {
     const store = this.store;
     const bind = (params: any[]) => this.bind(names, params);
     const sealIfLogFull = () => this.sealIfLogFull();
-    const rows = (params: any[]): any[] => JSON.parse(store.query(statement, bind(params)));
+    const query = (params: any[]): any[] => JSON.parse(store.query(statement, bind(params)));
+    const rows = profile
+      ? (params: any[]) => profile(statement, () => query(params), (r) => r.length)
+      : query;
+    const write = (params: any[]): number => store.run(statement, bind(params));
+    const change = profile ? (params: any[]) => profile(statement, () => write(params), (n) => n) : write;
     return {
       run(...params: any[]) {
-        const changes = store.run(statement, bind(params));
+        const changes = change(params);
         sealIfLogFull();
         return { changes, lastInsertRowid: 0 };
       },
@@ -212,7 +245,8 @@ class DuckdbAdapter implements SqliteDatabase {
    */
   append(table: string, rows: unknown[][]): number {
     if (rows.length === 0) return 0;
-    const count = this.store.append(table, JSON.stringify(rows.map((row) => row.map(toParam))));
+    const append = () => this.store.append(table, JSON.stringify(rows.map((row) => row.map(toParam))));
+    const count = profile ? profile(`append ${table}`, append, (n) => n) : append();
     this.sealIfLogFull();
     return count;
   }
