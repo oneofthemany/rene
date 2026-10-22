@@ -50,7 +50,7 @@ try {
 import { Command } from 'commander';
 import * as path from 'path';
 import * as fs from 'fs';
-import { getCodeGraphDir, isInitialized, hasSchemalessDb, hasForeignDbFile, unsafeIndexRootReason, findNearestCodeGraphRoot, codeGraphDirName, DEFAULT_CODEGRAPH_DIR } from '../directory';
+import { getCodeGraphDir, isInitialized, hasSchemalessDb, hasForeignDbFile, unsafeIndexRootReason, findNearestCodeGraphRoot, codeGraphDirName, DEFAULT_CODEGRAPH_DIR, indexProgressPaths } from '../directory';
 import { detectWorktreeIndexMismatch, worktreeMismatchWarning } from '../sync/worktree';
 import { createShimmerProgress } from '../ui/shimmer-progress';
 import { getGlyphs } from '../ui/glyphs';
@@ -744,7 +744,7 @@ async function runInit(
     // index if the user opts gitignored child repos in below (#1156).
     const dbPath = getDatabasePath(projectPath);
     const runIndex = async (): Promise<IndexResult> => {
-      const supervision = installCommandSupervision('init', { progressPaths: [dbPath, `${dbPath}-wal`] });
+      const supervision = installCommandSupervision('init', { progressPaths: indexProgressPaths(dbPath) });
       try {
         if (options.verbose) {
           return await cg.indexAll({ onProgress: createVerboseProgress(), verbose: true });
@@ -931,7 +931,7 @@ program
           // The DB + WAL paths let the liveness watchdog tell a slow store on
           // degraded storage from a true wedge (#1231).
           const dbPath = getDatabasePath(projectPath);
-          const supervision = installCommandSupervision('index', { progressPaths: [dbPath, `${dbPath}-wal`] });
+          const supervision = installCommandSupervision('index', { progressPaths: indexProgressPaths(dbPath) });
           try {
             if (options.quiet) {
               // Quiet mode: no UI, just run against the freshly-recreated graph.

@@ -42,7 +42,8 @@
  * 150-IOPS disk). Heartbeat silence alone cannot tell that apart from a wedge —
  * but the disk can: a wedged CPU loop makes no forward progress on the DB
  * files, while a slow store advances them. When the caller supplies
- * `progressPaths` (the SQLite DB + `-wal`), the child checks them at each
+ * `progressPaths` (an index's files: SQLite's DB + `-wal`, or a DuckDB store
+ * folder, counted by its entries), the child checks them at each
  * silent timeout: size/mtime advanced ⇒ defer the kill and keep watching;
  * unchanged ⇒ kill as before. Deferral is bounded by a hard cap
  * (`PROGRESS_CAP_MULTIPLIER` × timeout) of continuous silence, so a wedge
@@ -130,11 +131,23 @@ function kill(extra) {
   process.exit(0);
 }
 // Fingerprint of the watched files (size + mtime). A change between checks is
-// forward disk progress — a slow synchronous SQLite statement, not a wedge.
+// forward disk progress — a slow synchronous store, not a wedge. A folder (a
+// DuckDB store) counts by its entries: its log grows, its seals add files.
+function stamp(p) {
+  const st = fs.statSync(p);
+  return st.size + ':' + st.mtimeMs + ';';
+}
 function snap() {
   let s = '';
   for (const p of progressPaths) {
-    try { const st = fs.statSync(p); s += st.size + ':' + st.mtimeMs + ';'; } catch (e) { s += 'x;'; }
+    try {
+      s += stamp(p);
+      if (fs.statSync(p).isDirectory()) {
+        for (const name of fs.readdirSync(p).sort()) {
+          try { s += name + '=' + stamp(p + '/' + name); } catch (e) { s += name + '=x;'; }
+        }
+      }
+    } catch (e) { s += 'x;'; }
   }
   return s;
 }

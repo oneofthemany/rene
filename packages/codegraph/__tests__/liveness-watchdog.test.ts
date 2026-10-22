@@ -180,6 +180,25 @@ describe('liveness watchdog (spawned, real watchdog process)', () => {
     expect(r.code).toBe(5);
   }, 15000);
 
+  it('counts a watched folder by its entries: a DuckDB store whose log grows is progress', async () => {
+    // A DuckDB index is its store folder (indexProgressPaths); the folder's
+    // own size and mtime don't move when the log inside it grows.
+    const store = path.dirname(progressFile());
+    const log = path.join(store, 'wal-g00000001.log');
+    fs.writeFileSync(log, 'seed');
+    const [r] = await Promise.all([
+      runChild(
+        { CODEGRAPH_WATCHDOG_TIMEOUT_MS: '500' },
+        'setTimeout(() => { const end = Date.now() + 2500; while (Date.now() < end) {} process.exit(5); }, 200);',
+        10_000,
+        [store]
+      ),
+      growFile(log, 3200),
+    ]);
+    expect(r.signal).toBeNull();
+    expect(r.code).toBe(5);
+  }, 15000);
+
   it('still kills a blocked loop when the watched files do NOT advance (a true wedge)', async () => {
     const tmp = progressFile();
     fs.writeFileSync(tmp, 'seed');

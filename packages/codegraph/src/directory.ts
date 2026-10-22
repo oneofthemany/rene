@@ -8,8 +8,18 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { isWslWindowsDrive } from './sync/watch-policy';
-import { duckdbIndexExists } from './db/duckdb-adapter';
+import { duckdbIndexExists, duckdbStoreDirectory } from './db/duckdb-adapter';
 import { duckdbStorageSelected } from './db/sqlite-adapter';
+
+/**
+ * The files an index's writes advance, for the liveness watchdog's
+ * disk-progress check (#1231): SQLite's database and WAL, or DuckDB's store
+ * folder, whose entries change as its log grows and its seals add
+ * generations.
+ */
+export function indexProgressPaths(dbPath: string): string[] {
+  return duckdbStorageSelected() ? [duckdbStoreDirectory(dbPath)] : [dbPath, `${dbPath}-wal`];
+}
 
 /** The default per-project data directory name. */
 export const DEFAULT_CODEGRAPH_DIR = '.codegraph';

@@ -37,7 +37,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { spawn, StdioOptions } from 'child_process';
-import { resolveServerRoot, getCodeGraphDir } from '../directory';
+import { resolveServerRoot, getCodeGraphDir, indexProgressPaths } from '../directory';
 import { StdioTransport } from './transport';
 import { MCPEngine } from './engine';
 import { MCPSession } from './session';
@@ -216,8 +216,8 @@ export function stampLogChunk(chunk: string | Uint8Array): string | Uint8Array {
 }
 
 /**
- * Watchdog `progressPaths` for a server keyed on `root`'s index: the SQLite DB
- * + its WAL. With these, the #850 liveness watchdog only kills on heartbeat
+ * Watchdog `progressPaths` for a server keyed on `root`'s index: the files
+ * its writes advance (indexProgressPaths). With these, the #850 liveness watchdog only kills on heartbeat
  * silence when the DB files are NOT advancing — the same slow-disk deferral
  * the CLI `index`/`init` path got in #1231. Without it, one >timeout
  * synchronous statement on a big DB (multi-GB index behind Windows Defender)
@@ -227,8 +227,7 @@ export function stampLogChunk(chunk: string | Uint8Array): string | Uint8Array {
  */
 export function watchdogProgressPaths(root: string | null): { progressPaths?: string[] } {
   if (!root) return {};
-  const dbPath = path.join(getCodeGraphDir(root), 'codegraph.db');
-  return { progressPaths: [dbPath, `${dbPath}-wal`] };
+  return { progressPaths: indexProgressPaths(path.join(getCodeGraphDir(root), 'codegraph.db')) };
 }
 
 /**

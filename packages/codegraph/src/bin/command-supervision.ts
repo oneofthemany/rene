@@ -45,7 +45,7 @@ export interface CommandSupervision {
  * whose `stop()` must be called when the command completes so neither watchdog
  * outlives it.
  *
- * Pass `watchdog.progressPaths` (the project's SQLite DB + `-wal`) so the
+ * Pass `watchdog.progressPaths` (the index files, indexProgressPaths) so the
  * liveness watchdog can tell a slow-but-progressing store on degraded storage
  * (files advancing) from a true wedge (they aren't) — one long synchronous
  * SQLite statement on a 150-IOPS disk otherwise gets a healthy index

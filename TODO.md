@@ -279,8 +279,11 @@ Topics `56215652-83eb-441d-8b28-7a25d2c27983` (migration) and
 
 - **Constraints found:** the DuckDB rene builds with (static 1.10505.0,
   `packages/history-store`) has no full-text-search extension, so FTS5
-  search moves to SQL over `name_segment_vocab` and names, checked against
-  SQLite's results. DuckDB lets one process open a file, where SQLite's WAL
+  search is done in SQL over token tables with FTS5's tokenizer and bm25()
+  (done 2026-10-21: identical to SQLite's results, scores included; see
+  `packages/codegraph-store/DESIGN.md`, Search). Remaining before SQLite is
+  retired: the indexing speed (3x the CPU), CodeGraph's tests on DuckDB
+  (their raw SQLite SQL ported first), and the status text. DuckDB lets one process open a file, where SQLite's WAL
   lets the writer and the read-only query servers share it, so one owner
   process must serve every query. The 150 statements and 349 call sites
   (123 query methods, 14 files) are synchronous.
