@@ -3549,7 +3549,7 @@ export class ReferenceResolver {
     if (ref.referenceKind === 'calls') return result;
     const tgt = this.getLanguageFromNodeId(result.targetNodeId);
     // Package imports cannot target prose found by a framework's name lookup.
-    if (ref.referenceKind === 'imports' && (tgt as string) === 'markdown' && (ref.language as string) !== 'markdown') return null;
+    if (ref.referenceKind === 'imports' && tgt === 'markdown' && ref.language !== 'markdown') return null;
     if (tgt && ref.language && crossesCodeBoundary(tgt, ref.language)) return null;
     return result;
   }

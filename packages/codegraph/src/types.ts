@@ -43,6 +43,9 @@ export const NODE_KINDS = [
   'route',
   'component',
   'union',
+  // A heading in a document (docs/plans/graph.md): documentation is part of
+  // the graph, so a doc's sections are nodes its text can reference from.
+  'section',
 ] as const;
 
 export type NodeKind = (typeof NODE_KINDS)[number];
@@ -68,6 +71,7 @@ export const EDGE_KINDS = [
   'overrides',       // Method overrides parent method
   'decorates',       // Decorator applied to symbol
   'navigates',       // Navigates to a screen/route (Expo Router `router.push('/x')`)
+  'documents',       // A document or section names this symbol, file or document
 ] as const;
 
 export type EdgeKind = (typeof EDGE_KINDS)[number];
@@ -118,6 +122,9 @@ export const LANGUAGES = [
   'vbnet',
   'erlang',
   'terraform',
+  // Markdown documentation — no symbols of its own; the MarkdownExtractor
+  // emits section nodes and the references a document makes to code.
+  'markdown',
   'unknown',
 ] as const;
 

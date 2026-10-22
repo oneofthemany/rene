@@ -12,7 +12,7 @@ import * as fsp from 'fs/promises';
 import { Parser, Language as WasmLanguage } from 'web-tree-sitter';
 import { ExtractionError, Language } from '../types';
 
-export type GrammarLanguage = Exclude<Language, 'svelte' | 'vue' | 'astro' | 'liquid' | 'razor' | 'yaml' | 'twig' | 'xml' | 'properties' | 'unknown'>;
+export type GrammarLanguage = Exclude<Language, 'svelte' | 'vue' | 'astro' | 'liquid' | 'razor' | 'yaml' | 'twig' | 'xml' | 'properties' | 'markdown' | 'unknown'>;
 
 /**
  * WASM filename map — maps each language to its .wasm grammar file
@@ -108,6 +108,10 @@ export const EXTENSION_MAP: Record<string, Language> = {
   '.kts': 'kotlin',
   '.dart': 'dart',
   '.liquid': 'liquid',
+  // Markdown — prose, headings and the links and code spans in them. Its own
+  // extractor; the sections it emits are what docs-drift reads. (docs/plans/graph.md)
+  '.md': 'markdown',
+  '.markdown': 'markdown',
   '.svelte': 'svelte',
   '.vue': 'vue',
   '.astro': 'astro',
@@ -798,6 +802,7 @@ export function isLanguageSupported(language: Language): boolean {
   if (language === 'vue') return true; // custom extractor (script block delegation)
   if (language === 'astro') return true; // custom extractor (frontmatter/script block delegation)
   if (language === 'liquid') return true; // custom regex extractor
+  if (language === 'markdown') return true; // custom MarkdownExtractor (headings, links, code spans)
   if (language === 'razor') return true; // custom RazorExtractor (.cshtml/.razor markup)
   if (language === 'yaml') return true; // file-level tracking only; Drupal routing extraction via framework resolver
   if (language === 'twig') return true; // file-level tracking only
@@ -814,6 +819,7 @@ export function isGrammarLoaded(language: Language): boolean {
   if (language === 'svelte' || language === 'vue' || language === 'astro' || language === 'liquid' || language === 'razor') return true;
   if (language === 'yaml' || language === 'twig') return true; // no WASM grammar needed
   if (language === 'xml' || language === 'properties') return true; // no WASM grammar needed
+  if (language === 'markdown') return true; // no WASM grammar needed
   return languageCache.has(language);
 }
 
@@ -834,7 +840,7 @@ export function isFileLevelOnlyLanguage(language: Language): boolean {
  * Get all supported languages (those with grammar definitions).
  */
 export function getSupportedLanguages(): Language[] {
-  return [...(Object.keys(WASM_GRAMMAR_FILES) as GrammarLanguage[]), 'svelte', 'vue', 'astro', 'liquid'];
+  return [...(Object.keys(WASM_GRAMMAR_FILES) as GrammarLanguage[]), 'svelte', 'vue', 'astro', 'liquid', 'markdown'];
 }
 
 /**
@@ -918,6 +924,7 @@ export function getLanguageDisplayName(language: Language): string {
     vue: 'Vue',
     astro: 'Astro',
     liquid: 'Liquid',
+    markdown: 'Markdown',
     pascal: 'Pascal / Delphi',
     scala: 'Scala',
     lua: 'Lua',

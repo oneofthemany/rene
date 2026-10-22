@@ -14,12 +14,21 @@ export const COPILOT_DENIED_TOOLS = ["view", "edit", "create", "grep", "glob"];
 
 /**
  * Copilot CLI arguments for the cli toolkit: rene's commands pre-approved,
- * and the tools it replaces denied outright.
+ * and the tools it replaces taken out of the session.
+ *
+ * `--excluded-tools` is what removes a tool ("these tools will not be
+ * available to the model"); `--deny-tool` only withholds permission for one,
+ * and a session started with `--deny-tool edit` still edited a file with it.
+ * Both are passed: the exclusion is the line, the denial is the backstop if a
+ * tool is ever reachable by another name. Each value is attached to its own
+ * flag with `=`, because both options take a variadic list and would
+ * otherwise swallow the caller's own arguments that follow.
  */
 export const copilotToolkitArguments = () => [
-  "--allow-tool",
-  "shell(rene)",
-  "--allow-tool",
-  "shell(rea)",
-  ...COPILOT_DENIED_TOOLS.flatMap((tool) => ["--deny-tool", tool]),
+  "--allow-tool=shell(rene)",
+  "--allow-tool=shell(rea)",
+  ...COPILOT_DENIED_TOOLS.flatMap((tool) => [
+    `--excluded-tools=${tool}`,
+    `--deny-tool=${tool}`,
+  ]),
 ];

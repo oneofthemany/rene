@@ -28,6 +28,7 @@ import { rustImplTypeName } from './languages/rust';
 import { goAliasTypeNames, goEmbeddedTypeName, goInterfaceMethodTypeNames, goStructFieldTypeNames } from './languages/go';
 import { dartMisparsedGenericCall, dartReceiverOf, isDartTypeName, pushDartTypeRefs } from './languages/dart';
 import { LiquidExtractor } from './liquid-extractor';
+import { MarkdownExtractor } from './markdown-extractor';
 import { RazorExtractor } from './razor-extractor';
 import { SvelteExtractor } from './svelte-extractor';
 import { AstroExtractor } from './astro-extractor';
@@ -8349,6 +8350,12 @@ export function extractFromSource(
   } else if (detectedLanguage === 'liquid') {
     // Use custom extractor for Liquid
     const extractor = new LiquidExtractor(filePath, source);
+    result = extractor.extract();
+  } else if (detectedLanguage === 'markdown') {
+    // Custom extractor for Markdown: a file node, a section node per heading, and
+    // documents references from a section to the symbols and files its prose
+    // names. Docs-drift reads the ones that do not resolve.
+    const extractor = new MarkdownExtractor(filePath, source);
     result = extractor.extract();
   } else if (detectedLanguage === 'razor') {
     // Use custom extractor for ASP.NET Razor (.cshtml) / Blazor (.razor) markup
