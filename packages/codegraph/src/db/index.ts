@@ -199,7 +199,22 @@ export class DatabaseConnection {
     }
     const { db, backend } = createDatabase(dbPath, options);
     const adapter = db as DuckdbAdapter;
-    adapter.exec(fs.readFileSync(path.join(__dirname, 'schema.duckdb.sql'), 'utf-8'));
+    const schema = fs.readFileSync(path.join(__dirname, 'schema.duckdb.sql'), 'utf-8');
+    if (adapter.readsSealedFiles) {
+      // A query server reads the sealed Parquet in place (duckdb-adapter.ts).
+      try {
+        adapter.attachSealed(schema);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.startsWith('schema mismatch')) throw error;
+        throw new Error(
+          `The index at ${dbPath} was built by a CodeGraph with another schema (${message}); ` +
+            'open it for writing (codegraph sync or index) to rebuild it.'
+        );
+      }
+      return new DatabaseConnection(db, dbPath, backend, false, true);
+    }
+    adapter.exec(schema);
     try {
       adapter.loadSealed();
     } catch (error) {

@@ -86,6 +86,26 @@ function watchPlans(db, work) {
   };
 }
 
+const edgeView = (e) => e && { source: e.source, target: e.target, kind: e.kind, line: e.line ?? null, col: e.column ?? null };
+const subgraphView = (g) => ({ nodes: [...g.nodes.keys()], edges: g.edges.map(edgeView), roots: g.roots });
+
+/** A node's traversals, every list in the order CodeGraph returned it. */
+function ordered(cg, id) {
+  const pairs = (list) => list.map(({ node, edge }) => [node.id, edgeView(edge)]);
+  return {
+    callers: pairs(cg.getCallers(id, 2)),
+    callees: pairs(cg.getCallees(id, 2)),
+    usages: pairs(cg.findUsages(id)),
+    impact: subgraphView(cg.getImpactRadius(id, 2)),
+    callGraph: subgraphView(cg.getCallGraph(id, 2)),
+    typeHierarchy: subgraphView(cg.getTypeHierarchy(id)),
+    bfs: subgraphView(cg.traverse(id, { direction: 'both', maxDepth: 3, limit: 60 })),
+    outgoing: subgraphView(cg.traverse(id, { direction: 'outgoing', maxDepth: 4, limit: 60 })),
+    ancestors: cg.getAncestors(id).map((n) => n.id),
+    children: cg.getChildren(id).map((n) => n.id),
+  };
+}
+
 async function record(out) {
   const require = createRequire(import.meta.url);
   const { CodeGraph } = require(join(home, "dist/index.js"));
@@ -127,6 +147,9 @@ async function record(out) {
             callees: sortRows(cg.getCallees(id).map(({ node }) => nodeView(node))),
             usages: sortRows(cg.findUsages(id).map(({ node, edge }) => ({ node: nodeView(node), kind: edge.kind, line: edge.line }))),
             impact: [...cg.getImpactRadius(id, 2).nodes.keys()].sort(),
+            // The same answers in the order they come back: a limit, or a
+            // reader taking the first few, depends on it.
+            ordered: ordered(cg, id),
             metrics: cg.getNodeMetrics(id),
           },
         ]),
@@ -148,6 +171,14 @@ async function record(out) {
       };
     };
     battery.searching = searching();
+    // The explore tool end to end: its whole text answer, as an agent gets it.
+    const { ToolHandler } = require(join(home, "dist/mcp/tools.js"));
+    const tools = new ToolHandler(cg);
+    battery.explore = {};
+    for (const query of [words.slice(0, 3).join(" "), `${words[3] ?? ""} ${words[5] ?? ""}`.trim(), "how does the main entry point work"]) {
+      const result = await tools.executeReadTool("codegraph_explore", { query });
+      battery.explore[query] = (result.content ?? []).map((c) => c.text ?? "").join("");
+    }
     if (files.length >= 2) {
       writeFileSync(join(work, files[0]), `${readFileSync(join(work, files[0]), "utf8")}\n`);
       rmSync(join(work, files[1]));

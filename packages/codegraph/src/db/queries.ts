@@ -24,6 +24,7 @@ import { isGeneratedFile } from '../extraction/generated-detection';
 import { splitIdentifierSegments } from '../search/identifier-segments';
 import { isModuleKey, referenceNameTail, MEMBER_TAIL_SQL, MODULE_PARKED_SQL } from './reference-tail';
 import { TokenIndex, type SearchFields, phraseOf, rankedSearchSql, matchingPhrases, matchingNames } from './token-search';
+import { ReadScope } from './read-scope';
 
 /**
  * Files that should not be candidates for "dominant file" detection: tests,
@@ -83,6 +84,13 @@ const THROUGH_NAMES = (column: string): string => `(
  * twice kept its last row; DuckDB resolves a key that occurs twice in one
  * statement otherwise, so the batch says which row is meant.
  */
+/**
+ * A node's edges narrowed to `kinds` (all when none), a copy: the filtered
+ * query sorted the same way (kind, then the other end, line, column).
+ */
+const withKinds = (edges: Edge[], kinds?: readonly EdgeKind[]): Edge[] =>
+  kinds && kinds.length > 0 ? edges.filter((edge) => kinds.includes(edge.kind)) : edges.slice();
+
 /** The search-indexed values of a row as insertNodes binds it. */
 const searchFieldsOfRow = (row: unknown[]): SearchFields => [
   row[0] as string,
@@ -277,16 +285,18 @@ export class QueryBuilder {
   // the node writes keep them in step, as FTS5's triggers did.
   private readonly tokens: TokenIndex | undefined;
 
+  // The open read scope (read-scope.ts), while a tool call runs in one.
+  private scope: ReadScope | undefined;
+  private scopeDepth = 0;
+
   // Node cache for frequently accessed nodes (LRU-style, max 1000 entries)
   private nodeCache: Map<string, Node> = new Map();
   private readonly maxCacheSize = 1000;
 
-  // getDominantFile()'s answer, tagged with the database change stamp it was
-  // computed under (see getChangeStamp). Query-independent, so one value
-  // serves every explore until the database changes (#1864).
-  private dominantFileMemo:
-    | { stamp: string; value: { filePath: string; edgeCount: number; nextEdgeCount: number } | null }
-    | undefined;
+  // Whole-graph answers (wholeGraph), each tagged with the database change
+  // stamp it was computed under (see getChangeStamp): query-independent, so
+  // one value serves every caller until the database changes (#1864).
+  private readonly wholeGraphMemo = new Map<string, { stamp: string; value: unknown }>();
 
   // Where edge inserts go: `edges`, or a synthesis stage's staging table
   // (stageEdgeInserts), since DuckDB has no INSTEAD OF trigger to send them.
@@ -428,6 +438,8 @@ export class QueryBuilder {
   constructor(db: SqliteDatabase) {
     this.db = db;
     this.tokens = TokenIndex.available(db) ? new TokenIndex(db) : undefined;
+    // A writer's seals carry the whole-graph summaries (writeSummaries).
+    (db as Partial<{ onSeal(hook: () => void): void }>).onSeal?.(() => this.writeSummaries());
     // Detect FTS5 availability once (#1532)
     try {
       db.prepare("SELECT * FROM nodes_fts LIMIT 0").get();
@@ -435,6 +447,115 @@ export class QueryBuilder {
     } catch {
       this._fts5Available = false;
     }
+  }
+
+  /**
+   * Runs `work` (one tool call) in a read scope (read-scope.ts): its single-row
+   * reads of nodes, edges, files' nodes and file records are remembered while
+   * the index is unchanged. Nested and concurrent calls share the one scope;
+   * it closes when the last finishes, awaited if `work` is async.
+   */
+  inReadScope<T>(work: () => T): T {
+    if (this.scopeDepth++ === 0) {
+      this.scope = new ReadScope({
+        stamp: () => this.getChangeStamp(),
+        edges: (ids, direction) => this.edgesByNodeFromDb(ids, direction),
+        nodes: (ids) => this.nodesByIdsFromDb(ids),
+        nodesInFiles: (paths) => this.getNodesGroupedByFile(paths),
+        files: (paths) => this.getFilesByPaths(paths),
+        named: (names) => this.getNodesByNames(names),
+        containing: (substrings) => this.getNodesBySubstrings(substrings),
+      });
+    }
+    const close = () => {
+      if (--this.scopeDepth === 0) this.scope = undefined;
+    };
+    let result: T;
+    try {
+      result = work();
+    } catch (error) {
+      close();
+      throw error;
+    }
+    if (result instanceof Promise) return result.finally(close) as T;
+    close();
+    return result;
+  }
+
+  /**
+   * Fills the open read scope for `ids` (their edges both ways and the nodes
+   * at both ends) in a few set queries, so a handler's loop over them reads
+   * from memory. Outside a scope it does nothing.
+   */
+  prefetchNeighbourhood(ids: readonly string[]): void {
+    this.scope?.prefetch(ids);
+  }
+
+  /**
+   * Fills the open read scope with reads a handler is about to make for a
+   * whole set, a query each: edges in the directions given, nodes, files'
+   * nodes, file records. Outside a scope it does nothing.
+   */
+  prefetchSets(sets: Parameters<ReadScope['prefetchSets']>[0]): void {
+    this.scope?.prefetchSets(sets);
+  }
+
+  /**
+   * Fills the open read scope with the neighbourhood a loop of traversals
+   * from `ids` will read (read-scope.ts prefetchReach). Outside a scope it
+   * does nothing.
+   */
+  prefetchReach(ids: readonly string[], directions: ReadonlyArray<'outgoing' | 'incoming'>, depth: number): void {
+    this.scope?.prefetchReach(ids, directions, depth);
+  }
+
+  /**
+   * Every node whose name holds each of `substrings` (case-insensitively, as
+   * findNodesByNameSubstring's ILIKE), in one query: per substring, in that
+   * method's order when kinds filter it (name length, kind, file, line, id),
+   * each with whether its name starts with the substring.
+   */
+  getNodesBySubstrings(substrings: readonly string[]): Map<string, Array<{ node: Node; startsWith: boolean }>> {
+    const out = new Map<string, Array<{ node: Node; startsWith: boolean }>>();
+    for (const s of substrings) out.set(s, []);
+    if (out.size === 0) return out;
+    const rows = this.db
+      .prepare(
+        `SELECT k.key AS lookup_key, (n.name ILIKE k.key || '%') AS starts_with, n.*
+           FROM (SELECT DISTINCT unnest(from_json(?, '["VARCHAR"]')) AS key) k
+           JOIN nodes n ON n.name ILIKE '%' || k.key || '%'
+          ORDER BY k.key, length(n.name), n.kind, n.file_path, n.start_line, n.id`
+      )
+      .all(JSON.stringify([...out.keys()])) as Array<NodeRow & { lookup_key: string; starts_with: boolean | number }>;
+    for (const row of rows) out.get(row.lookup_key)!.push({ node: rowToNode(row), startsWith: !!row.starts_with });
+    return out;
+  }
+
+  /** getNodesByFile for many files in one query, grouped: each file's nodes in its order. */
+  getNodesGroupedByFile(paths: readonly string[]): Map<string, Node[]> {
+    const out = new Map<string, Node[]>();
+    for (const path of paths) out.set(path, []);
+    if (out.size === 0) return out;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM nodes WHERE file_path IN (SELECT unnest(from_json(?, '["VARCHAR"]')))
+          ORDER BY file_path, start_line, id`
+      )
+      .all(JSON.stringify([...out.keys()])) as NodeRow[];
+    for (const row of rows) out.get(row.file_path)!.push(rowToNode(row));
+    return out;
+  }
+
+  /** getFileByPath for many paths in one query; a path not indexed maps to null. */
+  getFilesByPaths(paths: readonly string[]): Map<string, FileRecord | null> {
+    const out = new Map<string, FileRecord | null>();
+    for (const path of paths) out.set(path, null);
+    if (out.size === 0) return out;
+    const rows = this.db
+      .prepare(`SELECT * FROM files WHERE path IN (SELECT unnest(from_json(?, '["VARCHAR"]')))`)
+      .all(JSON.stringify([...out.keys()])) as FileRow[];
+    for (const row of rows) out.set(row.path, rowToFileRecord(row));
+    return out;
   }
 
   /**
@@ -483,7 +604,7 @@ export class QueryBuilder {
     // The change stamp is per connection, and fresh connections to two
     // different databases report the same one — the memo goes with the old
     // connection, or a worker following a rebuilt index keeps its answer (#1864).
-    this.dominantFileMemo = undefined;
+    this.wholeGraphMemo.clear();
   }
 
   private edgeKindStmt(sql: string): SqliteStatement {
@@ -992,6 +1113,7 @@ export class QueryBuilder {
    * Get a node by ID
    */
   getNodeById(id: string): Node | null {
+    if (this.scope) return this.scope.node(id);
     // Check cache first
     if (this.nodeCache.has(id)) {
       const cached = this.nodeCache.get(id)!;
@@ -1030,6 +1152,10 @@ export class QueryBuilder {
    * the SQL query only touches the misses.
    */
   getNodesByIds(ids: readonly string[]): Map<string, Node> {
+    return this.scope ? this.scope.nodesMany(ids) : this.nodesByIdsFromDb(ids);
+  }
+
+  private nodesByIdsFromDb(ids: readonly string[]): Map<string, Node> {
     const out = new Map<string, Node>();
     if (ids.length === 0) return out;
 
@@ -1048,20 +1174,16 @@ export class QueryBuilder {
     }
     if (misses.length === 0) return out;
 
-    // Chunk under SQLite's parameter limit (default 999, raised to 32766
-    // in better-sqlite3 builds — chunk at 500 for safety across both
-    // backends and to keep the query plan simple).
-    for (let i = 0; i < misses.length; i += SQLITE_PARAM_CHUNK_SIZE) {
-      const chunk = misses.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
-      const placeholders = chunk.map(() => '?').join(',');
-      const rows = this.db
-        .prepare(`SELECT * FROM nodes WHERE id IN (${placeholders})`)
-        .all(...chunk) as NodeRow[];
-      for (const row of rows) {
-        const node = rowToNode(row);
-        out.set(node.id, node);
-        this.cacheNode(node);
-      }
+    // One statement for every miss: the ids as one JSON list, not a
+    // placeholder each (a 500-placeholder statement costs more to prepare
+    // than to run; 3,000 ids take 24 ms this way against 69 ms in chunks).
+    const rows = this.db
+      .prepare(`SELECT * FROM nodes WHERE id IN (SELECT unnest(from_json(?, '["VARCHAR"]')))`)
+      .all(JSON.stringify(misses)) as NodeRow[];
+    for (const row of rows) {
+      const node = rowToNode(row);
+      out.set(node.id, node);
+      this.cacheNode(node);
     }
     return out;
   }
@@ -1150,6 +1272,7 @@ export class QueryBuilder {
    * Get all nodes in a file
    */
   getNodesByFile(filePath: string): Node[] {
+    if (this.scope) return this.scope.nodesInFile(filePath).slice();
     if (!this.stmts.getNodesByFile) {
       this.stmts.getNodesByFile = this.db.prepare(
         'SELECT * FROM nodes WHERE file_path = ? ORDER BY start_line, id'
@@ -1227,19 +1350,50 @@ export class QueryBuilder {
    * stamp: recomputed only after something wrote to the database.
    */
   getDominantFile(): { filePath: string; edgeCount: number; nextEdgeCount: number } | null {
-    // total_changes() counts writes that are later rolled back, so a result
-    // read inside a transaction could outlive a ROLLBACK under an unchanged
-    // stamp. Never keep one; `undefined` (a runtime without the getter) is
-    // treated the same way.
-    if (this.db.inTransaction !== false) {
-      this.dominantFileMemo = undefined;
-      return this.computeDominantFile();
-    }
+    return this.wholeGraph('dominantFile', () => this.computeDominantFile());
+  }
+
+  /**
+   * A whole-graph answer, computed once per state of the index. It is kept
+   * under the change stamp (a write anywhere recomputes it); a reader of
+   * sealed files first takes it from the generation's summaries, which the
+   * writer computed as it sealed (writeSummaries), so no reader recomputes
+   * it from the files (DESIGN.md, Whole-graph summaries). Each caller gets
+   * its own copy. Inside a transaction it is computed fresh and not kept: a
+   * stamp can't tell a write that is later rolled back.
+   */
+  private wholeGraph<T>(key: string, compute: () => T): T {
+    if (this.db.inTransaction !== false) return compute();
     const stamp = this.getChangeStamp();
-    if (this.dominantFileMemo?.stamp === stamp) return this.dominantFileMemo.value;
-    const value = this.computeDominantFile();
-    this.dominantFileMemo = { stamp, value };
-    return value;
+    const kept = this.wholeGraphMemo.get(key);
+    if (kept && kept.stamp === stamp) return structuredClone(kept.value) as T;
+    let value: T | undefined;
+    if ((this.db as Partial<{ readsSealedFiles: boolean }>).readsSealedFiles) {
+      const row = this.db.prepare('SELECT value FROM generation_summaries WHERE key = ?').get(key) as { value: string } | undefined;
+      if (row) value = JSON.parse(row.value) as T;
+    }
+    if (value === undefined) value = compute();
+    this.wholeGraphMemo.set(key, { stamp, value });
+    return structuredClone(value);
+  }
+
+  /**
+   * Writes the whole-graph summaries a sealed generation carries, from the
+   * live tables: the writer calls it just before it seals, so the summaries
+   * describe exactly what is sealed. Sizes are the ones the tools ask for.
+   */
+  writeSummaries(): void {
+    const summaries: Array<[string, unknown]> = [
+      ['dominantFile', this.computeDominantFile()],
+      ['topRouteFile', this.computeTopRouteFile()],
+      ['codeMap:15', this.computeCodeMap(15)],
+      ['stats', this.computeStatsCounts()],
+    ];
+    this.db.transaction(() => {
+      this.db.exec('DELETE FROM generation_summaries');
+      const insert = this.db.prepare('INSERT INTO generation_summaries (key, value) VALUES (?, ?)');
+      for (const [key, value] of summaries) insert.run(key, JSON.stringify(value));
+    })();
   }
 
   /**
@@ -1253,6 +1407,10 @@ export class QueryBuilder {
    * recompute, which only costs time, never a stale answer.
    */
   private getChangeStamp(): string {
+    // DuckDB has neither total_changes() nor data_version: its store counts
+    // every write and replayed change itself (duckdb-adapter.ts).
+    const stamped = this.db as Partial<{ changeStamp(): number }>;
+    if (typeof stamped.changeStamp === 'function') return String(stamped.changeStamp());
     if (!this.stmts.getChangeStamp) {
       this.stmts.getChangeStamp = this.db.prepare(
         'SELECT total_changes() AS changes, (SELECT data_version FROM pragma_data_version) AS version'
@@ -1302,6 +1460,10 @@ export class QueryBuilder {
    * meant for an occasional overview, not per-query use.
    */
   getCodeMap(limit: number): CodeMap {
+    return this.wholeGraph(`codeMap:${limit}`, () => this.computeCodeMap(limit));
+  }
+
+  private computeCodeMap(limit: number): CodeMap {
     const languages = this.db.prepare(`
       SELECT language, COUNT(*) AS files, COALESCE(SUM(node_count), 0) AS symbols
       FROM files
@@ -1363,6 +1525,10 @@ export class QueryBuilder {
    * 30% of them (diffuse routing → no single answer file).
    */
   getTopRouteFile(): { filePath: string; routeCount: number; totalRoutes: number } | null {
+    return this.wholeGraph('topRouteFile', () => this.computeTopRouteFile());
+  }
+
+  private computeTopRouteFile(): { filePath: string; routeCount: number; totalRoutes: number } | null {
     if (!this.stmts.getTopRouteFile) {
       this.stmts.getTopRouteFile = this.db.prepare(`
         SELECT file_path, COUNT(*) AS cnt
@@ -1546,7 +1712,7 @@ export class QueryBuilder {
     // Fresh statement per call — an iterator holds an open cursor (see
     // iterateNodesByKind).
     const stmt = this.db.prepare(
-      "SELECT * FROM nodes WHERE language = ? AND decorators LIKE '%' || ? || '%' ORDER BY file_path, start_line, id"
+      "SELECT * FROM nodes WHERE language = ? AND decorators ILIKE '%' || ? || '%' ORDER BY file_path, start_line, id"
     );
     for (const row of stmt.iterate(language, `"${decorator}"`)) {
       yield rowToNode(row as NodeRow);
@@ -1583,6 +1749,7 @@ export class QueryBuilder {
    * is capped by AMBIGUOUS_NAME_CEILING (#999).
    */
   getNodesByName(name: string): Node[] {
+    if (this.scope) return this.scope.named(name).slice();
     if (!this.stmts.getNodesByName) {
       this.stmts.getNodesByName = this.db.prepare(
         'SELECT * FROM nodes WHERE name = ? ORDER BY file_path, start_line, id'
@@ -1642,8 +1809,8 @@ export class QueryBuilder {
     return this.nodesByKeys(lowerNames, 'lower(n.name) = lower(k.key)', this.insertionOrder('n'));
   }
 
-  /** Each of `keys`' nodes `n`, matched by `match` and in `order`. */
-  private nodesByKeys(keys: readonly string[], match: string, order: string): Map<string, Node[]> {
+  /** Each of `keys`' nodes `n`, matched by `match` (and `where`, binding `params`) and in `order`. */
+  private nodesByKeys(keys: readonly string[], match: string, order: string, where = '', params: unknown[] = []): Map<string, Node[]> {
     const out = new Map<string, Node[]>();
     for (const key of keys) out.set(key, []);
     if (out.size === 0) return out;
@@ -1651,10 +1818,10 @@ export class QueryBuilder {
       .prepare(
         `SELECT k.key AS lookup_key, n.*
            FROM (SELECT DISTINCT unnest(from_json(?, '["VARCHAR"]')) AS key) k
-           JOIN nodes n ON ${match}
+           JOIN nodes n ON ${match}${where}
           ORDER BY k.key, ${order}`
       )
-      .all(JSON.stringify([...out.keys()])) as Array<NodeRow & { lookup_key: string }>;
+      .all(JSON.stringify([...out.keys()]), ...params) as Array<NodeRow & { lookup_key: string }>;
     for (const row of rows) out.get(row.lookup_key)!.push(rowToNode(row));
     return out;
   }
@@ -1818,23 +1985,24 @@ export class QueryBuilder {
       const existingIds = new Set(results.map(r => r.node.id));
       const maxFtsScore = Math.max(...results.map(r => r.score));
       const terms = query.split(/\s+/).filter(t => t.length >= 2);
+      // Every term's exact-name nodes in one query, then each term's first 20
+      // in insertion order, as its own query took them.
+      let filter = '';
+      const params: string[] = [];
+      if (kinds && kinds.length > 0) {
+        filter += ` AND n.kind IN (${kinds.map(() => '?').join(',')})`;
+        params.push(...kinds);
+      }
+      if (languages && languages.length > 0) {
+        filter += ` AND n.language IN (${languages.map(() => '?').join(',')})`;
+        params.push(...languages);
+      }
+      const byTerm = this.nodesByKeys(terms, 'lower(n.name) = lower(k.key)', this.insertionOrder('n'), filter, params);
       for (const term of terms) {
-        let sql = 'SELECT * FROM nodes WHERE lower(name) = lower(?)';
-        const params: (string | number)[] = [term];
-        if (kinds && kinds.length > 0) {
-          sql += ` AND kind IN (${kinds.map(() => '?').join(',')})`;
-          params.push(...kinds);
-        }
-        if (languages && languages.length > 0) {
-          sql += ` AND language IN (${languages.map(() => '?').join(',')})`;
-          params.push(...languages);
-        }
-        sql += ` ORDER BY ${this.insertionOrder()} LIMIT 20`;
-        const rows = this.db.prepare(sql).all(...params) as NodeRow[];
-        for (const row of rows) {
-          if (!existingIds.has(row.id)) {
-            results.push({ node: rowToNode(row), score: maxFtsScore });
-            existingIds.add(row.id);
+        for (const node of (byTerm.get(term) ?? []).slice(0, 20)) {
+          if (!existingIds.has(node.id)) {
+            results.push({ node, score: maxFtsScore });
+            existingIds.add(node.id);
           }
         }
       }
@@ -2145,8 +2313,12 @@ export class QueryBuilder {
     if (!ranked) return [];
     const rows = this.db
       .prepare(`${ranked.sql} LIMIT ? OFFSET ?`)
-      .all(...ranked.params, Math.max(limit * 5, 100), offset) as (NodeRow & { score: number })[];
-    return rows.map((row) => ({ node: rowToNode(row), score: Math.abs(row.score) }));
+      .all(...ranked.params, Math.max(limit * 5, 100), offset) as Array<{ node_id: string; score: number }>;
+    const nodes = this.getNodesByIds(rows.map((row) => row.node_id));
+    return rows.flatMap((row) => {
+      const node = nodes.get(row.node_id);
+      return node ? [{ node, score: Math.abs(row.score) }] : [];
+    });
   }
 
   /**
@@ -2160,16 +2332,16 @@ export class QueryBuilder {
       SELECT nodes.*,
         CASE
           WHEN name = ? THEN 1.0
-          WHEN name LIKE ? THEN 0.9
-          WHEN name LIKE ? THEN 0.8
-          WHEN qualified_name LIKE ? THEN 0.7
+          WHEN name ILIKE ? THEN 0.9
+          WHEN name ILIKE ? THEN 0.8
+          WHEN qualified_name ILIKE ? THEN 0.7
           ELSE 0.5
         END as score
       FROM nodes
       WHERE (
-        name LIKE ? OR
-        qualified_name LIKE ? OR
-        name LIKE ?
+        name ILIKE ? OR
+        qualified_name ILIKE ? OR
+        name ILIKE ?
       )
     `;
 
@@ -2238,18 +2410,23 @@ export class QueryBuilder {
     // that hurts most: it runs both passes for every symbol extracted from the
     // query, and extraction is generous, so most of those names are absent from
     // the corpus and never reach either LIMIT.
+    //
+    // Both passes read the same rows: every node named (case-insensitively)
+    // like one of `names`, of `kinds`, in insertion order. One query reads
+    // them for all names; each pass takes from them what its own query took
+    // (pass 1 a name's first 100 files, pass 2 its first rows of
+    // `languages`), so the answers are unchanged.
+    const kindFilter = kinds && kinds.length > 0 ? ` AND n.kind IN (${kinds.map(() => '?').join(',')})` : '';
+    const candidates = this.nodesByKeys(names, 'lower(n.name) = lower(k.key)', this.insertionOrder('n'), kindFilter, kinds ?? []);
     const nameToFiles = new Map<string, Set<string>>();
     for (const name of names) {
       // Each file once, in the order its first such node was inserted.
-      let sql = 'SELECT file_path FROM nodes WHERE lower(name) = lower(?)';
-      const params: (string | number)[] = [name];
-      if (kinds && kinds.length > 0) {
-        sql += ` AND kind IN (${kinds.map(() => '?').join(',')})`;
-        params.push(...kinds);
+      const files = new Set<string>();
+      for (const node of candidates.get(name) ?? []) {
+        if (files.size >= 100) break;
+        files.add(node.filePath);
       }
-      sql += ` GROUP BY file_path ORDER BY min(${this.insertionOrder()}) LIMIT 100`;
-      const rows = this.db.prepare(sql).all(...params) as { file_path: string }[];
-      nameToFiles.set(name.toLowerCase(), new Set(rows.map(r => r.file_path)));
+      nameToFiles.set(name.toLowerCase(), files);
     }
 
     // Distinctive names are those with fewer than 10 file matches (e.g., "scrapeLoop" = 1 file)
@@ -2266,35 +2443,16 @@ export class QueryBuilder {
     const seenIds = new Set<string>();
 
     for (const name of names) {
-      let sql = `
-        SELECT nodes.*, 1.0 as score
-        FROM nodes
-        WHERE lower(name) = lower(?)
-      `;
-      const params: (string | number)[] = [name];
-
-      if (kinds && kinds.length > 0) {
-        sql += ` AND kind IN (${kinds.map(() => '?').join(',')})`;
-        params.push(...kinds);
-      }
-
-      if (languages && languages.length > 0) {
-        sql += ` AND language IN (${languages.map(() => '?').join(',')})`;
-        params.push(...languages);
-      }
-
       // Fetch enough to find co-located results among common names
-      sql += ` ORDER BY ${this.insertionOrder()} LIMIT ?`;
-      params.push(Math.max(perNameLimit * 3, 50));
-
-      const rows = this.db.prepare(sql).all(...params) as (NodeRow & { score: number })[];
+      const rows = (candidates.get(name) ?? [])
+        .filter((node) => !languages || languages.length === 0 || languages.includes(node.language))
+        .slice(0, Math.max(perNameLimit * 3, 50));
       const nameResults: SearchResult[] = [];
-      for (const row of rows) {
-        const node = rowToNode(row);
+      for (const node of rows) {
         if (seenIds.has(node.id)) continue;
         // Boost results in files that also contain distinctive symbols
         const coLocationBoost = distinctiveFiles.has(node.filePath) ? 20 : 0;
-        nameResults.push({ node, score: row.score + coLocationBoost });
+        nameResults.push({ node, score: 1 + coLocationBoost });
       }
 
       // Sort by score (co-located first), take per-name limit
@@ -2323,16 +2481,32 @@ export class QueryBuilder {
   ): SearchResult[] {
     const { kinds, languages, limit = 30, excludePrefix } = options;
 
+    // In a read scope, every node whose name holds `substring` was read once
+    // (for all a call's terms, getNodesBySubstrings), already in this query's
+    // order when kinds filter it; this query's answer is taken from them.
+    if (this.scope && kinds && kinds.length > 0) {
+      return this.scope
+        .containing(substring)
+        .filter(
+          (hit) =>
+            !(excludePrefix && hit.startsWith) &&
+            kinds.includes(hit.node.kind) &&
+            (!languages || languages.length === 0 || languages.includes(hit.node.language))
+        )
+        .slice(0, limit)
+        .map((hit) => ({ node: hit.node, score: 1 }));
+    }
+
     let sql = `
       SELECT nodes.*, 1.0 as score
       FROM nodes
-      WHERE name LIKE ?
+      WHERE name ILIKE ?
     `;
     const params: (string | number)[] = [`%${substring}%`];
 
     // Exclude prefix matches (handled by FTS-based prefix search in Step 2b)
     if (excludePrefix) {
-      sql += ` AND name NOT LIKE ?`;
+      sql += ` AND name NOT ILIKE ?`;
       params.push(`${substring}%`);
     }
 
@@ -2451,6 +2625,7 @@ export class QueryBuilder {
    * (calls before imports/references), then break ties deterministically.
    */
   getOutgoingEdges(sourceId: string, kinds?: EdgeKind[], provenance?: string): Edge[] {
+    if (this.scope && !provenance) return withKinds(this.scope.edges(sourceId, 'outgoing'), kinds);
     if ((kinds && kinds.length > 0) || provenance) {
       let sql = 'SELECT * FROM edges WHERE source = ?';
       const params: (string | number)[] = [sourceId];
@@ -2484,6 +2659,7 @@ export class QueryBuilder {
    * without changing the target/kind index's established kind precedence.
    */
   getIncomingEdges(targetId: string, kinds?: EdgeKind[]): Edge[] {
+    if (this.scope) return withKinds(this.scope.edges(targetId, 'incoming'), kinds);
     if (kinds && kinds.length > 0) {
       const sql = `SELECT * FROM edges WHERE target = ? AND kind IN (${kinds.map(() => '?').join(',')}) ORDER BY kind, source, line, col`;
       const rows = this.edgeKindStmt(sql).all(targetId, ...kinds) as EdgeRow[];
@@ -2495,6 +2671,31 @@ export class QueryBuilder {
     }
     const rows = this.stmts.getEdgesByTarget.all(targetId) as EdgeRow[];
     return rows.map(rowToEdge);
+  }
+
+  /**
+   * Every edge out of (or into) each of `ids`, grouped per node in the order
+   * getOutgoingEdges (getIncomingEdges) returns them, in one query: what a
+   * traversal expands a whole frontier with (graph/neighbourhood.ts). A node
+   * without edges maps to [].
+   */
+  getEdgesByNode(ids: readonly string[], direction: 'outgoing' | 'incoming'): Map<string, Edge[]> {
+    return this.scope ? this.scope.edgesMany(ids, direction) : this.edgesByNodeFromDb(ids, direction);
+  }
+
+  private edgesByNodeFromDb(ids: readonly string[], direction: 'outgoing' | 'incoming'): Map<string, Edge[]> {
+    const out = new Map<string, Edge[]>();
+    for (const id of ids) out.set(id, []);
+    if (out.size === 0) return out;
+    const [end, other] = direction === 'outgoing' ? ['source', 'target'] : ['target', 'source'];
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM edges WHERE ${end} IN (SELECT unnest(from_json(?, '["VARCHAR"]')))
+          ORDER BY ${end}, kind, ${other}, line, col`
+      )
+      .all(JSON.stringify([...out.keys()])) as EdgeRow[];
+    for (const row of rows) out.get(direction === 'outgoing' ? row.source : row.target)!.push(rowToEdge(row));
+    return out;
   }
 
   /**
@@ -2547,7 +2748,7 @@ export class QueryBuilder {
           // is not a production caller: forty tests hitting one endpoint must
           // not make it a hub the Steps walk refuses to enter.
           `SELECT target, COUNT(*) AS count FROM edges WHERE target IN (${placeholders})
-             AND (metadata IS NULL OR metadata NOT LIKE '%"synthesizedBy":"test-request"%') GROUP BY target`
+             AND (metadata IS NULL OR metadata NOT ILIKE '%"synthesizedBy":"test-request"%') GROUP BY target`
         )
         .all(...chunk) as Array<{ target: string; count: number }>;
       for (const row of rows) out.set(row.target, row.count);
@@ -2866,6 +3067,10 @@ export class QueryBuilder {
    * would rank every file and class above the code they hold.
    */
   getTopDependedOn(limit: number): Array<{ nodeId: string; dependents: number }> {
+    return this.wholeGraph(`topDependedOn:${limit}`, () => this.computeTopDependedOn(limit));
+  }
+
+  private computeTopDependedOn(limit: number): Array<{ nodeId: string; dependents: number }> {
     if (limit <= 0) return [];
     const rows = this.db
       .prepare(
@@ -3785,6 +3990,7 @@ export class QueryBuilder {
    * Get a file record by path
    */
   getFileByPath(filePath: string): FileRecord | null {
+    if (this.scope) return this.scope.file(filePath);
     if (!this.stmts.getFileByPath) {
       this.stmts.getFileByPath = this.db.prepare('SELECT * FROM files WHERE path = ?');
     }
@@ -3808,11 +4014,13 @@ export class QueryBuilder {
    * Get all tracked files
    */
   getAllFiles(): FileRecord[] {
-    if (!this.stmts.getAllFiles) {
-      this.stmts.getAllFiles = this.db.prepare('SELECT * FROM files ORDER BY path');
-    }
-    const rows = this.stmts.getAllFiles.all() as FileRow[];
-    return rows.map(rowToFileRecord);
+    return this.wholeGraph('files', () => {
+      if (!this.stmts.getAllFiles) {
+        this.stmts.getAllFiles = this.db.prepare('SELECT * FROM files ORDER BY path');
+      }
+      const rows = this.stmts.getAllFiles.all() as FileRow[];
+      return rows.map(rowToFileRecord);
+    });
   }
 
   /**
@@ -4082,11 +4290,13 @@ export class QueryBuilder {
    * Get all tracked file paths (lightweight — no full FileRecord objects)
    */
   getAllFilePaths(): string[] {
-    if (!this.stmts.getAllFilePaths) {
-      this.stmts.getAllFilePaths = this.db.prepare('SELECT path FROM files ORDER BY path');
-    }
-    const rows = this.stmts.getAllFilePaths.all() as Array<{ path: string }>;
-    return rows.map((r) => r.path);
+    return this.wholeGraph('filePaths', () => {
+      if (!this.stmts.getAllFilePaths) {
+        this.stmts.getAllFilePaths = this.db.prepare('SELECT path FROM files ORDER BY path');
+      }
+      const rows = this.stmts.getAllFilePaths.all() as Array<{ path: string }>;
+      return rows.map((r) => r.path);
+    });
   }
 
   /**
@@ -4617,7 +4827,7 @@ export class QueryBuilder {
    */
   getFailedModuleKeys(): string[] {
     return (this.db
-      .prepare(`SELECT DISTINCT name_tail AS key FROM unresolved_refs WHERE status = 'failed' AND name_tail LIKE 'module:%' ORDER BY key`)
+      .prepare(`SELECT DISTINCT name_tail AS key FROM unresolved_refs WHERE status = 'failed' AND name_tail ILIKE 'module:%' ORDER BY key`)
       .all() as Array<{ key: string }>).map((row) => row.key);
   }
 
@@ -4872,6 +5082,16 @@ export class QueryBuilder {
    * Get graph statistics
    */
   getStats(): GraphStats {
+    return {
+      ...this.wholeGraph('stats', () => this.computeStatsCounts()),
+      dbSizeBytes: 0, // Set by caller using DatabaseConnection.getSize()
+      walSizeBytes: 0, // Set by caller using DatabaseConnection.getWalSizeBytes()
+      lastUpdated: Date.now(),
+    };
+  }
+
+  /** getStats' counts: nodes, edges and files, by kind and language. */
+  private computeStatsCounts(): Omit<GraphStats, 'dbSizeBytes' | 'walSizeBytes' | 'lastUpdated'> {
     // Single query for all three aggregate counts
     const counts = this.db.prepare(`
       SELECT
@@ -4911,9 +5131,6 @@ export class QueryBuilder {
       nodesByKind,
       edgesByKind,
       filesByLanguage,
-      dbSizeBytes: 0, // Set by caller using DatabaseConnection.getSize()
-      walSizeBytes: 0, // Set by caller using DatabaseConnection.getWalSizeBytes()
-      lastUpdated: Date.now(),
     };
   }
 

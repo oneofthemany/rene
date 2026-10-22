@@ -2662,7 +2662,9 @@ export class ToolHandler {
 
   private answerResult(cg: CodeGraph, text: string, paths: Iterable<string>): ToolResult {
     const result = this.textResult(text);
-    result._cgAnswerFiles = [...new Set(paths)].map(file => ({
+    const files = [...new Set(paths)];
+    cg.prefetch({ files });
+    result._cgAnswerFiles = files.map(file => ({
       path: file,
       contentHash: cg.getFile(file)?.contentHash ?? null,
     }));
@@ -3018,7 +3020,17 @@ export class ToolHandler {
    * on the main thread in {@link execute} and never reaches here. May throw
    * NotIndexed/PathRefusal, which {@link executeReadTool} classifies.
    */
+  /**
+   * A tool call runs in its CodeGraph's read scope, so its per-item reads
+   * are remembered and can be prefetched (db/read-scope.ts); the scope
+   * empties itself if the index changes meanwhile.
+   */
   private async dispatchTool(toolName: string, args: Record<string, unknown>): Promise<ToolResult> {
+    const cg = this.cg;
+    return cg ? cg.inReadScope(() => this.dispatchUnscoped(toolName, args)) : this.dispatchUnscoped(toolName, args);
+  }
+
+  private async dispatchUnscoped(toolName: string, args: Record<string, unknown>): Promise<ToolResult> {
     switch (toolName) {
       case 'codegraph_search': return await this.handleSearch(args);
       case 'codegraph_callers': return await this.handleCallers(args);
@@ -3118,6 +3130,7 @@ export class ToolHandler {
       const seen = new Set<string>();
       const callers: Node[] = [];
       const labels = new Map<string, string>();
+      cg.prefetchReach(defNodes.map((n) => n.id), ['incoming'], 1);
       for (const node of defNodes) {
         for (const c of cg.getCallers(node.id)) {
           if (!seen.has(c.node.id)) {
@@ -3701,6 +3714,18 @@ export class ToolHandler {
       const callableFamily = family[0]?.kind === 'method' || family[0]?.kind === 'function';
       // supertype id → how many sampled definers share it + a few example definers
       const supers = new Map<string, { node: Node; count: number; targets: Node[] }>();
+      // The loop below reads, per member, its container, the container's
+      // supertype edges and the supertypes: each step read for the whole
+      // sample at once.
+      try {
+        const sample = family.slice(0, SAMPLE);
+        cg.prefetch({ edges: { ids: sample.map((m) => m.id), directions: ['incoming'] } });
+        const containerIds = sample.flatMap((m) =>
+          cg.getIncomingEdges(m.id).filter((e) => e.kind === 'contains').slice(0, 1).map((e) => e.source)
+        );
+        cg.prefetch({ nodes: containerIds, edges: { ids: containerIds, directions: ['outgoing'] } });
+        cg.prefetch({ nodes: containerIds.flatMap((id) => cg.getOutgoingEdges(id).map((e) => e.target)) });
+      } catch { /* the loop reads what it needs itself */ }
       for (const m of family.slice(0, SAMPLE)) {
         const container = containerOf(m);
         if (!container || !CLASSY.has(container.kind)) continue;
@@ -3808,6 +3833,7 @@ export class ToolHandler {
     if (roots.length === 0) return '';
 
     const entries: string[] = [];
+    cg.prefetchReach(roots.map((r) => r.id), ['incoming'], 1);
     for (const root of roots) {
       let callers: Array<{ node: Node }> = [];
       try { callers = cg.getCallers(root.id) as Array<{ node: Node }>; } catch { /* skip this root */ }
@@ -3901,6 +3927,8 @@ export class ToolHandler {
     for (let hop = 2; hop <= MAX_HOPS && frontier.length > 0 && budget > 0; hop++) {
       const next: Node[] = [];
       const found = new Set<string>();
+      // This hop's callers, read for the frontier (as far as the budget goes) at once.
+      cg.prefetchReach(frontier.slice(0, Math.max(0, budget)).map((n) => n.id), ['incoming'], 1);
       for (const node of frontier) {
         if (budget-- <= 0) break;
         let callers: Array<{ node: Node }> = [];
@@ -4262,6 +4290,8 @@ export class ToolHandler {
     const subgraphFiles = new Set<string>();
     for (const n of subgraph.nodes.values()) subgraphFiles.add(n.filePath);
     const GLUE_NODE_CAP = 60;
+    // Every root's callers and callees, read for all roots at once.
+    cg.prefetchReach(subgraph.roots, ['incoming', 'outgoing'], 1);
     for (const rootId of subgraph.roots) {
       if (glueNodeIds.size >= GLUE_NODE_CAP) break;
       let neighbors: Node[] = [];
@@ -4406,6 +4436,8 @@ export class ToolHandler {
         }
         return false;
       };
+      // The bare tokens' definitions below, read for all tokens at once.
+      cg.prefetch({ names: tokens.filter((t) => !/[.\/]|::/.test(t)) });
       for (const t of tokens) {
         // Enumerate ALL defs of a bare token via the direct index, not FTS — a
         // 50+-overload name (tokio `poll`) ranks the wanted def (`Harness::poll`)
@@ -4465,6 +4497,7 @@ export class ToolHandler {
         // single-pick fallback — an uncorroborated bare `run` must not tier its
         // most-substantive namesake any more than a 1-def `check` may.
         if (!isPreciseToken(t)) {
+          cg.prefetch({ fileNodes: cands.map((n) => n.filePath) });
           cands = cands.filter((n) => coNamedInFile(t, n.filePath));
         }
         // A specific name (<=3 defs) injects all its defs. An overloaded name
@@ -6434,6 +6467,7 @@ export class ToolHandler {
       // Query edges directly from the DB (not just the subgraph) because BFS
       // traversal may have pruned template reference targets due to node budget.
       const edgeLines = new Set<string>(); // dedup by "line:name"
+      cg.prefetch({ edges: { ids: group.nodes.map((n) => n.id), directions: ['outgoing'] } });
       for (const node of group.nodes) {
         const outgoing = cg.getOutgoingEdges(node.id);
         for (const edge of outgoing) {

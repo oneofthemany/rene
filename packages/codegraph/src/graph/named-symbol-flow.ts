@@ -349,6 +349,13 @@ export function resolveNamedTokens(
     // and gated on an actual heuristic edge so plain constants never qualify.
     if (out.dynNamed.size < 12) {
       let tokenDyn = 0;
+      // hasHeuristicEdge reads each candidate's edges both ways: one query each way for all.
+      cg.prefetch({
+        edges: {
+          ids: hits.filter((n) => !FLOW_CALLABLE_KINDS.has(n.kind) && DYN_KINDS.has(n.kind)).map((n) => n.id),
+          directions: ['incoming', 'outgoing'],
+        },
+      });
       for (const n of hits) {
         if (FLOW_CALLABLE_KINDS.has(n.kind) || !DYN_KINDS.has(n.kind) || out.dynNamed.has(n.id)) {
           continue;
@@ -443,6 +450,8 @@ function walkCalls(
   });
   const queue: string[] = [seed.id];
   const reached: string[] = [];
+  // The walk reads callees out to maxHops - 1 levels: read them a level at a time first.
+  cg.prefetchReach([seed.id], ['outgoing'], maxHops - 1);
   for (let head = 0; head < queue.length && parent.size < NAMED_VISIT_CAP; head++) {
     const id = queue[head]!;
     const at = parent.get(id)!;

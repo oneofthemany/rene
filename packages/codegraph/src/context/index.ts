@@ -858,6 +858,13 @@ export class ContextBuilder {
       // Track per-node term hits for multi-term boosting
       const camelNodeTerms = new Map<string, { result: SearchResult; termCount: number }>();
       const maxCamelPerTerm = Math.ceil(opts.searchLimit / 2);
+      // The substring searches below (four per term, here and in Step 5c),
+      // read for every term in one query.
+      this.queries.prefetchSets({
+        substrings: symbolsFromQuery
+          .map((sym) => sym.charAt(0).toUpperCase() + sym.slice(1).toLowerCase())
+          .filter((t) => t.length >= 3),
+      });
 
       for (const sym of symbolsFromQuery) {
         const titleCased = sym.charAt(0).toUpperCase() + sym.slice(1).toLowerCase();
@@ -1165,7 +1172,13 @@ export class ContextBuilder {
       }
     }
 
-    // Traverse from each entry point
+    // Traverse from each entry point. The entry points' neighbourhoods, as
+    // deep as the walks go, are read for all of them at once first.
+    this.queries.prefetchReach(
+      filteredResults.filter((r) => !leafEntryIds.has(r.node.id)).map((r) => r.node.id),
+      ['outgoing', 'incoming'],
+      opts.traversalDepth
+    );
     for (const result of filteredResults) {
       if (leafEntryIds.has(result.node.id)) continue;
       const traversalResult = this.traverser.traverseBFS(result.node.id, {

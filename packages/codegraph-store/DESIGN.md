@@ -276,6 +276,75 @@ large appends, and build the lookup indexes once after a full index rather
 than maintaining them row by row. Edge identity needs a check that doesn't
 scan all edges per batch (NOT EXISTS: 3.3 ms a batch at 338k edges).
 
+### Set-based reads (2026-10-22)
+
+CodeGraph's questions are graph questions; asking them a node at a time was a
+SQLite habit. On rene's index, 4 hops of callers from busy symbols took 86 ms
+node by node in memory, 16 ms a query per hop, 9 ms as one recursive query,
+and 26 or 23 ms the set-based ways over Parquet in place. Done, with every
+answer unchanged (storage-parity now also compares traversals in the order
+they return and explore's whole text):
+
+- Traversals (graph/traversal.ts) keep their algorithms; each call
+  prefetches what it will walk a level at a time (graph/neighbourhood.ts:
+  a level's edges in one query, their far ends in another, levels counted as
+  each algorithm counts depth). Impact radius at depth 3: 498 to 78 ms.
+- A tool call runs in a read scope (db/read-scope.ts): its node, edge,
+  file-node and file reads are remembered under the index's change stamp
+  (now the store's own write counter; total_changes()/data_version were
+  SQLite-only and failed on DuckDB), the batched readers share it, and the
+  explore loops prefetch their sets (CodeGraph.prefetch). Explore on rene's
+  index: 2,130 queries to 725 for three calls. Read-ahead (guessing the next
+  nodes) was tried and made it twice as slow; prefetches go where the code
+  knows its set.
+- Search narrows token rows by range before matching phrases.
+- Found on the way: DuckDB sorts NULL last, SQLite first (store sets
+  default_null_order to SQLite's rule); DuckDB's LIKE is case-sensitive,
+  SQLite's is not for ASCII (those LIKEs are ILIKE; ILIKE also folds
+  non-ASCII letters, which SQLite didn't).
+
+### Readers (2026-10-22)
+
+A query server can now read the newest generation's Parquet in place
+(duckdb-adapter.ts, CODEGRAPH_STORE_READER=parquet): views over the sealed
+files, moved to each new generation on its next query, checked against the
+schema; the writer's own worker threads keep the live database. Seals lay
+tables out for it (nodes by id, edges by source, tokens by token; row groups
+of 8,192). Measured on rene's index, explore (three calls) took 14.0 s of
+store time in place against 4.4 s from memory. CodeGraph's reads are point
+lookups scattered across the graph: 30 random ids touch about 30 row groups,
+so a batch costs ~30 ms whatever the layout (sorted by id, literal IN lists,
+a copy of edges sorted by target, the Parquet metadata and file caches all
+left it at 27-32 ms), and a whole-graph join re-decompresses the files
+(1.6-1.8 s against 42 ms). Peak memory under that load was ~1.4 GB, not
+less. So it stays opt-in; the in-memory reader remains the default. A
+sealed DuckDB database file per generation, opened read-only (its ART
+indexes on disk, blocks read on demand), measured 8 ms to open, ~93 MiB,
+and near in-memory lookups (id 0.53 ms, callers 1.5 ms): the candidate that
+keeps the journal's immutable, manifest-published files without loading.
+
+### Whole-graph summaries (2026-10-22)
+
+Read in place, a whole-graph query re-reads and decompresses the files every
+time (the dominant-file join: 1.8-2.2 s against 42 ms in memory). Answers
+that depend on the whole graph and not on the question are computed once per
+state of the index (QueryBuilder.wholeGraph: kept under the change stamp,
+copied per caller, never inside a transaction): the dominant file, the top
+route file, the code map, getStats' counts, the top depended-on, the file
+lists. The writer also computes the first four just before each seal into
+generation_summaries, sealed with the data they describe, and a reader of
+sealed files takes them from there. Explore on rene's index read in place,
+three calls: store time 15.8 to 9.9 s (726 to 666 queries); from memory it
+is 4.4 s. Left: batched lookups by id lists (~5 s; bloom filters help single
+keys, not lists) and search (~3 s), which want explore asked as a few set
+queries per stage.
+
+Parquet layout: sealed with dictionaries up to a row group's size, so DuckDB
+writes bloom filters on the high-cardinality keys (node id, name, qualified
+name, edge source and target); read in place, edges by target 13.2 to 2.7 ms,
+name 10.3 to 8.5 ms, for 2 MiB (.cache/spike/parquet-layouts.mjs). Row
+groups of 2,048 were slower than 8,192.
+
 From comparing with the journal (its notes: telemetry_journal/
 DUCKDB_NOTES_FROM_CODEGRAPH.md): CodeGraph's readers load a whole
 generation into memory (1.5 s and its memory for rene's index, per query

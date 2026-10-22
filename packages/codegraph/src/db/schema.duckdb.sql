@@ -114,6 +114,15 @@ CREATE TABLE IF NOT EXISTS synthesis_inputs (
     file_path VARCHAR PRIMARY KEY
 );
 
+-- Whole-graph answers (the code map, the dominant file, counts), computed by
+-- the writer as it seals a generation (QueryBuilder.writeSummaries), so a
+-- reader of the sealed files takes them as they are instead of recomputing
+-- them from the files. Key, then the answer as JSON.
+CREATE TABLE IF NOT EXISTS generation_summaries (
+    key VARCHAR PRIMARY KEY,
+    value VARCHAR NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS project_metadata (
     key VARCHAR PRIMARY KEY,
     value VARCHAR NOT NULL,

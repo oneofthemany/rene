@@ -44,20 +44,45 @@ const profile = process.env.CODEGRAPH_STORE_PROFILE
     })()
   : undefined;
 
+/**
+ * How sealed files are laid out for readers that query them in place: each
+ * table sorted by the key it is most looked up by, in row groups small enough
+ * that a lookup skips the ones whose min/max can't hold its key. Nodes by id
+ * (by far the most frequent read), edges by source, search tokens by token.
+ * Dictionaries are allowed up to a row group's size, so DuckDB writes bloom
+ * filters for the high-cardinality keys too (id, name, edge ends): on rene's
+ * index, edges by target fell from 13 to 2.7 ms read in place, for 2 MiB
+ * (.cache/spike/parquet-layouts.mjs).
+ */
+const SEAL_LAYOUT = JSON.stringify({
+  order: {
+    nodes: 'id',
+    edges: 'source, kind, target',
+    node_tokens: 'token',
+    node_search: 'node_id',
+    unresolved_refs: 'id',
+    files: 'path',
+    name_segment_vocab: 'segment, name',
+  },
+  parquet: 'row_group_size 8192, dictionary_size_limit 8192, bloom_filter_false_positive_ratio 0.01',
+});
+
 interface NativeStore {
   exec(sql: string): void;
   run(sql: string, parameters: string): number;
   query(sql: string, parameters: string): string;
   append(table: string, rows: string): number;
-  seal(directory: string): number;
+  seal(directory: string, layout?: string): number;
+  isWriter(): boolean;
   load(directory: string): number;
   logTo(directory: string): void;
   follow(directory: string): void;
   logBytes(): number;
   setLogging(enabled: boolean): void;
+  changeStamp(): number;
 }
 interface NativeModule {
-  Store: { shared(name: string): NativeStore; releaseShared(name: string): boolean };
+  Store: { new (): NativeStore; shared(name: string): NativeStore; releaseShared(name: string): boolean };
   sealedGeneration(directory: string): number;
 }
 
@@ -129,8 +154,98 @@ class DuckdbAdapter implements SqliteDatabase {
   private logging = false;
   private readonly bindings = new Map<string, { sql: string; names: string[] }>();
 
+  /**
+   * Whether this connection reads the sealed files in place (a query server
+   * with no writer in its process): its tables are views over the newest
+   * sealed generation's Parquet, nothing is loaded, and it moves to the next
+   * generation when a seal publishes one (DESIGN.md, Readers). A read-only
+   * connection in the writer's process (resolution's worker threads) uses
+   * the writer's live database instead, unsealed work included.
+   */
+  readonly readsSealedFiles: boolean;
+  private sealed: { stamp: string; generation: number; views: boolean } = { stamp: '', generation: 0, views: false };
+  private schemaSql = '';
+
   constructor(private readonly dbPath: string, private readonly readOnly: boolean) {
-    this.store = native().Store.shared(path.resolve(dbPath));
+    const shared = native().Store.shared(path.resolve(dbPath));
+    // Opt-in while it is measured against the in-memory reader: on rene's
+    // index it answered explore about 3x slower (DESIGN.md, Readers).
+    this.readsSealedFiles = readOnly && !shared.isWriter() && process.env.CODEGRAPH_STORE_READER === 'parquet';
+    this.store = this.readsSealedFiles ? new (native().Store)() : shared;
+  }
+
+  /**
+   * Opens the sealed files for a reader (readsSealedFiles): views over the
+   * newest generation, checked against `schemaSql` first (a mismatch throws
+   * "schema mismatch: …", as a load does). Without a generation the tables
+   * are the schema's, empty.
+   */
+  attachSealed(schemaSql: string): number {
+    this.schemaSql = schemaSql;
+    return this.refreshSealed(true);
+  }
+
+  /** Moves the views to the newest generation if the manifest changed. */
+  private refreshSealed(force = false): number {
+    const directory = duckdbStoreDirectory(this.dbPath);
+    const manifestPath = path.join(directory, 'manifest.json');
+    let stamp = 'none';
+    try {
+      const stat = fs.statSync(manifestPath);
+      stamp = `${stat.mtimeMs}:${stat.size}:${stat.ino}`;
+    } catch {
+      // No generation sealed yet.
+    }
+    if (!force && stamp === this.sealed.stamp) return this.sealed.generation;
+    if (stamp === 'none') {
+      // No generation (a new index, or one a writer has just begun again):
+      // the schema's tables, empty, in place of any views.
+      if (this.sealed.views) {
+        const views = JSON.parse(this.store.query('SELECT view_name FROM duckdb_views() WHERE NOT internal', '[]')) as Array<{ view_name: string }>;
+        for (const { view_name } of views) this.store.exec(`DROP VIEW IF EXISTS "${view_name.replace(/"/g, '""')}"`);
+      }
+      if (this.sealed.views || this.sealed.stamp === '') this.store.exec(this.schemaSql);
+      this.sealed = { stamp, generation: 0, views: false };
+      return 0;
+    }
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as {
+      generation: number;
+      folder: string;
+      tables: Record<string, { file: string }>;
+    };
+    const files = Object.entries(manifest.tables).map(([table, entry]) => [table, path.join(directory, manifest.folder, entry.file)] as const);
+    this.checkSealedSchema(files);
+    const literal = (text: string) => `'${text.replace(/'/g, "''")}'`;
+    const ident = (name: string) => `"${name.replace(/"/g, '""')}"`;
+    const statements = files.map(([table, file]) =>
+      `${this.sealed.views ? '' : `DROP TABLE IF EXISTS ${ident(table)}; `}` +
+      `CREATE OR REPLACE VIEW ${ident(table)} AS SELECT * FROM read_parquet(${literal(file)});`
+    );
+    this.store.exec(statements.join('\n'));
+    this.sealed = { stamp, generation: manifest.generation, views: true };
+    return manifest.generation;
+  }
+
+  /** Throws "schema mismatch: …" when a sealed file's columns are not its table's in the schema. */
+  private checkSealedSchema(files: ReadonlyArray<readonly [string, string]>): void {
+    const expected = new (native().Store)();
+    expected.exec(this.schemaSql);
+    const describe = (store: NativeStore, relation: string) =>
+      JSON.stringify((JSON.parse(store.query(`DESCRIBE SELECT * FROM ${relation}`, '[]')) as Array<{ column_name: string; column_type: string }>).map((c) => [c.column_name, c.column_type]));
+    const tables = (JSON.parse(expected.query("SELECT table_name FROM duckdb_tables() WHERE database_name = current_database()", '[]')) as Array<{ table_name: string }>).map((t) => t.table_name);
+    const sealed = new Map(files);
+    const differences: string[] = [];
+    for (const table of tables) {
+      const file = sealed.get(table);
+      if (!file) {
+        differences.push(`${table} is not in the sealed generation`);
+        continue;
+      }
+      const then = describe(this.store, `read_parquet('${file.replace(/'/g, "''")}')`);
+      const now = describe(expected, `"${table}"`);
+      if (then !== now) differences.push(`${table} was sealed with columns ${then}, the schema now has ${now}`);
+    }
+    if (differences.length > 0) throw new Error(`schema mismatch: ${differences.join('; ')}`);
   }
 
   get open(): boolean {
@@ -173,10 +288,30 @@ class DuckdbAdapter implements SqliteDatabase {
     this.store.setLogging(enabled);
   }
 
+  /**
+   * A number that changes whenever the index may hold something it did not
+   * before, whoever wrote it (this process's connections, or the writer this
+   * reader follows): what a cache of answers is kept under.
+   */
+  changeStamp(): number {
+    // A sealed-file reader changes only when it moves to a new generation.
+    return this.readsSealedFiles ? this.refreshSealed() : this.store.changeStamp();
+  }
+
+  /**
+   * Runs `hook` just before each seal, so what it writes (the generation's
+   * whole-graph summaries) is sealed with the data it describes.
+   */
+  onSeal(hook: () => void): void {
+    this.beforeSeal = hook;
+  }
+  private beforeSeal: (() => void) | undefined;
+
   /** Seals the working index as a new generation, compacting the log into it. */
   seal(): number {
     if (this.readOnly) throw new Error('A read-only index connection cannot seal.');
-    return this.store.seal(duckdbStoreDirectory(this.dbPath));
+    this.beforeSeal?.();
+    return this.store.seal(duckdbStoreDirectory(this.dbPath), SEAL_LAYOUT);
   }
 
   /**
@@ -211,7 +346,21 @@ class DuckdbAdapter implements SqliteDatabase {
     const store = this.store;
     const bind = (params: any[]) => this.bind(names, params);
     const sealIfLogFull = () => this.sealIfLogFull();
-    const query = (params: any[]): any[] => JSON.parse(store.query(statement, bind(params)));
+    const live = (params: any[]): any[] => JSON.parse(store.query(statement, bind(params)));
+    // A sealed-file reader first moves to a newly sealed generation; a query
+    // that met a generation's files just removed refreshes and runs again.
+    const query = this.readsSealedFiles
+      ? (params: any[]): any[] => {
+          this.refreshSealed();
+          try {
+            return live(params);
+          } catch (error) {
+            if (!/No files found|No such file|Cannot open file|IO Error/i.test(String(error))) throw error;
+            this.refreshSealed(true);
+            return live(params);
+          }
+        }
+      : live;
     const rows = profile
       ? (params: any[]) => profile(statement, () => query(params), (r) => r.length)
       : query;

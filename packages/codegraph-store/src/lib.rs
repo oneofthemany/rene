@@ -16,6 +16,7 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::cell::Cell;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use duckdb::types::{Value, ValueRef};
@@ -124,7 +125,14 @@ fn open_database() -> Result<Connection> {
         .and_then(|value| value.parse::<i64>().ok())
         .filter(|&threads| threads > 0)
         .unwrap_or(1);
-    let config = duckdb::Config::default().threads(threads).map_err(failure)?;
+    // NULL sorts as SQLite sorted it, smallest: first ascending, last
+    // descending. DuckDB's default (last either way) reordered every
+    // `ORDER BY line, col` with an edge that has no line.
+    let config = duckdb::Config::default()
+        .threads(threads)
+        .map_err(failure)?
+        .with("default_null_order", "nulls_first_on_asc_last_on_desc")
+        .map_err(failure)?;
     Connection::open_in_memory_with_flags(config).map_err(failure)
 }
 
@@ -145,7 +153,11 @@ struct Follow {
 }
 type SharedFollow = Arc<Mutex<Follow>>;
 
-type SharedDatabase = (Connection, SharedLog, SharedFollow);
+/// Writes the database has taken, from any connection or a replayed log:
+/// its change stamp, so a cache of what it held can tell it is stale.
+type SharedWrites = Arc<AtomicU64>;
+
+type SharedDatabase = (Connection, SharedLog, SharedFollow, SharedWrites);
 
 fn shared_databases() -> &'static Mutex<HashMap<String, SharedDatabase>> {
     static DATABASES: OnceLock<Mutex<HashMap<String, SharedDatabase>>> = OnceLock::new();
@@ -166,6 +178,8 @@ pub struct Store {
     follow_state: SharedFollow,
     /// The store directory a reader follows (`follow`), if any.
     following: RefCell<Option<PathBuf>>,
+    /// The database's write count, shared with its other connections.
+    writes: SharedWrites,
 }
 
 #[napi]
@@ -181,6 +195,7 @@ impl Store {
             log_writes: Cell::new(true),
             follow_state: Arc::new(Mutex::new(Follow::default())),
             following: RefCell::new(None),
+            writes: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -190,7 +205,7 @@ impl Store {
     #[napi(factory)]
     pub fn shared(name: String) -> Result<Self> {
         let mut databases = shared_databases().lock().map_err(failure)?;
-        let (first, log, follow) = match databases.get(&name) {
+        let (first, log, follow, writes) = match databases.get(&name) {
             Some(entry) => entry,
             None => {
                 let created = open_database()?;
@@ -198,6 +213,7 @@ impl Store {
                     created,
                     Arc::new(Mutex::new(None)),
                     Arc::new(Mutex::new(Follow::default())),
+                    Arc::new(AtomicU64::new(0)),
                 ))
             }
         };
@@ -209,6 +225,7 @@ impl Store {
             log_writes: Cell::new(true),
             follow_state: follow.clone(),
             following: RefCell::new(None),
+            writes: writes.clone(),
         })
     }
 
@@ -266,6 +283,7 @@ impl Store {
     /// two commit together: if the log can't take the record (a full disk),
     /// the change rolls back, so memory never holds what the disk doesn't.
     fn write_logged<T>(&self, write: impl FnOnce() -> Result<T>, record: Json) -> Result<T> {
+        self.wrote();
         if !self.log_writes.get() {
             return write();
         }
@@ -286,6 +304,27 @@ impl Store {
                 Err(cause)
             }
         }
+    }
+
+    /// Whether this process writes the database (its log is open here): its
+    /// readers must then use the live database, not the sealed files.
+    #[napi]
+    pub fn is_writer(&self) -> Result<bool> {
+        self.logging()
+    }
+
+    fn wrote(&self) {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// A value that differs whenever the database may hold something it did
+    /// not before: its write count (its own, other connections', replayed),
+    /// after catching up with the writer it follows. A cache of answers kept
+    /// under one stamp is never stale.
+    #[napi]
+    pub fn change_stamp(&self) -> Result<f64> {
+        self.catch_up()?;
+        Ok(self.writes.load(Ordering::SeqCst) as f64)
     }
 
     /// Bytes in the log: the writer seals when this passes its limit.
@@ -321,6 +360,7 @@ impl Store {
                 self.connection.execute_batch(&sql).map_err(failure)
             }
             "ROLLBACK" => {
+                self.wrote();
                 self.in_transaction.set(false);
                 self.pending.borrow_mut().clear();
                 self.connection.execute_batch(&sql).map_err(failure)
@@ -408,6 +448,7 @@ impl Store {
 
     /// Applies one logged write, unlogged: replay after a load.
     fn apply(&self, record: &Json) -> Result<()> {
+        self.wrote();
         match record["op"].as_str() {
             Some("exec") => self
                 .connection
@@ -443,7 +484,18 @@ impl Store {
     /// publishes it in the manifest; returns the generation's number. Older
     /// generations beyond the few kept for readers are removed.
     #[napi]
-    pub fn seal(&self, directory: String) -> Result<u32> {
+    pub fn seal(&self, directory: String, layout: Option<String>) -> Result<u32> {
+        // How the sealed files are laid out for readers that query them in
+        // place: {"order": {table: expression}, "parquet": "writer options"}.
+        // Rows sorted by the key a table is looked up by, with dictionaries
+        // (and so bloom filters) on its keys, let a reader skip row groups.
+        let layout: Json = match layout {
+            Some(text) => serde_json::from_str(&text).map_err(failure)?,
+            None => Json::Null,
+        };
+        let row_groups = layout["parquet"]
+            .as_str()
+            .map_or(String::new(), |options| format!(", {options}"));
         let root = PathBuf::from(&directory);
         fs::create_dir_all(&root).map_err(failure)?;
         let previous = read_manifest(&root)?
@@ -458,9 +510,13 @@ impl Store {
             let file = folder.join(format!("{table}.parquet"));
             self.connection
                 .execute_batch(&format!(
-                    "copy (select * from {}) to {} (format parquet, compression zstd)",
+                    "copy (select * from {}{}) to {} (format parquet, compression zstd{})",
                     identifier(table),
+                    layout["order"][table.as_str()]
+                        .as_str()
+                        .map_or(String::new(), |order| format!(" order by {order}")),
                     literal(&file.to_string_lossy()),
+                    row_groups,
                 ))
                 .map_err(failure)?;
             File::open(&file).and_then(|f| f.sync_all()).map_err(failure)?;
@@ -520,6 +576,7 @@ impl Store {
 
     /// Replaces the database's tables with the sealed generation and its log.
     fn reload(&self, root: &Path, state: &mut Follow) -> Result<u32> {
+        self.wrote();
         let root = root.to_path_buf();
         let Some(manifest) = read_manifest(&root)? else {
             self.check_schema(&root, &[], &[], 0)?;

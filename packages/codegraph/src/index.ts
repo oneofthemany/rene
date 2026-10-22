@@ -1927,6 +1927,38 @@ export class CodeGraph {
   /**
    * Get all nodes in a file
    */
+  /**
+   * Runs `work` (one tool call) in a read scope: single-row reads of nodes,
+   * edges, files' nodes and file records are remembered while the index is
+   * unchanged (db/read-scope.ts).
+   */
+  inReadScope<T>(work: () => T): T {
+    return this.queries.inReadScope(work);
+  }
+
+  /** Fills the open read scope for `ids`: their edges both ways and both ends' nodes. */
+  prefetchNeighbourhood(ids: readonly string[]): void {
+    this.queries.prefetchNeighbourhood(ids);
+  }
+
+  /**
+   * Fills the open read scope with the reads a loop is about to make for a
+   * whole set, one query each: `edges` (by direction), `nodes`, `fileNodes`
+   * (a file's nodes), `files` (file records).
+   */
+  prefetch(sets: Parameters<QueryBuilder['prefetchSets']>[0]): void {
+    this.queries.prefetchSets(sets);
+  }
+
+  /**
+   * Fills the open read scope with the neighbourhood a loop of traversals
+   * (callers, callees, BFS) from `ids` will read, `depth` levels out in
+   * `directions`, a set query per level and direction.
+   */
+  prefetchReach(ids: readonly string[], directions: ReadonlyArray<'outgoing' | 'incoming'>, depth: number): void {
+    this.queries.prefetchReach(ids, directions, depth);
+  }
+
   getNodesInFile(filePath: string): Node[] {
     return this.queries.getNodesByFile(filePath);
   }

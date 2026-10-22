@@ -47,6 +47,25 @@ function chunks<T>(items: T[], size: number): T[][] {
   return out;
 }
 
+/**
+ * The least string after every string starting with `prefix`, in DuckDB's
+ * byte order (UTF-8 orders as code points): the prefix with its last code
+ * point raised, skipping the surrogate range; trailing highest code points
+ * can't be raised and are dropped first. Null when nothing can be raised:
+ * the range has no upper end.
+ */
+export function prefixEnd(prefix: string): string | null {
+  const points = [...prefix];
+  while (points.length > 0) {
+    const last = points.pop()!.codePointAt(0)!;
+    if (last < 0x10ffff) {
+      const next = last + 1 === 0xd800 ? 0xe000 : last + 1;
+      return points.join('') + String.fromCodePoint(next);
+    }
+  }
+  return null;
+}
+
 /** The phrase FTS5 makes of `"text"*`: the text's tokens. */
 export function phraseOf(text: string): Phrase {
   return ftsTokens(text);
@@ -160,11 +179,33 @@ function instances(phrases: Phrase[], columns?: number[]): { sql: string; params
     });
   });
   const only = columns ? ` AND t.col IN (${columns.join(', ')})` : '';
+  // The token rows a phrase could use, by range first: a prefix p is
+  // [p, p with its last character raised), an exact token is itself. The
+  // filter reads the token column once, where matching every row against
+  // every phrase token took three times as long (DESIGN.md, Search); the
+  // phrases are then matched against the few rows it keeps.
+  const ranges: string[] = [];
+  phrases.forEach((phrase) => {
+    phrase.forEach((token, k) => {
+      const end = k === phrase.length - 1 ? prefixEnd(token) : undefined;
+      if (end === null) {
+        ranges.push('token >= ?');
+        params.push(token);
+      } else if (end !== undefined) {
+        ranges.push('(token >= ? AND token < ?)');
+        params.push(token, end);
+      } else {
+        ranges.push('token = ?');
+        params.push(token);
+      }
+    });
+  });
   return {
     sql: `q(phrase, k, n, token, prefix) AS (VALUES ${values.join(', ')}),
+      cand AS (SELECT * FROM node_tokens WHERE ${ranges.join(' OR ')}),
       inst AS (
         SELECT q.phrase, t.node_id, t.col
-        FROM q JOIN node_tokens t
+        FROM q JOIN cand t
           ON (CASE WHEN q.prefix = 1 THEN starts_with(t.token, q.token) ELSE t.token = q.token END)${only}
         GROUP BY q.phrase, q.n, t.node_id, t.col, t.pos - q.k
         HAVING count(*) = q.n
@@ -174,9 +215,12 @@ function instances(phrases: Phrase[], columns?: number[]): { sql: string; params
 }
 
 /**
- * The ranked search: `nodes.*` and `score` (bm25(), negative; lower ranks
+ * The ranked search: `node_id` and `score` (bm25(), negative; lower ranks
  * first) for nodes any phrase matches, in FTS5's order, ties broken by
- * insertion order. `filter` is a condition on `nodes` (kinds, languages).
+ * insertion order. `filter` is a condition on `nodes`' kind and language,
+ * the only columns joined: a caller reads the whole rows of the few results
+ * it keeps (joining every candidate's whole row took half the query's time,
+ * read in place).
  */
 export function rankedSearchSql(
   phrases: Phrase[],
@@ -217,10 +261,10 @@ export function rankedSearchSql(
       scored AS (
         SELECT f.node_id, -(${sum}) AS score FROM f GROUP BY f.node_id
       )
-      SELECT nodes.*, scored.score
+      SELECT scored.node_id, scored.score
       FROM scored
       JOIN node_search s ON s.node_id = scored.node_id
-      JOIN nodes ON nodes.id = scored.node_id
+      JOIN (SELECT id, kind, language FROM nodes) nodes ON nodes.id = scored.node_id
       WHERE 1 = 1${filter.sql}
       ORDER BY scored.score, s.seq`,
     params: [...inst.params, ...filter.params],
