@@ -17,7 +17,7 @@ import {
   SearchOptions,
   SearchResult,
 } from '../types';
-import { safeJsonParse } from '../utils';
+import { isFilePathReference, safeJsonParse } from '../utils';
 import { isTestFile, kindBonus, nameMatchBonus, scorePathRelevance } from '../search/query-utils';
 import { parseQuery, boundedEditDistance } from '../search/query-parser';
 import { isGeneratedFile } from '../extraction/generated-detection';
@@ -138,6 +138,32 @@ export interface CodeMap {
   mostDependedOnFiles: Array<{ file: string; dependents: number }>;
   mostCalledSymbols: Array<{ name: string; kind: string; file: string; line: number; callers: number }>;
 }
+
+/** What a {@link DocsDriftFinding} says has come apart. */
+export type DocsDriftKind = 'path' | 'symbol' | 'undocumented';
+
+/** One place a document and the code disagree ({@link QueryBuilder.getDocsDrift}). */
+export interface DocsDriftFinding {
+  kind: DocsDriftKind;
+  /** The document for a broken citation; the code file for an undocumented symbol. */
+  file: string;
+  line: number;
+  detail: string;
+}
+
+/** How far a project's prose has drifted from its code ({@link QueryBuilder.getDocsDrift}). */
+export interface DocsDrift {
+  docs: number;
+  sections: number;
+  resolvedReferences: number;
+  /** Every failed documents reference in the index, not only the ones listed. */
+  brokenReferences: number;
+  counts: Record<DocsDriftKind, number>;
+  findings: DocsDriftFinding[];
+  /** Findings were left out: ask for a larger limit, or read the counts. */
+  truncated: boolean;
+}
+
 
 /**
  * Database row types (snake_case from SQLite)
@@ -1511,6 +1537,120 @@ export class QueryBuilder {
         .map(r => ({ name: r.name, kind: r.kind, file: r.file_path, line: r.line, callers: r.callers })),
     };
   }
+
+  /**
+   * Where the project's prose and its code have come apart.
+   *
+   * Markdown is indexed like any other language: a `file` node per document,
+   * a `section` node per heading, and a `documents` reference from the
+   * innermost section to every symbol or path it names. A reference the
+   * resolver attempted and could not match (`status = 'failed'`) is a
+   * citation to something the code no longer has — the drift.
+   *
+   * Three kinds of finding:
+   *
+   * - `path`: the document names a file or folder that is not in the index.
+   * - `symbol`: it names a symbol no file declares.
+   * - `undocumented`: an exported symbol no document mentions, ranked by how
+   *   many places call it, so the most load-bearing undocumented code comes
+   *   first. Off unless asked for: most code is undocumented, and the whole
+   *   list is noise rather than a finding.
+   *
+   * Counts come from the whole index; `findings` is capped at `limit` per kind
+   * and says so through `truncated`. Scans every doc reference, so it is an
+   * occasional check, not a per-query call.
+   */
+  getDocsDrift(limit: number, includeUndocumented: boolean): DocsDrift {
+    return this.wholeGraph(
+      `docsDrift:${limit}:${includeUndocumented}`,
+      () => this.computeDocsDrift(limit, includeUndocumented),
+    );
+  }
+
+  private computeDocsDrift(limit: number, includeUndocumented: boolean): DocsDrift {
+    const docs = this.db.prepare(`
+      SELECT COUNT(*) AS docs FROM files WHERE language = 'markdown'
+    `).get() as { docs: number };
+    const sections = this.db.prepare(`
+      SELECT COUNT(*) AS sections FROM nodes WHERE kind = 'section'
+    `).get() as { sections: number };
+    const resolved = this.db.prepare(`
+      SELECT COUNT(*) AS resolved FROM edges WHERE kind = 'documents'
+    `).get() as { resolved: number };
+    const brokenTotal = this.db.prepare(`
+      SELECT COUNT(*) AS broken FROM unresolved_refs
+      WHERE reference_kind = 'documents' AND status = 'failed'
+    `).get() as { broken: number };
+    // Over-fetch: the rows are split into path and symbol findings after the
+    // query, and either kind alone may fill the cap.
+    const brokenRows = this.db.prepare(`
+      SELECT u.file_path AS file_path, u.line AS line,
+             u.reference_name AS reference_name, n.name AS section
+      FROM unresolved_refs u
+      LEFT JOIN nodes n ON n.id = u.from_node_id AND n.kind = 'section'
+      WHERE u.reference_kind = 'documents' AND u.status = 'failed'
+      ORDER BY u.file_path, u.line, u.reference_name
+      LIMIT ?
+    `).all(limit * 2) as Array<{
+      file_path: string; line: number; reference_name: string; section: string | null;
+    }>;
+
+    const findings: DocsDriftFinding[] = [];
+    const counts: Record<DocsDriftKind, number> = { path: 0, symbol: 0, undocumented: 0 };
+    const take = (kind: DocsDriftKind, file: string, line: number, detail: string) => {
+      if (counts[kind] >= limit) return false;
+      counts[kind] += 1;
+      findings.push({ kind, file, line, detail });
+      return true;
+    };
+    for (const row of brokenRows) {
+      const kind: DocsDriftKind = isFilePathReference(row.reference_name) ? 'path' : 'symbol';
+      const where = row.section ? ` under "${row.section}"` : '';
+      take(kind, row.file_path, row.line, `No ${kind} "${row.reference_name}" in the index${where}.`);
+    }
+    const brokenShown = counts.path + counts.symbol;
+
+    if (includeUndocumented) {
+      const undocumented = this.db.prepare(`
+        SELECT n.file_path AS file_path, n.start_line AS line, n.name AS name,
+               n.kind AS kind,
+               (SELECT COUNT(DISTINCT c.source) FROM edges c
+                 WHERE c.target = n.id AND c.kind = 'calls') AS callers
+        FROM nodes n
+        WHERE n.is_exported = 1
+          AND n.kind IN ('function', 'class', 'method', 'interface', 'type', 'enum')
+          AND NOT EXISTS (
+            SELECT 1 FROM edges d WHERE d.target = n.id AND d.kind = 'documents'
+          )
+        ORDER BY callers DESC, n.file_path, n.start_line
+        LIMIT ?
+      `).all(limit * 4) as Array<{
+        file_path: string; line: number; name: string; kind: string; callers: number;
+      }>;
+      const generated = this.getGeneratedPathsAmong([
+        ...new Set(undocumented.map(r => r.file_path)),
+      ]);
+      for (const row of undocumented) {
+        if (isLowValueFile(row.file_path, generated)) continue;
+        const callers = row.callers === 1 ? '1 caller' : `${row.callers} callers`;
+        if (!take('undocumented', row.file_path, row.line,
+          `Exported ${row.kind} "${row.name}" (${callers}) is named by no document.`)) break;
+      }
+    }
+
+    return {
+      docs: docs.docs,
+      sections: sections.sections,
+      resolvedReferences: resolved.resolved,
+      brokenReferences: brokenTotal.broken,
+      counts,
+      findings,
+      // The SQL cap spans both broken kinds, so a page full of one can hide
+      // the other; only the unsplit total settles whether rows were left out.
+      truncated: brokenTotal.broken > brokenShown || counts.undocumented >= limit,
+    };
+  }
+
 
   /**
    * Find the file that holds the densest concentration of the project's

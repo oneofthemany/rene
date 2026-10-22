@@ -349,7 +349,11 @@ flowchart LR
   callers and callees, list callers or callees, follow the impact of a
   change, list the indexed files, report the index's state, and map the
   project (`map_source_graph`: the most depended-on files and most-called
-  symbols, which the assessment's Code map shows).
+  symbols, which the assessment's Code map shows). `source_docs_drift` reports
+  where the project's Markdown and its code have come apart: citations to a
+  file or symbol the project no longer has, and on request the exported
+  symbols no document mentions.
+
 - **`index_source_graph`** builds or syncs the index. It writes only
   `.codegraph/`, never agent settings, and it is the only thing that changes
   the index.

@@ -22,10 +22,12 @@ import {
   indexSourceGraphResultSchema,
   listSourceFilesInputSchema,
   mapSourceGraphInputSchema,
+  parseSourceGraphDocsDrift,
   parseSourceGraphMap,
   readSourceNodeInputSchema,
   searchSourceSymbolsInputSchema,
   sourceChangeImpactInputSchema,
+  sourceGraphDocsDriftInputSchema,
   sourceGraphQueryResultSchema,
   sourceGraphStatusInputSchema,
   sourceSymbolNeighborsInputSchema,
@@ -138,6 +140,15 @@ const QUERIES = {
     upstream: "codegraph_map",
     args: rename({ limit: "limit" }),
     parse: parseSourceGraphMap,
+  },
+  source_docs_drift: {
+    input: sourceGraphDocsDriftInputSchema,
+    upstream: "codegraph_docs_drift",
+    args: rename({
+      limit: "limit",
+      include_undocumented: "includeUndocumented",
+    }),
+    parse: parseSourceGraphDocsDrift,
   },
 } as const satisfies Readonly<Record<string, QuerySpec>>;
 

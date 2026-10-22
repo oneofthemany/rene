@@ -177,6 +177,23 @@ export const mapSourceGraphInputSchema = z.strictObject({
     .describe("Entries in each ranking."),
 });
 
+export const sourceGraphDocsDriftInputSchema = z.strictObject({
+  project_path: projectPath,
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(200)
+    .default(25)
+    .describe("Findings per kind."),
+  include_undocumented: z
+    .boolean()
+    .default(false)
+    .describe(
+      "Also report exported symbols no document mentions. Off by default: on most projects that is the bulk of the code, not a finding.",
+    ),
+});
+
 const count = z.number().int().nonnegative();
 
 /**
@@ -256,6 +273,93 @@ export function parseSourceGraphMap(
       dependent_files: entry.dependents,
     })),
     most_called_symbols: map.mostCalledSymbols,
+  });
+}
+
+/** What a documentation finding says has come apart. */
+export const sourceGraphDriftKindSchema = z.enum([
+  "path",
+  "symbol",
+  "undocumented",
+]);
+export type SourceGraphDriftKind = z.infer<typeof sourceGraphDriftKindSchema>;
+
+/**
+ * Where a project's documentation and its code have come apart, parsed from
+ * CodeGraph's codegraph_docs_drift.
+ *
+ * Markdown is indexed like any other language, so a citation in prose to a
+ * file or symbol the index no longer has is a reference the resolver tried
+ * and failed: `path` when it was reaching for a file, `symbol` otherwise.
+ * `undocumented` runs the other way — exported code no document mentions —
+ * and is only reported when asked for.
+ *
+ * `documents` and `sections` say how much prose was actually indexed, so an
+ * unindexed project reads as an unmade check rather than a clean bill.
+ * `broken_references` counts the whole index; `findings` is capped per kind,
+ * and `truncated` says when the cap bit.
+ */
+export const sourceGraphDocsDriftResultSchema = z.strictObject({
+  project_path: z.string(),
+  upstream_tool: z.literal("codegraph_docs_drift"),
+  documents: count,
+  sections: count,
+  resolved_references: count,
+  broken_references: count,
+  counts: z.strictObject({
+    path: count,
+    symbol: count,
+    undocumented: count,
+  }),
+  findings: z.array(
+    z.strictObject({
+      kind: sourceGraphDriftKindSchema,
+      /** The document for a broken citation; the code file for undocumented. */
+      file: z.string(),
+      line: count,
+      detail: z.string(),
+    }),
+  ),
+  truncated: z.boolean(),
+});
+export type SourceGraphDocsDriftResult = z.infer<
+  typeof sourceGraphDocsDriftResultSchema
+>;
+
+/** codegraph_docs_drift's JSON as CodeGraph writes it; parsed once, here. */
+const upstreamDocsDriftSchema = z.object({
+  docs: count,
+  sections: count,
+  resolvedReferences: count,
+  brokenReferences: count,
+  counts: z.object({ path: count, symbol: count, undocumented: count }),
+  findings: z.array(
+    z.object({
+      kind: sourceGraphDriftKindSchema,
+      file: z.string(),
+      line: count,
+      detail: z.string(),
+    }),
+  ),
+  truncated: z.boolean(),
+});
+
+/** The drift from codegraph_docs_drift's text; throws when it isn't that JSON. */
+export function parseSourceGraphDocsDrift(
+  projectPath: string,
+  text: string,
+): SourceGraphDocsDriftResult {
+  const drift = upstreamDocsDriftSchema.parse(JSON.parse(text));
+  return sourceGraphDocsDriftResultSchema.parse({
+    project_path: projectPath,
+    upstream_tool: "codegraph_docs_drift",
+    documents: drift.docs,
+    sections: drift.sections,
+    resolved_references: drift.resolvedReferences,
+    broken_references: drift.brokenReferences,
+    counts: drift.counts,
+    findings: drift.findings,
+    truncated: drift.truncated,
   });
 }
 

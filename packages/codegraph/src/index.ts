@@ -30,7 +30,7 @@ import {
 } from './types';
 import { DatabaseConnection, getDatabasePath, removeDatabaseFiles } from './db';
 import { WalCheckpointValve, resolveWalValveMb } from './db/wal-valve';
-import { QueryBuilder, type CodeMap } from './db/queries';
+import { QueryBuilder, type CodeMap, type DocsDrift } from './db/queries';
 import { importPathKeys, moduleReferenceKeys } from './db/reference-tail';
 import {
   isInitialized,
@@ -1487,6 +1487,20 @@ export class CodeGraph {
   getCodeMap(limit = 15): CodeMap {
     return this.queries.getCodeMap(limit);
   }
+
+  /**
+   * Where the project's documentation and its code have come apart: citations
+   * to files and symbols the index no longer has, and — when asked for —
+   * exported symbols no document mentions.
+   *
+   * Only as good as the indexed documentation: a project whose Markdown was
+   * never indexed reports no drift rather than total drift, which `docs` and
+   * `sections` make visible.
+   */
+  getDocsDrift(limit = 25, includeUndocumented = false): DocsDrift {
+    return this.queries.getDocsDrift(limit, includeUndocumented);
+  }
+
 
   /**
    * How far the last sync got and how many files it left behind — the cheapest

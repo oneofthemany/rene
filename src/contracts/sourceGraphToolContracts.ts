@@ -7,6 +7,8 @@ import {
   readSourceNodeInputSchema,
   searchSourceSymbolsInputSchema,
   sourceChangeImpactInputSchema,
+  sourceGraphDocsDriftInputSchema,
+  sourceGraphDocsDriftResultSchema,
   sourceGraphMapResultSchema,
   sourceGraphQueryResultSchema,
   sourceGraphStatusInputSchema,
@@ -149,6 +151,22 @@ export const SOURCE_GRAPH_TOOL_CONTRACTS = [
     outputSchema: evidenceResultOf(sourceGraphMapResultSchema),
     examples: [{ title: "Map a project", input: { project_path: PROJECT } }],
   },
+  {
+    name: "source_docs_drift",
+    ...toolContractMetadata("source_docs_drift"),
+    kind: "codegraph-provider",
+    description: `Report where a project's documentation and its code have come apart, from its index: citations in Markdown to a file (kind path) or a symbol (kind symbol) the project no longer has, each with the document and line that cites it, and on request the exported symbols no document mentions (kind undocumented), ranked by how many places call them. Documentation is only checked where it was indexed, so the answer leads with how many documents and headings the index holds; counts cover the whole index while findings are capped per kind. Structured, unlike most source-graph answers. ${QUERY}`,
+    inputSchema: sourceGraphDocsDriftInputSchema,
+    outputSchema: evidenceResultOf(sourceGraphDocsDriftResultSchema),
+    examples: [
+      { title: "Broken citations", input: { project_path: PROJECT } },
+      {
+        title: "Undocumented public code",
+        input: { project_path: PROJECT, include_undocumented: true },
+      },
+    ],
+  },
+
   {
     name: "index_source_graph",
     ...toolContractMetadata("index_source_graph"),

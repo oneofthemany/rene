@@ -224,6 +224,23 @@ export function clamp(value: number, min: number, max: number): number {
 }
 
 /**
+ * Does a reference name name a file rather than a symbol?
+ *
+ * A path separator settles it; so does a short trailing extension, which is
+ * how a bare `Foo.h` from an Objective-C `#import` or a `README.md` cited in
+ * prose is still a file. A bare name with no extension is a symbol.
+ *
+ * This is the question the file-path resolution strategy asks before it
+ * looks for a file node, and the question a drift report asks afterwards to
+ * say what a failed reference was reaching for. Both must ask it the same
+ * way, or a reference resolved as a path gets reported as a missing symbol.
+ */
+export function isFilePathReference(referenceName: string): boolean {
+  return referenceName.includes('/') || /\.[A-Za-z][A-Za-z0-9]{0,3}$/.test(referenceName);
+}
+
+
+/**
  * Normalize a file path to use forward slashes.
  * Fixes Windows backslash paths so glob matching works consistently.
  */

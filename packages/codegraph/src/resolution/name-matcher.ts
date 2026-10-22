@@ -7,6 +7,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { Language, Node } from '../types';
+import { isFilePathReference } from '../utils';
 import { UnresolvedRef, ResolvedRef, ResolutionContext, ImportMapping, isSupertypeTarget, CPP_DEFINE_SIGNATURE, isInheritanceRef, isImportableKind } from './types';
 import { blankStringContents, stripCommentsForRegex } from './strip-comments';
 import { JS_ARRAY_METHODS, JS_BUILT_INS, JS_BUILTIN_METHODS, TS_PRIMITIVE_TYPES } from './js-builtins';
@@ -58,13 +59,13 @@ export function matchByFilePath(
   ref: UnresolvedRef,
   context: ResolutionContext
 ): ResolvedRef | null {
-  // Path-like (`a/b.liquid`) OR a bare filename ending in a short extension
-  // (`Foo.h` — an Objective-C `#import "Foo.h"`, resolved to the header by
-  // basename). A bare ref WITHOUT an extension is a symbol name, not a file, so
-  // leave it to the symbol-matching strategies.
-  if (!ref.referenceName.includes('/') && !/\.[A-Za-z][A-Za-z0-9]{0,3}$/.test(ref.referenceName)) {
+  // A bare ref without an extension is a symbol name, not a file, so leave it
+  // to the symbol-matching strategies. isFilePathReference draws that line for
+  // the drift report too, so both agree on what a reference was reaching for.
+  if (!isFilePathReference(ref.referenceName)) {
     return null;
   }
+
 
   // Extract the filename from the path
   const fileName = ref.referenceName.split('/').pop();

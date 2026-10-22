@@ -655,6 +655,7 @@ export const TOOL_EFFECTS: Readonly<Record<string, ToolEffects>> = {
   list_source_files: sourceGraphQuery,
   source_graph_status: sourceGraphQuery,
   map_source_graph: sourceGraphQuery,
+  source_docs_drift: sourceGraphQuery,
   index_source_graph: effects({
     writesFilesystem: true,
     launchesProcess: true,

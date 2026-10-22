@@ -1774,8 +1774,30 @@ export const tools: ToolDefinition[] = [
     annotations: READ_ONLY_ANNOTATIONS,
   },
   {
+    name: 'codegraph_docs_drift',
+    description: 'Where the project documentation and the code have come apart, as JSON. Markdown is indexed like any other language, so a citation in prose to a file or symbol the index no longer has is a broken reference. Reports those, and optionally exported symbols no document mentions, ranked by how many places call them. Counts cover the whole index; findings are capped per kind.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: {
+          type: 'number',
+          description: 'Findings per kind (default 25, max 200)',
+          default: 25,
+        },
+        includeUndocumented: {
+          type: 'boolean',
+          description: 'Also report exported symbols no document mentions (default false: on most projects this is the bulk of the code, not a finding)',
+          default: false,
+        },
+        projectPath: projectPathProperty,
+      },
+    },
+    annotations: READ_ONLY_ANNOTATIONS,
+  },
+  {
     name: 'codegraph_files',
     description: 'Indexed file tree with language + symbol counts. Faster than Glob for project layout.',
+
     inputSchema: {
       type: 'object',
       properties: {
@@ -3040,6 +3062,7 @@ export class ToolHandler {
       case 'codegraph_node': return await this.handleNode(args);
       case 'codegraph_files': return await this.handleFiles(args);
       case 'codegraph_map': return await this.handleMap(args);
+      case 'codegraph_docs_drift': return await this.handleDocsDrift(args);
       default: return this.errorResult(`Unknown tool: ${toolName}`);
     }
   }
@@ -8162,6 +8185,21 @@ export class ToolHandler {
       ...cg.getCodeMap(limit),
     }));
   }
+
+  /**
+   * Handle codegraph_docs_drift - where prose and code disagree, as JSON.
+   *
+   * `docs` and `sections` lead the answer on purpose: a project whose Markdown
+   * was never indexed reports no broken references, which reads like health
+   * rather than the absence of a check.
+   */
+  private async handleDocsDrift(args: Record<string, unknown>): Promise<ToolResult> {
+    const cg = this.getCodeGraph(args.projectPath as string | undefined);
+    const limit = args.limit != null ? clamp(args.limit as number, 1, 200) : 25;
+    const includeUndocumented = args.includeUndocumented === true;
+    return this.textResult(JSON.stringify(cg.getDocsDrift(limit, includeUndocumented)));
+  }
+
 
   private async handleFiles(args: Record<string, unknown>): Promise<ToolResult> {
     const cg = this.getCodeGraph(args.projectPath as string | undefined);
