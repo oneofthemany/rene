@@ -91,6 +91,20 @@ const THROUGH_NAMES = (column: string): string => `(
 const withKinds = (edges: Edge[], kinds?: readonly EdgeKind[]): Edge[] =>
   kinds && kinds.length > 0 ? edges.filter((edge) => kinds.includes(edge.kind)) : edges.slice();
 
+/**
+ * The documentation layer (schema.duckdb.sql, doc_nodes and doc_edges): a
+ * document's file node and heading sections, the `contains` edges between
+ * them and the `documents` edges to the code they name. The writes route them
+ * there, so nodes and edges, and every code answer read from them, stay
+ * code-only (docs/plans/graph.md).
+ */
+const DOC_LANGUAGES: ReadonlySet<string> = new Set(['markdown']);
+const isDocNode = (kind: unknown, language: unknown): boolean =>
+  kind === 'section' || DOC_LANGUAGES.has(language as string);
+/** An edge row as insertEdgeRows binds it: [source, target, kind, ...]. */
+const isDocEdgeRow = (row: unknown[]): boolean =>
+  row[2] === 'documents' || (row[2] === 'contains' && String(row[1]).startsWith('section:'));
+
 /** The search-indexed values of a row as insertNodes binds it. */
 const searchFieldsOfRow = (row: unknown[]): SearchFields => [
   row[0] as string,
@@ -333,6 +347,7 @@ export class QueryBuilder {
   private stmts: {
     insertNode?: SqliteStatement;
     updateNode?: SqliteStatement;
+    updateDocNode?: SqliteStatement;
     getNodeById?: SqliteStatement;
     getNodesByFile?: SqliteStatement;
     getNodesByKind?: SqliteStatement;
@@ -355,7 +370,6 @@ export class QueryBuilder {
     getNodesByName?: SqliteStatement;
     getNodesByNamePrefix?: SqliteStatement;
     fileHasExportedNode?: SqliteStatement;
-    existingNodeIdsFull?: SqliteStatement;
     getExportedNodesByFile?: SqliteStatement;
     getNodesByFileAndName?: SqliteStatement;
     getNodeIdentitiesByFile?: SqliteStatement;
@@ -422,6 +436,13 @@ export class QueryBuilder {
     table = this.edgeInsertTable,
     identity = table === this.edgeInsertTable ? this.edgeIdentityTable : table
   ): void {
+    // Doc edges (a section's contains and documents edges) go to the doc
+    // layer, checked against its own identities.
+    if (table !== 'doc_edges' && rows.some(isDocEdgeRow)) {
+      this.insertEdgeRows(rows.filter(isDocEdgeRow), 'doc_edges', 'doc_edges');
+      rows = rows.filter((row) => !isDocEdgeRow(row));
+      if (rows.length === 0) return;
+    }
     this.runBatched(
       `insertEdges:${table}:${identity}`,
       `INSERT INTO ${table} (source, target, kind, metadata, line, col, provenance) ` +
@@ -677,6 +698,11 @@ export class QueryBuilder {
    * Insert a new node
    */
   insertNode(node: Node): void {
+    // A document or section belongs to the doc layer, which insertNodes routes.
+    if (isDocNode(node.kind, node.language)) {
+      this.insertNodes([node]);
+      return;
+    }
     if (!this.stmts.insertNode) {
       this.stmts.insertNode = this.db.prepare(`
         INSERT OR REPLACE INTO nodes (
@@ -821,22 +847,29 @@ export class QueryBuilder {
           node.returnType ?? null,
           node.updatedAt ?? Date.now(),
         ]);
-        if (this.isSegmentableKind(node.kind)) this.collectNameSegmentRows(node.name, segmentRows);
+        if (this.isSegmentableKind(node.kind) && !isDocNode(node.kind, node.language)) {
+          this.collectNameSegmentRows(node.name, segmentRows);
+        }
       }
       const written = lastRowPerKey(rows);
-      this.runBatched(
-        'insertNodes',
-        `INSERT OR REPLACE INTO nodes (
-          id, kind, name, qualified_name, file_path, language,
-          start_line, end_line, start_column, end_column,
-          docstring, signature, visibility,
-          is_exported, is_async, is_static, is_abstract,
-          decorators, type_parameters, return_type, updated_at
-        ) VALUES `,
-        '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-        written
-      );
-      this.tokens?.inserted(written.map(searchFieldsOfRow));
+      // Documents and their sections go to the doc layer, unsearched as code.
+      const docRows = written.filter((row) => isDocNode(row[1], row[5]));
+      const codeRows = docRows.length === 0 ? written : written.filter((row) => !isDocNode(row[1], row[5]));
+      for (const [kind, table, batch] of [['insertNodes', 'nodes', codeRows], ['insertDocNodes', 'doc_nodes', docRows]] as const) {
+        this.runBatched(
+          kind,
+          `INSERT OR REPLACE INTO ${table} (
+            id, kind, name, qualified_name, file_path, language,
+            start_line, end_line, start_column, end_column,
+            docstring, signature, visibility,
+            is_exported, is_async, is_static, is_abstract,
+            decorators, type_parameters, return_type, updated_at
+          ) VALUES `,
+          '(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+          batch
+        );
+      }
+      this.tokens?.inserted(codeRows.map(searchFieldsOfRow));
       this.runBatched(
         'insertNameSegments',
         'INSERT OR IGNORE INTO name_segment_vocab (segment, name) VALUES ',
@@ -909,9 +942,11 @@ export class QueryBuilder {
    * Update an existing node
    */
   updateNode(node: Node): void {
-    if (!this.stmts.updateNode) {
-      this.stmts.updateNode = this.db.prepare(`
-        UPDATE nodes SET
+    // A document or section is updated in the doc layer, where it lives.
+    const doc = isDocNode(node.kind, node.language);
+    if (doc ? !this.stmts.updateDocNode : !this.stmts.updateNode) {
+      this.stmts[doc ? 'updateDocNode' : 'updateNode'] = this.db.prepare(`
+        UPDATE ${doc ? 'doc_nodes' : 'nodes'} SET
           kind = @kind,
           name = @name,
           qualified_name = @qualifiedName,
@@ -945,7 +980,7 @@ export class QueryBuilder {
       return;
     }
 
-    const update = this.stmts.updateNode;
+    const update = doc ? this.stmts.updateDocNode! : this.stmts.updateNode!;
     this.db.transaction(() => {
     const { changes } = update.run({
       id: node.id,
@@ -970,7 +1005,7 @@ export class QueryBuilder {
       returnType: node.returnType ?? null,
       updatedAt: node.updatedAt ?? Date.now(),
     });
-    if (changes > 0) {
+    if (changes > 0 && !doc) {
       this.tokens?.updated([
         node.id, node.name, node.qualifiedName ?? node.name, node.docstring ?? null, node.signature ?? null,
       ]);
@@ -984,8 +1019,8 @@ export class QueryBuilder {
     // name permanently unsearchable: the old name's rows became honest-gate
     // orphans and the only backfill is gated on the vocab being EMPTY.
     // insertNameSegments is idempotent (in-memory set + INSERT OR IGNORE),
-    // so no name-changed check is needed.
-    if (this.isSegmentableKind(node.kind)) this.insertNameSegments(node.name);
+    // so no name-changed check is needed. Doc nodes are not code names.
+    if (this.isSegmentableKind(node.kind) && !doc) this.insertNameSegments(node.name);
   }
 
   /**
@@ -998,9 +1033,12 @@ export class QueryBuilder {
     // it, as SQLite's ON DELETE CASCADE removed them.
     this.db.transaction(() => {
       this.db.prepare('DELETE FROM edges WHERE source = ? OR target = ?').run(id, id);
+      // Doc links to it go too, and it may itself be a document or section.
+      this.db.prepare('DELETE FROM doc_edges WHERE source = ? OR target = ?').run(id, id);
       this.db.prepare('DELETE FROM unresolved_refs WHERE from_node_id = ?').run(id);
       this.tokens?.deleting('id = ?', [id]);
       this.db.prepare('DELETE FROM nodes WHERE id = ?').run(id);
+      this.db.prepare('DELETE FROM doc_nodes WHERE id = ?').run(id);
     })();
   }
 
@@ -1025,8 +1063,23 @@ export class QueryBuilder {
       this.db
         .prepare('DELETE FROM unresolved_refs WHERE from_node_id IN (SELECT id FROM nodes WHERE file_path = ?)')
         .run(filePath);
+      // The doc layer likewise: doc links into the file's code (re-attached
+      // by a re-index like other incoming edges), and a document's own
+      // sections, edges and references.
+      this.db
+        .prepare(
+          `DELETE FROM doc_edges
+            WHERE target IN (SELECT id FROM nodes WHERE file_path = ?)
+               OR source IN (SELECT id FROM doc_nodes WHERE file_path = ?)
+               OR target IN (SELECT id FROM doc_nodes WHERE file_path = ?)`
+        )
+        .run(filePath, filePath, filePath);
+      this.db
+        .prepare('DELETE FROM unresolved_refs WHERE from_node_id IN (SELECT id FROM doc_nodes WHERE file_path = ?)')
+        .run(filePath);
       this.tokens?.deleting('file_path = ?', [filePath]);
       this.db.prepare('DELETE FROM nodes WHERE file_path = ?').run(filePath);
+      this.db.prepare('DELETE FROM doc_nodes WHERE file_path = ?').run(filePath);
     })();
   }
 
@@ -1152,7 +1205,10 @@ export class QueryBuilder {
     if (!this.stmts.getNodeById) {
       this.stmts.getNodeById = this.db.prepare('SELECT * FROM nodes WHERE id = ?');
     }
-    const row = this.stmts.getNodeById.get(id) as NodeRow | undefined;
+    // An id not in the code graph may be a document or section (the doc
+    // layer): found by id like any node, never by name or search.
+    const row = (this.stmts.getNodeById.get(id) ??
+      this.db.prepare('SELECT * FROM doc_nodes WHERE id = ?').get(id)) as NodeRow | undefined;
     if (!row) {
       return null;
     }
@@ -1206,6 +1262,14 @@ export class QueryBuilder {
     const rows = this.db
       .prepare(`SELECT * FROM nodes WHERE id IN (SELECT unnest(from_json(?, '["VARCHAR"]')))`)
       .all(JSON.stringify(misses)) as NodeRow[];
+    // Ids the code graph doesn't hold may be documents or sections.
+    const found = new Set(rows.map((row) => row.id));
+    const docMisses = misses.filter((id) => !found.has(id));
+    if (docMisses.length > 0) {
+      rows.push(...(this.db
+        .prepare(`SELECT * FROM doc_nodes WHERE id IN (SELECT unnest(from_json(?, '["VARCHAR"]')))`)
+        .all(JSON.stringify(docMisses)) as NodeRow[]));
+    }
     for (const row of rows) {
       const node = rowToNode(row);
       out.set(node.id, node);
@@ -1218,25 +1282,17 @@ export class QueryBuilder {
     const out = new Set<string>();
     if (ids.length === 0) return out;
 
-    const uniqueIds = [...new Set(ids)];
-    for (let i = 0; i < uniqueIds.length; i += SQLITE_PARAM_CHUNK_SIZE) {
-      const chunk = uniqueIds.slice(i, i + SQLITE_PARAM_CHUNK_SIZE);
-      // Every edge insert checks its endpoints here, a chunk at a time: the
-      // full-size statement is prepared once, the final partial chunk ad hoc.
-      let stmt: SqliteStatement;
-      if (chunk.length === SQLITE_PARAM_CHUNK_SIZE) {
-        stmt = this.stmts.existingNodeIdsFull ??= this.db.prepare(
-          `SELECT id FROM nodes WHERE id IN (${new Array(SQLITE_PARAM_CHUNK_SIZE).fill('?').join(',')})`
-        );
-      } else {
-        stmt = this.db.prepare(`SELECT id FROM nodes WHERE id IN (${chunk.map(() => '?').join(',')})`);
-      }
-      const rows = stmt.all(...chunk) as { id: string }[];
-      for (const row of rows) {
-        out.add(row.id);
-      }
-    }
-
+    // Every edge insert checks its endpoints here, in one statement: the ids
+    // as one JSON list. An endpoint exists in either layer, the code graph or
+    // the doc layer (a section is the source of a documents edge).
+    const rows = this.db
+      .prepare(
+        `SELECT id FROM nodes WHERE id IN (SELECT unnest(from_json(?, '["VARCHAR"]')))
+         UNION ALL
+         SELECT id FROM doc_nodes WHERE id IN (SELECT unnest(from_json(?, '["VARCHAR"]')))`
+      )
+      .all(JSON.stringify([...new Set(ids)]), JSON.stringify([...new Set(ids)])) as { id: string }[];
+    for (const row of rows) out.add(row.id);
     return out;
   }
 
@@ -1490,12 +1546,15 @@ export class QueryBuilder {
   }
 
   private computeCodeMap(limit: number): CodeMap {
+    // Code languages only: documents are the doc layer's, tracked in files
+    // for sync but not code.
     const languages = this.db.prepare(`
       SELECT language, COUNT(*) AS files, COALESCE(SUM(node_count), 0) AS symbols
       FROM files
+      WHERE language NOT IN (SELECT unnest(from_json(?, '["VARCHAR"]')))
       GROUP BY language
       ORDER BY files DESC, language
-    `).all() as Array<{ language: string; files: number; symbols: number }>;
+    `).all(JSON.stringify([...DOC_LANGUAGES])) as Array<{ language: string; files: number; symbols: number }>;
     // Over-fetch so the test/generated filter still leaves `limit` entries.
     const fileRows = this.db.prepare(`
       SELECT m.file_path AS file_path, COUNT(DISTINCT n.file_path) AS dependents
@@ -1571,11 +1630,12 @@ export class QueryBuilder {
     const docs = this.db.prepare(`
       SELECT COUNT(*) AS docs FROM files WHERE language = 'markdown'
     `).get() as { docs: number };
+    // Sections and their links are the doc layer's (doc_nodes, doc_edges).
     const sections = this.db.prepare(`
-      SELECT COUNT(*) AS sections FROM nodes WHERE kind = 'section'
+      SELECT COUNT(*) AS sections FROM doc_nodes WHERE kind = 'section'
     `).get() as { sections: number };
     const resolved = this.db.prepare(`
-      SELECT COUNT(*) AS resolved FROM edges WHERE kind = 'documents'
+      SELECT COUNT(*) AS resolved FROM doc_edges WHERE kind = 'documents'
     `).get() as { resolved: number };
     const brokenTotal = this.db.prepare(`
       SELECT COUNT(*) AS broken FROM unresolved_refs
@@ -1587,7 +1647,7 @@ export class QueryBuilder {
       SELECT u.file_path AS file_path, u.line AS line,
              u.reference_name AS reference_name, n.name AS section
       FROM unresolved_refs u
-      LEFT JOIN nodes n ON n.id = u.from_node_id AND n.kind = 'section'
+      LEFT JOIN doc_nodes n ON n.id = u.from_node_id AND n.kind = 'section'
       WHERE u.reference_kind = 'documents' AND u.status = 'failed'
       ORDER BY u.file_path, u.line, u.reference_name
       LIMIT ?
@@ -1620,7 +1680,7 @@ export class QueryBuilder {
         WHERE n.is_exported = 1
           AND n.kind IN ('function', 'class', 'method', 'interface', 'type', 'enum')
           AND NOT EXISTS (
-            SELECT 1 FROM edges d WHERE d.target = n.id AND d.kind = 'documents'
+            SELECT 1 FROM doc_edges d WHERE d.target = n.id AND d.kind = 'documents'
           )
         ORDER BY callers DESC, n.file_path, n.start_line
         LIMIT ?
@@ -3695,16 +3755,30 @@ export class QueryBuilder {
   getCrossFileIncomingEdgesWithTarget(
     filePath: string
   ): Array<Edge & { targetName: string; targetKind: NodeKind; sourceFilePath: string; sourceLanguage: Language }> {
-    const sql = `SELECT e.*, tgt.name AS target_name, tgt.kind AS target_kind,
-        src.file_path AS source_file_path, src.language AS source_language
-      FROM edges e
-      JOIN nodes tgt ON tgt.id = e.target
-      JOIN nodes src ON src.id = e.source
-      WHERE tgt.file_path = ?
-        AND e.kind != 'contains'
-        AND src.file_path != ?
-      ORDER BY tgt.start_line, ${this.insertionOrder('tgt')}, e.kind, e.id`;
-    const rows = this.db.prepare(sql).all(filePath, filePath) as Array<
+    // The code graph's incoming edges, then the doc layer's (sections naming
+    // the file's code), so a re-index re-attaches doc links as well.
+    const sql = `SELECT * EXCLUDE (part, target_line, target_order) FROM (
+        SELECT 0 AS part, e.*, tgt.name AS target_name, tgt.kind AS target_kind,
+          src.file_path AS source_file_path, src.language AS source_language,
+          tgt.start_line AS target_line, ${this.insertionOrder('tgt')} AS target_order
+        FROM edges e
+        JOIN nodes tgt ON tgt.id = e.target
+        JOIN nodes src ON src.id = e.source
+        WHERE tgt.file_path = ?
+          AND e.kind != 'contains'
+          AND src.file_path != ?
+        UNION ALL
+        SELECT 1 AS part, e.*, tgt.name AS target_name, tgt.kind AS target_kind,
+          src.file_path AS source_file_path, src.language AS source_language,
+          tgt.start_line AS target_line, ${this.insertionOrder('tgt')} AS target_order
+        FROM doc_edges e
+        JOIN nodes tgt ON tgt.id = e.target
+        JOIN doc_nodes src ON src.id = e.source
+        WHERE tgt.file_path = ?
+          AND e.kind = 'documents'
+      )
+      ORDER BY part, target_line, target_order, kind, id`;
+    const rows = this.db.prepare(sql).all(filePath, filePath, filePath) as Array<
       EdgeRow & { target_name: string; target_kind: NodeKind; source_file_path: string; source_language: Language }
     >;
     return rows.map(row => ({
@@ -5315,8 +5389,10 @@ export class QueryBuilder {
     this.db.transaction(() => {
       this.db.exec('DELETE FROM unresolved_refs');
       this.db.exec('DELETE FROM edges');
+      this.db.exec('DELETE FROM doc_edges');
       this.tokens?.clear();
       this.db.exec('DELETE FROM nodes');
+      this.db.exec('DELETE FROM doc_nodes');
       this.db.exec('DELETE FROM synthesis_inputs');
       this.db.exec('DELETE FROM files');
     })();

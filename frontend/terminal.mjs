@@ -17,7 +17,8 @@
 // the bridge stops.
 
 import { accessSync, constants, existsSync, statSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "@lydell/node-pty";
@@ -84,6 +85,12 @@ export const agentInstructions = (assessment) =>
     "and you update the topic with status done or abandoned, and a summary of what was found or decided,",
     "when it ends. The workbench files your turns and tool calls under the topic in force; when a turn",
     "also updates other topics, declare its own topic last.",
+    "When you declare a task, give `estimate`: low–high ranges for its model calls, output tokens, context",
+    "tokens read (about calls times your context's size) and working minutes, with your confidence and",
+    "basis. The workbench compares it with what the task used, so estimate honestly, and re-estimate",
+    "on a later declaration when the scope changes. Give `plan`, the phases you expect, with it; when",
+    "you start a phase, declare the topic again with `phase` and that phase's own `estimate`, so use is",
+    "counted per phase and drift from the plan shows.",
   ].join(" ");
 
 /**
@@ -166,6 +173,43 @@ const topicGateSettings = (stateDirectory) => {
 };
 const shellQuote = (text) => `'${text.replaceAll("'", "'\\''")}'`;
 
+/** Where a Claude Code session's status line keeps the plan's live limits. */
+export const claudeStatusFile = (directory) =>
+  join(directory, "claude-status.json");
+
+/** The user's own status line command, kept running under ours. */
+async function userStatusLine(env = process.env) {
+  const folder = env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+  try {
+    const settings = JSON.parse(
+      await readFile(join(folder, "settings.json"), "utf8"),
+    );
+    const command = settings?.statusLine?.command;
+    return typeof command === "string" && command.trim() ? command : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Claude Code's status line for the session (statusLine.mjs): it records the
+ * plan's live rate limits Claude Code hands it after each reply.
+ */
+const statusLineSettings = (file, own) => {
+  const recorder = fileURLToPath(new URL("./statusLine.mjs", import.meta.url));
+  const variables = [
+    `REA_STATUS_FILE=${shellQuote(file)}`,
+    ...(own ? [`REA_USER_STATUSLINE=${shellQuote(own)}`] : []),
+  ];
+  return {
+    statusLine: {
+      type: "command",
+      command: `${variables.join(" ")} ${shellQuote(process.execPath)} ${shellQuote(recorder)}`,
+      padding: 0,
+    },
+  };
+};
+
 /**
  * Claude Code permission rules: rene, and the filters the
  * topic gate lets read rea's output; the gate refuses any other shell line.
@@ -186,15 +230,25 @@ const SESSION_AGENTS = [
     command: "claude",
     client: "claude_code",
     install: "https://claude.com/claude-code",
-    async prepare({ directory, instructions, conversationId }) {
-      // The topic gate's hooks, added to the user's own settings for this
-      // session only.
+    async prepare({ directory, env, instructions, conversationId }) {
+      // The topic gate's hooks and the status line that records the plan's
+      // live limits, added to the user's own settings for this session only.
       const settings = join(directory, "claude-settings.json");
       const gateState = join(directory, "topic-gate");
       await mkdir(gateState, { recursive: true, mode: 0o700 });
       await writePrivate(
         settings,
-        `${JSON.stringify(topicGateSettings(gateState), null, 2)}\n`,
+        `${JSON.stringify(
+          {
+            ...topicGateSettings(gateState),
+            ...statusLineSettings(
+              claudeStatusFile(directory),
+              await userStatusLine(env),
+            ),
+          },
+          null,
+          2,
+        )}\n`,
       );
       return {
         args: [
@@ -395,6 +449,7 @@ export function createTerminal(options) {
           session: session.id,
           recorded: Boolean(session.agent.prepare),
           startedAt: session.startedAt,
+          endedAt: session.endedAt ?? null,
           exitCode: session.exitCode ?? null,
         }
       : { running: false };
@@ -432,6 +487,7 @@ export function createTerminal(options) {
     });
     pty.onExit(({ exitCode }) => {
       current.exitCode = exitCode;
+      current.endedAt = Date.now();
       if (session === current) broadcast({ type: "exit", exitCode });
       onExit?.(current.id);
     });

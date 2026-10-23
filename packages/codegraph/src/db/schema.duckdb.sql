@@ -114,6 +114,48 @@ CREATE TABLE IF NOT EXISTS synthesis_inputs (
     file_path VARCHAR PRIMARY KEY
 );
 
+-- The documentation layer, kept beside the code graph rather than in it
+-- (docs/plans/graph.md): a document's file node and its heading sections, the
+-- `contains` edges between them, and the `documents` edges from a section to
+-- the code it names. Same columns as nodes and edges. Code answers read only
+-- nodes and edges, so docs never count as callers, dependents, search hits or
+-- resolution targets; QueryBuilder's writes route doc rows here.
+CREATE TABLE IF NOT EXISTS doc_nodes (
+    id VARCHAR PRIMARY KEY,
+    kind VARCHAR NOT NULL,
+    name VARCHAR NOT NULL,
+    qualified_name VARCHAR NOT NULL,
+    file_path VARCHAR NOT NULL,
+    language VARCHAR NOT NULL,
+    start_line BIGINT NOT NULL,
+    end_line BIGINT NOT NULL,
+    start_column BIGINT NOT NULL,
+    end_column BIGINT NOT NULL,
+    docstring VARCHAR,
+    signature VARCHAR,
+    visibility VARCHAR,
+    is_exported BIGINT DEFAULT 0,
+    is_async BIGINT DEFAULT 0,
+    is_static BIGINT DEFAULT 0,
+    is_abstract BIGINT DEFAULT 0,
+    decorators VARCHAR,
+    type_parameters VARCHAR,
+    return_type VARCHAR,
+    updated_at BIGINT NOT NULL
+);
+
+CREATE SEQUENCE IF NOT EXISTS doc_edges_id;
+CREATE TABLE IF NOT EXISTS doc_edges (
+    id BIGINT PRIMARY KEY DEFAULT nextval('doc_edges_id'),
+    source VARCHAR NOT NULL,
+    target VARCHAR NOT NULL,
+    kind VARCHAR NOT NULL,
+    metadata VARCHAR,
+    line BIGINT,
+    col BIGINT,
+    provenance VARCHAR DEFAULT NULL
+);
+
 -- Whole-graph answers (the code map, the dominant file, counts), computed by
 -- the writer as it seals a generation (QueryBuilder.writeSummaries), so a
 -- reader of the sealed files takes them as they are instead of recomputing

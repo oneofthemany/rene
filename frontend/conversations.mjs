@@ -20,6 +20,7 @@
 // it), what it produced (the recorded result and the result the agent saw),
 // and what came of it (what the agent said and did next).
 
+import { createHash } from "node:crypto";
 import {
   mkdir,
   open,
@@ -59,6 +60,13 @@ export const canonical = (value) =>
           .join(",")}}`
       : JSON.stringify(value ?? null);
 
+/** The file a tool call names, under the argument names agents' tools use. */
+const targetOf = (args) => {
+  for (const key of ["file_path", "path", "notebook_path"])
+    if (typeof args?.[key] === "string") return args[key];
+  return undefined;
+};
+
 /** Each agent's record parser, from rene. */
 const PARSERS = { "claude-code": claudeEvents, "copilot-cli": copilotEvents };
 
@@ -86,6 +94,16 @@ export const storedEvent = (event) => {
             ? {}
             : event.args
           : undefined,
+        // Every tool's arguments, as a digest: what tells a repeated call.
+        // None for a `rene call` reading them from stdin: they're unknown.
+        argsKey:
+          event.args === undefined || event.args === null
+            ? undefined
+            : createHash("sha256")
+                .update(canonical(event.args))
+                .digest("hex")
+                .slice(0, 16),
+        target: targetOf(event.args),
       };
     case "tool_result":
       return {
@@ -94,6 +112,50 @@ export const storedEvent = (event) => {
         toolUseId: event.id,
         isError: event.is_error,
         text: clip(event.text, MAX_RESULT_TEXT),
+        // The agent read all of it, however much is kept here.
+        chars: event.text.length,
+      };
+    case "interjection":
+      return { kind: event.kind, at: event.at, text: clip(event.text) };
+    case "interrupt":
+      return { kind: event.kind, at: event.at };
+    case "usage":
+      return {
+        kind: event.kind,
+        at: event.at,
+        scope: event.scope,
+        call: event.call,
+        model: event.model,
+        input: event.input,
+        cacheRead: event.cache_read,
+        cacheWrite: event.cache_write,
+        output: event.output,
+      };
+    case "billing":
+      return {
+        kind: event.kind,
+        at: event.at,
+        premiumRequests: event.premium_requests,
+      };
+    case "compaction":
+      return {
+        kind: event.kind,
+        at: event.at,
+        tokensBefore: event.tokens_before,
+        tokensAfter: event.tokens_after,
+        durationMs: event.duration_ms,
+      };
+    case "turn_end":
+      return { kind: event.kind, at: event.at, durationMs: event.duration_ms };
+    case "quota":
+      return {
+        kind: event.kind,
+        at: event.at,
+        unlimited: event.unlimited,
+        entitlement: event.entitlement,
+        used: event.used,
+        remainingPercent: event.remaining_percent,
+        resetsAt: event.resets_at,
       };
   }
 };
@@ -160,6 +222,13 @@ export function createConversationStore(directory) {
         await handle.close();
       }
     },
+    /** How much a session's events file holds: changes whenever events land. */
+    async size(session) {
+      if (!SESSION.test(session)) return 0;
+      return (
+        (await stat(eventsPath(session)).catch(() => undefined))?.size ?? 0
+      );
+    },
     async events(session) {
       if (!SESSION.test(session)) return [];
       const text = await readFile(eventsPath(session), "utf8").catch(() => "");
@@ -207,10 +276,11 @@ function ingestTranscript(store, id) {
 /**
  * Which reading of transcripts a session's stored events came from. Raise it
  * when rene parses transcripts into different events (2: one tool use per
- * `rene call` on a shell line), so stored sessions are read again from the
+ * `rene call` on a shell line; 3: usage, interjections, interruptions,
+ * compactions and turn ends), so stored sessions are read again from the
  * start rather than keeping events the current parser wouldn't produce.
  */
-const EVENTS_VERSION = 2;
+const EVENTS_VERSION = 3;
 
 async function ingestFrom(store, stored) {
   let meta = stored;

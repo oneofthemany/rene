@@ -280,8 +280,69 @@ const topicTurn = z.strictObject({
   at: z.string().datetime({ offset: true }),
 });
 
+// A guess as a range, so its accuracy can be judged: low to high.
+const estimateRange = z
+  .strictObject({
+    low: z.number().int().nonnegative(),
+    high: z.number().int().nonnegative(),
+  })
+  .refine((range) => range.low <= range.high, {
+    message: "low must not exceed high.",
+  });
+
+/**
+ * What the agent expects a task to take, given before it starts so the
+ * workbench can compare it with what the task used.
+ */
+export const topicEstimateSchema = z.strictObject({
+  model_calls: estimateRange
+    .optional()
+    .describe("Model calls (round trips) the task will take."),
+  output_tokens: estimateRange
+    .optional()
+    .describe("Tokens you will write: replies, reasoning, tool arguments."),
+  context_tokens: estimateRange
+    .optional()
+    .describe(
+      "Context tokens read over the task: about the calls times the context's size.",
+    ),
+  working_minutes: estimateRange
+    .optional()
+    .describe(
+      "Minutes of your own working time, not time waiting on the user.",
+    ),
+  confidence: z.enum(["low", "medium", "high"]),
+  basis: z
+    .string()
+    .max(500)
+    .default("")
+    .describe(
+      "What the guess rests on: the work you expect, past tasks like it.",
+    ),
+});
+
 export const recordTopicInputSchema = z
   .strictObject({
+    phase: z
+      .string()
+      .min(1)
+      .max(120)
+      .optional()
+      .describe(
+        'The phase of the task this declaration starts, such as "schema" or "tests": usage is counted per phase until the next declaration names another. Give the phase\'s own estimate with it.',
+      ),
+    plan: z
+      .array(z.string().min(1).max(120))
+      .max(20)
+      .optional()
+      .describe(
+        "The phases you expect the task to take, in order, given when declaring it: phases outside the plan, and planned phases never reached, show as deviation.",
+      ),
+    estimate: topicEstimateSchema
+      .optional()
+      .describe(
+        "Before starting a task, your estimate of what it will take, as low–high ranges; the workbench compares it with what the task used. Give it when declaring the task; a later declaration's estimate is a re-estimate, and the first stays the one judged.",
+      ),
     topic_id: topicId
       .optional()
       .describe("An existing topic to update; omit to declare a new one."),
@@ -353,6 +414,9 @@ export const recordTopicResultSchema = z.strictObject({
   summary: z.string(),
   evidence: topicEvidence,
   turns: z.array(topicTurn),
+  phase: z.string().nullable(),
+  plan: z.array(z.string()).nullable(),
+  estimate: topicEstimateSchema.nullable(),
   declared_at: z.string(),
   created: z.boolean(),
 });
@@ -436,9 +500,21 @@ export const readAgentConversationInputSchema = z.strictObject({
 });
 
 const conversationEntry = z.strictObject({
-  kind: z.enum(["reasoning", "reply", "tool_use", "tool_result"]),
+  kind: z.enum([
+    "reasoning",
+    "reply",
+    "tool_use",
+    "tool_result",
+    // A message the person sent mid-turn, the person stopping the agent, and
+    // the agent summarising its context to make room.
+    "interjection",
+    "interrupt",
+    "compaction",
+  ]),
   at: z.string().nullable(),
   text: z.string().optional(),
+  tokens_before: z.number().int().nonnegative().nullable().optional(),
+  tokens_after: z.number().int().nonnegative().nullable().optional(),
   tool: z.string().optional(),
   rene: z.boolean().optional(),
   args: z.string().optional(),

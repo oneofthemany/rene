@@ -67,6 +67,20 @@ export async function currentTopics(history) {
         ]),
       ],
       first_declared_at: previous?.first_declared_at ?? declared.declared_at,
+      // The phases declared, in order, each with its first estimate, and the
+      // first and latest plan: what deviation is measured against.
+      phases: declared.phase
+        ? addPhase(previous?.phases ?? [], declared)
+        : (previous?.phases ?? []),
+      plan: declared.plan?.length ? declared.plan : (previous?.plan ?? null),
+      first_plan:
+        previous?.first_plan ?? (declared.plan?.length ? declared.plan : null),
+      // The first estimate is the one judged; a later one is a re-estimate.
+      estimate: declared.estimate ?? previous?.estimate ?? null,
+      first_estimate: previous?.first_estimate ?? declared.estimate ?? null,
+      first_estimate_at:
+        previous?.first_estimate_at ??
+        (declared.estimate ? declared.declared_at : null),
       declarations: (previous?.declarations ?? 0) + 1,
       declared_by: entry.source === "agent" ? (entry.agent ?? "Agent") : "You",
     });
@@ -76,6 +90,25 @@ export async function currentTopics(history) {
   }
   return { topics, declaredBy, filed };
 }
+
+/** A topic's phases with a declaration's phase added, or its estimate filled in. */
+const addPhase = (phases, declared) => {
+  const known = phases.find((phase) => phase.name === declared.phase);
+  if (known)
+    return known.estimate || !declared.estimate
+      ? phases
+      : phases.map((phase) =>
+          phase === known ? { ...phase, estimate: declared.estimate } : phase,
+        );
+  return [
+    ...phases,
+    {
+      name: declared.phase,
+      started_at: declared.declared_at,
+      estimate: declared.estimate ?? null,
+    },
+  ];
+};
 
 /** A turn's recorded identity: its session and the time of its request. */
 const turnKey = (session, at) => `${session}\u0000${Date.parse(at)}`;

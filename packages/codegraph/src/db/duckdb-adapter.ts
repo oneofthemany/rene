@@ -63,6 +63,8 @@ const SEAL_LAYOUT = JSON.stringify({
     unresolved_refs: 'id',
     files: 'path',
     name_segment_vocab: 'segment, name',
+    doc_nodes: 'id',
+    doc_edges: 'source, kind, target',
   },
   parquet: 'row_group_size 8192, dictionary_size_limit 8192, bloom_filter_false_positive_ratio 0.01',
 });

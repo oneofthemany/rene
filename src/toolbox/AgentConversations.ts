@@ -47,6 +47,53 @@ export type ConversationEvent =
       id: string | null;
       is_error: boolean;
       text: string;
+    }
+  /** A message the person sent while the agent was working on a turn. */
+  | { kind: "interjection"; at: string | null; text: string }
+  /** The person stopped the agent mid-turn. */
+  | { kind: "interrupt"; at: string | null }
+  /**
+   * Tokens one model call used (`scope: "call"`; records of one call share
+   * its `call` id and repeat its usage), or a session's running total for a
+   * model (`scope: "session"`, the latest replaces earlier ones). `input`
+   * excludes cache reads and writes.
+   */
+  | {
+      kind: "usage";
+      at: string | null;
+      scope: "call" | "session";
+      call: string | null;
+      model: string | null;
+      input: number;
+      cache_read: number;
+      cache_write: number;
+      output: number;
+    }
+  /** Billing units the agent's service reported so far in the session. */
+  | { kind: "billing"; at: string | null; premium_requests: number }
+  /** The agent summarised its context to make room. */
+  | {
+      kind: "compaction";
+      at: string | null;
+      tokens_before: number | null;
+      tokens_after: number | null;
+      duration_ms: number | null;
+    }
+  /** A turn finished, with how long the agent worked on it when recorded. */
+  | { kind: "turn_end"; at: string | null; duration_ms: number | null }
+  /**
+   * The account's premium-request quota as the service reported it with a
+   * model call: requests used of those the plan allows this period.
+   */
+  | {
+      kind: "quota";
+      at: string | null;
+      unlimited: boolean;
+      entitlement: number | null;
+      used: number;
+      remaining_percent: number | null;
+      resets_at: string | null;
+      overage_allowed: boolean;
     };
 
 export interface ConversationSource {
@@ -86,10 +133,12 @@ const toolsOf = (
   return [{ tool: name, rene: false, args: input }];
 };
 
-const claudeProjects = (env: Readonly<Record<string, string | undefined>>) =>
-  join(env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "projects");
-const copilotSessions = (env: Readonly<Record<string, string | undefined>>) =>
-  join(env.COPILOT_HOME || join(homedir(), ".copilot"), "session-state");
+export const claudeProjects = (
+  env: Readonly<Record<string, string | undefined>>,
+) => join(env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "projects");
+export const copilotSessions = (
+  env: Readonly<Record<string, string | undefined>>,
+) => join(env.COPILOT_HOME || join(homedir(), ".copilot"), "session-state");
 
 /** Claude Code's transcript folder for conversations run in `folder`. */
 export const claudeTranscriptFolder = (
@@ -124,17 +173,88 @@ type Raw = Record<string, unknown>;
 const record = (value: unknown): Raw =>
   typeof value === "object" && value !== null ? (value as Raw) : {};
 const at = (value: unknown) => (typeof value === "string" ? value : null);
+const count = (value: unknown) =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+const countOrNull = (value: unknown) =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : null;
+
+/** The text Claude Code records when the person stops a turn. */
+const INTERRUPTED = /^\[Request interrupted by user/u;
+
+/**
+ * The tokens one Claude Code record's model call used, side-chains (a
+ * subagent's work) included: they count against the account too.
+ */
+export function claudeUsage(value: unknown): ConversationEvent[] {
+  const line = record(value);
+  const message = record(line.message);
+  // Claude Code's own placeholder replies (errors, interruptions) cost nothing.
+  if (
+    line.type !== "assistant" ||
+    message.usage === undefined ||
+    message.model === "<synthetic>"
+  )
+    return [];
+  const usage = record(message.usage);
+  return [
+    {
+      kind: "usage",
+      at: at(line.timestamp),
+      scope: "call",
+      call: typeof message.id === "string" ? message.id : null,
+      model: typeof message.model === "string" ? message.model : null,
+      input: count(usage.input_tokens),
+      cache_read: count(usage.cache_read_input_tokens),
+      cache_write: count(usage.cache_creation_input_tokens),
+      output: count(usage.output_tokens),
+    },
+  ];
+}
 
 /** Events from one Claude Code transcript record; side-chains are left out. */
 export function claudeEvents(value: unknown): ConversationEvent[] {
   const line = record(value);
   if (line.isSidechain === true) return [];
   const time = at(line.timestamp);
-  const content = record(line.message).content;
+  const message = record(line.message);
+  const content = message.content;
   const events: ConversationEvent[] = [];
-  if (line.type === "user" && line.isMeta !== true) {
+  const attachment = record(line.attachment);
+  if (
+    line.type === "attachment" &&
+    attachment.type === "queued_command" &&
+    record(attachment.origin).kind === "human" &&
+    typeof attachment.prompt === "string" &&
+    isPrompt(attachment.prompt)
+  )
+    events.push({ kind: "interjection", at: time, text: attachment.prompt });
+  else if (line.type === "system" && line.subtype === "compact_boundary") {
+    const meta = record(line.compactMetadata);
+    events.push({
+      kind: "compaction",
+      at: time,
+      tokens_before: countOrNull(meta.preTokens),
+      tokens_after: countOrNull(meta.postTokens),
+      duration_ms: countOrNull(meta.durationMs),
+    });
+  } else if (line.type === "system" && line.subtype === "turn_duration")
+    events.push({
+      kind: "turn_end",
+      at: time,
+      duration_ms: countOrNull(line.durationMs),
+    });
+  // A compaction's summary is Claude Code's, written as if you sent it.
+  if (
+    line.type === "user" &&
+    line.isMeta !== true &&
+    line.isCompactSummary !== true
+  ) {
     if (typeof content === "string") {
-      if (isPrompt(content))
+      if (INTERRUPTED.test(content))
+        events.push({ kind: "interrupt", at: time });
+      else if (isPrompt(content))
         events.push({ kind: "prompt", at: time, text: content });
     } else if (Array.isArray(content))
       for (const part of content.map(record)) {
@@ -146,14 +266,15 @@ export function claudeEvents(value: unknown): ConversationEvent[] {
             is_error: part.is_error === true,
             text: textOf(part.content),
           });
-        else if (
-          part.type === "text" &&
-          typeof part.text === "string" &&
-          isPrompt(part.text)
-        )
-          events.push({ kind: "prompt", at: time, text: part.text });
+        else if (part.type === "text" && typeof part.text === "string") {
+          if (INTERRUPTED.test(part.text))
+            events.push({ kind: "interrupt", at: time });
+          else if (isPrompt(part.text))
+            events.push({ kind: "prompt", at: time, text: part.text });
+        }
       }
   } else if (line.type === "assistant" && Array.isArray(content)) {
+    events.push(...claudeUsage(line));
     for (const part of content.map(record)) {
       // Claude Code often records thinking with its text left empty (only
       // its signature kept); there is nothing to show for those.
@@ -191,9 +312,110 @@ export function copilotEvents(value: unknown): ConversationEvent[] {
   const time = at(event.timestamp);
   switch (event.type) {
     case "user.message":
+      // "steering" is a message delivered into the turn the agent is on.
       return typeof data.content === "string" && isPrompt(data.content)
-        ? [{ kind: "prompt", at: time, text: data.content }]
+        ? [
+            {
+              kind: data.delivery === "steering" ? "interjection" : "prompt",
+              at: time,
+              text: data.content,
+            },
+          ]
         : [];
+    case "abort":
+      return data.reason === "user_initiated"
+        ? [{ kind: "interrupt", at: time }]
+        : [];
+    case "session.compaction_complete":
+      return data.success === false
+        ? []
+        : [
+            {
+              kind: "compaction",
+              at: time,
+              tokens_before: countOrNull(data.preCompactionTokens),
+              tokens_after: countOrNull(data.postCompactionTokens),
+              duration_ms: null,
+            },
+          ];
+    case "model.model_call_success": {
+      const events: ConversationEvent[] = [];
+      const premium = record(record(data.quotaSnapshots).premium_interactions);
+      if (Object.keys(premium).length > 0)
+        events.push({
+          kind: "quota",
+          at: time,
+          unlimited: premium.isUnlimitedEntitlement === true,
+          entitlement:
+            premium.isUnlimitedEntitlement === true
+              ? null
+              : countOrNull(premium.entitlementRequests),
+          used: count(premium.usedRequests),
+          remaining_percent: countOrNull(premium.remainingPercentage),
+          resets_at: at(premium.resetDate),
+          overage_allowed: premium.overageAllowedWithExhaustedQuota === true,
+        });
+      if (data.usage === undefined) return events;
+      const usage = record(data.usage);
+      const prompt = record(usage.prompt_tokens_details);
+      const cacheRead = count(prompt.cached_tokens);
+      const cacheWrite = count(prompt.cache_write_tokens);
+      return [
+        ...events,
+        {
+          kind: "usage",
+          at: time,
+          scope: "call",
+          call: typeof data.callId === "string" ? data.callId : null,
+          model: at(record(data.modelCall).model),
+          input: Math.max(
+            0,
+            count(usage.prompt_tokens) - cacheRead - cacheWrite,
+          ),
+          cache_read: cacheRead,
+          cache_write: cacheWrite,
+          output: count(usage.completion_tokens),
+        },
+      ];
+    }
+    case "session.usage_checkpoint":
+      return [
+        {
+          kind: "billing",
+          at: time,
+          premium_requests: count(data.totalPremiumRequests),
+        },
+      ];
+    case "session.shutdown": {
+      // The session's totals per model: Copilot doesn't record its main
+      // model's calls one by one.
+      const events: ConversationEvent[] = [
+        {
+          kind: "billing",
+          at: time,
+          premium_requests: count(data.totalPremiumRequests),
+        },
+      ];
+      for (const [model, metrics] of Object.entries(
+        record(data.modelMetrics),
+      )) {
+        const usage = record(record(metrics).usage);
+        const cacheRead = count(usage.cacheReadTokens);
+        const cacheWrite = count(usage.cacheWriteTokens);
+        events.push({
+          kind: "usage",
+          at: time,
+          scope: "session",
+          call: null,
+          model,
+          input: Math.max(0, count(usage.inputTokens) - cacheRead - cacheWrite),
+          cache_read: cacheRead,
+          cache_write: cacheWrite,
+          output: count(usage.outputTokens),
+        });
+      }
+      return events;
+    }
     case "assistant.message": {
       const events: ConversationEvent[] = [];
       if (typeof data.reasoningText === "string" && data.reasoningText.trim())

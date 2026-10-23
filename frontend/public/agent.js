@@ -5,6 +5,7 @@
 
 import { api, apiJson, getToken, ndjson } from "./api.js";
 import { h } from "./render.js";
+import { usageBar } from "./usage.js";
 
 const AGENT_KEY = "rea-agent";
 
@@ -106,11 +107,7 @@ function connection(agent) {
           : undefined,
       ],
     };
-  if (agent.rene === "session")
-    return {
-      ready: true,
-      text: "rene is set up for this session as `rene call` in its shell, pre-approved, and the tools it replaces are taken away. Every rene call it makes is recorded in the project's history.",
-    };
+  if (agent.rene === "session") return { ready: true, text: "" };
   return {
     ready: true,
     text: `${agent.label}'s shell has the session's \`rene call\` command, but nothing tells it to use rene or takes its own tools away, so only the calls it makes through rene are recorded.`,
@@ -144,8 +141,9 @@ function controls(agents, getProject) {
     parts.stop.disabled = !state.running;
     picker.select.disabled = state.running;
     const name = label(state.agent ?? picker.select.value);
+    // While it runs, the usage bar says what it is doing.
     parts.status.textContent = state.running
-      ? `${name} is running in ${state.cwd}.`
+      ? ""
       : state.exitCode !== undefined && state.exitCode !== null
         ? `${name} exited (code ${state.exitCode}). Start it again when you're ready.`
         : project
@@ -272,7 +270,7 @@ export async function initAgent({ host, getProject, onState, onStarted }) {
         }),
       });
       ui.show(state);
-      onState(state);
+      stateChanged(state);
       term.focus();
     } catch (cause) {
       ui.message.textContent = cause.message;
@@ -294,21 +292,21 @@ export async function initAgent({ host, getProject, onState, onStarted }) {
     h("div", { class: "agent-actions" }, ui.start, ui.stop),
     ui.message,
   );
+  const usage = usageBar();
+  const stateChanged = (state) => {
+    usage.stateChanged(state);
+    onState(state);
+  };
   ui.show(initial);
-  onState(initial);
-  void follow(term, ui, onState);
+  stateChanged(initial);
+  void follow(term, ui, stateChanged);
 
   const element = h(
     "section",
-    { class: "agent" },
-    h("h2", {}, "Agent terminal"),
-    h(
-      "p",
-      { class: "hint" },
-      "Your own coding agent, running on this computer in the project folder with rene connected as its rea tools. Your login, settings and other MCP servers still apply. REA can only see files in your home folder.",
-    ),
+    { class: "agent", "aria-label": "Agent terminal" },
     ui.picker.help,
     ui.status,
+    usage.element,
     screen,
   );
   return {

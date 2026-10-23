@@ -109,18 +109,20 @@ export function initProjects({ onChange, onShowProjects, onOpenAssessment }) {
 
   function renderBar() {
     const choice = state.current?.assessment;
+    // Whether a project keeps an assessment shows in the Project tab; the
+    // bar only asks when it is still undecided.
     assessmentNote.replaceChildren(
-      !state.current
-        ? "No project: calls go to the unassigned history."
+      ...(!state.current
+        ? ["No project: calls go to the unassigned history."]
         : choice === "ask"
-          ? h(
-              "button",
-              { type: "button", class: "link", onclick: onShowProjects },
-              "Set up a project assessment",
-            )
-          : choice === "enabled"
-            ? "Assessment kept in .rene/assessment.md"
-            : "No assessment for this project",
+          ? [
+              h(
+                "button",
+                { type: "button", class: "link", onclick: onShowProjects },
+                "Set up a project assessment",
+              ),
+            ]
+          : []),
     );
     setBusy(false);
   }

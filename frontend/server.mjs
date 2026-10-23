@@ -47,7 +47,12 @@ import {
   followConversations,
 } from "./conversations.mjs";
 import { createHistory } from "./history.mjs";
-import { currentTopics, topicTree } from "./topics.mjs";
+import { currentTopics, TOPIC_TOOL, topicTree } from "./topics.mjs";
+import {
+  createUsageLedger,
+  readClaudePlan,
+} from "../dist/toolbox/AgentAccountUsage.js";
+import { accountUsage, sessionUsage, topicActuals } from "./usage.mjs";
 import {
   createProjects,
   defaultProjectsDir,
@@ -58,6 +63,7 @@ import { createSettings, SettingsError } from "./settings.mjs";
 import {
   agentDirectory,
   agentInstructions,
+  claudeStatusFile,
   createTerminal,
   TerminalError,
 } from "./terminal.mjs";
@@ -467,7 +473,134 @@ const TERMINAL_ROUTES = {
   },
   "POST /api/terminal/stop": (_request, response) =>
     terminalAction(response, () => ({ stopped: terminal.stop() })),
+  "GET /api/terminal/usage": async (_request, response) =>
+    sendJson(response, 200, await terminalUsage()),
+  // Types Claude Code's own /limit-reset into its prompt, which then shows
+  // the resets the account has and asks before using one. Only this command,
+  // and only for a running Claude Code session.
+  "POST /api/terminal/limit-reset": (_request, response) =>
+    terminalAction(response, () => {
+      const described = terminal.describe();
+      if (!described.running || described.agent !== "claude")
+        throw new TerminalError("Claude Code isn't running here.");
+      terminal.input("/limit-reset\r");
+      return { sent: true };
+    }),
 };
+
+// ---------------------------------------------------------------------------
+// Agent Terminal usage (usage.mjs owns the analysis)
+
+/** session id -> { size, events }: a conversation's events, read again when they grow. */
+const usageEvents = new Map();
+/** project id -> { stamp, topics }: topics, read again when a declaration lands. */
+const usageTopics = new Map();
+
+async function cachedEvents(store, session) {
+  const size = await store.size(session);
+  const cached = usageEvents.get(session);
+  if (cached?.size === size) return cached.events;
+  const events = await store.events(session);
+  usageEvents.set(session, { size, events });
+  return events;
+}
+
+async function cachedTopics(project) {
+  const declarations = await project.history.list({
+    name: TOPIC_TOOL,
+    outcome: "ok",
+  });
+  const stamp = `${declarations.length}:${declarations.at(-1)?.id ?? ""}`;
+  const cached = usageTopics.get(project.manifest.id);
+  if (cached?.stamp === stamp) return cached.topics;
+  const { topics } = await currentTopics(project.history);
+  usageTopics.set(project.manifest.id, { stamp, topics });
+  return topics;
+}
+
+// This machine's agent transcripts over the last month and a bit, followed
+// by offset (AgentAccountUsage.ts), and read again at most this often.
+const ACCOUNT_HORIZON_MS = 35 * 24 * 60 * 60_000;
+const ACCOUNT_REFRESH_MS = 20_000;
+const usageLedger = createUsageLedger(
+  settings.environment(process.env),
+  ACCOUNT_HORIZON_MS,
+);
+let ledgerReadAt = 0;
+
+async function accountSummary() {
+  const environment = settings.environment(process.env);
+  if (Date.now() - ledgerReadAt > ACCOUNT_REFRESH_MS) {
+    await usageLedger.refresh();
+    ledgerReadAt = Date.now();
+  }
+  // The live limits a Claude Code session's status line last recorded.
+  const live = await readFile(claudeStatusFile(options["agent-dir"]), "utf8")
+    .then(JSON.parse)
+    .catch(() => null);
+  return accountUsage({
+    plan: await readClaudePlan(environment).catch(() => null),
+    live,
+    ledger: usageLedger,
+    now: Date.now(),
+  });
+}
+
+/** The Agent Terminal session's usage: tokens, time, waste and progress, and the accounts'. */
+async function terminalUsage() {
+  const account = await accountSummary();
+  const described = terminal.describe();
+  if (!described.session || !described.project)
+    return { available: false, account };
+  const project = await projects.get(described.project).catch(() => undefined);
+  if (!project) return { available: false, account };
+  const now = described.endedAt ?? Date.now();
+  const all = [];
+  const active = [];
+  for (const meta of await project.conversations.sessions()) {
+    const conversation = {
+      meta,
+      events: await cachedEvents(project.conversations, meta.session),
+    };
+    all.push(conversation);
+    // The terminal session's conversations: written since it started. A
+    // resumed one counts from its own start, by its id, across restarts.
+    const info = await stat(meta.transcript).catch(() => undefined);
+    if (info && info.mtimeMs >= described.startedAt) active.push(conversation);
+  }
+  const firsts = active
+    .map(({ events }) => Date.parse(events.find((event) => event.at)?.at ?? ""))
+    .filter(Number.isFinite);
+  const since = Math.min(described.startedAt, ...firsts);
+  const { topicTime, topicCalls, ...usage } = sessionUsage({
+    conversations: active,
+    since,
+    now,
+    topics: await cachedTopics(project),
+    actuals: cachedActuals(project, all, now),
+  });
+  return {
+    available: true,
+    account,
+    agent: described.label,
+    agentRunning: described.running,
+    ...usage,
+  };
+}
+
+/** project id -> { stamp, actuals }: every topic's use, again when a conversation grows. */
+const usageActuals = new Map();
+
+function cachedActuals(project, conversations, now) {
+  const stamp = conversations
+    .map(({ meta, events }) => `${meta.session}:${events.length}`)
+    .join(",");
+  const cached = usageActuals.get(project.manifest.id);
+  if (cached?.stamp === stamp) return cached.actuals;
+  const actuals = topicActuals({ conversations, now });
+  usageActuals.set(project.manifest.id, { stamp, actuals });
+  return actuals;
+}
 
 // Keystrokes, mouse reports and resizes reach the agent over one WebSocket
 // per page (output stays on /api/terminal/stream). A TUI with mouse tracking

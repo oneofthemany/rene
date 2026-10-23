@@ -18,6 +18,18 @@ type Environment = Readonly<Record<string, string | undefined>>;
 const PROMPT_PREVIEW = 200;
 const ARGS_PREVIEW = 500;
 
+/** Usage accounting, which the workbench's usage bar reads; not shown here. */
+const ACCOUNTING: ReadonlySet<ConversationEvent["kind"]> = new Set([
+  "usage",
+  "billing",
+  "turn_end",
+  "quota",
+]);
+type Entry = Exclude<
+  ConversationEvent,
+  { kind: "prompt" | "usage" | "billing" | "turn_end" | "quota" }
+>;
+
 const clip = (text: string, limit: number) =>
   text.length > limit
     ? { text: `${text.slice(0, limit)}…`, truncated: true }
@@ -98,11 +110,22 @@ export async function readAgentConversation(
       : Math.min(input.from_turn - 1, turns.length);
   const page = turns.slice(start, start + input.max_turns);
   const limit = input.max_text_chars;
-  const entry = (event: Exclude<ConversationEvent, { kind: "prompt" }>) => {
+  const entry = (event: Entry) => {
     switch (event.kind) {
       case "reasoning":
       case "reply":
+      case "interjection":
         return { kind: event.kind, at: event.at, ...clip(event.text, limit) };
+      case "interrupt":
+        return { kind: event.kind, at: event.at, truncated: false };
+      case "compaction":
+        return {
+          kind: event.kind,
+          at: event.at,
+          tokens_before: event.tokens_before,
+          tokens_after: event.tokens_after,
+          truncated: false,
+        };
       case "tool_use": {
         const args = clip(JSON.stringify(event.args ?? null), ARGS_PREVIEW);
         return {
@@ -142,8 +165,9 @@ export async function readAgentConversation(
         prompt_truncated: clipped.truncated,
         entries: rest
           .filter(
-            (event): event is Exclude<ConversationEvent, { kind: "prompt" }> =>
+            (event): event is Entry =>
               event.kind !== "prompt" &&
+              !ACCOUNTING.has(event.kind) &&
               (event.kind !== "reasoning" || input.include_reasoning) &&
               (event.kind !== "tool_result" || input.include_tool_results),
           )

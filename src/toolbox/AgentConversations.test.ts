@@ -130,7 +130,172 @@ describe("agent transcripts", () => {
     expect(events[2]).toMatchObject({ tool: "search_text", rene: true });
     expect(events[3]).toMatchObject({ is_error: true, text: "failed" });
   });
+});
 
+describe("what Claude Code records about usage and interruptions", () => {
+  it("reads Claude Code's usage, interruptions, mid-turn messages, compactions and turn ends", () => {
+    const events = [
+      {
+        type: "user",
+        isCompactSummary: true,
+        timestamp: "t0",
+        message: { content: "This session is being continued…" },
+      },
+      {
+        type: "assistant",
+        timestamp: "t1",
+        message: {
+          id: "msg_1",
+          model: "claude-opus-5-5",
+          usage: {
+            input_tokens: 2,
+            cache_read_input_tokens: 900,
+            cache_creation_input_tokens: 50,
+            output_tokens: 40,
+          },
+          content: [{ type: "text", text: "Working." }],
+        },
+      },
+      {
+        type: "assistant",
+        timestamp: "t1",
+        message: {
+          model: "<synthetic>",
+          usage: { input_tokens: 0, output_tokens: 0 },
+          content: [{ type: "text", text: "No response requested." }],
+        },
+      },
+      {
+        type: "attachment",
+        timestamp: "t2",
+        attachment: {
+          type: "queued_command",
+          prompt: "also rename it",
+          origin: { kind: "human" },
+        },
+      },
+      {
+        type: "user",
+        timestamp: "t3",
+        message: {
+          content: [{ type: "text", text: "[Request interrupted by user]" }],
+        },
+      },
+      {
+        type: "system",
+        subtype: "compact_boundary",
+        timestamp: "t4",
+        compactMetadata: { preTokens: 900, postTokens: 100, durationMs: 3000 },
+      },
+      {
+        type: "system",
+        subtype: "turn_duration",
+        timestamp: "t5",
+        durationMs: 1200,
+      },
+    ].flatMap(claudeEvents);
+    expect(events).toEqual([
+      {
+        kind: "usage",
+        at: "t1",
+        scope: "call",
+        call: "msg_1",
+        model: "claude-opus-5-5",
+        input: 2,
+        cache_read: 900,
+        cache_write: 50,
+        output: 40,
+      },
+      { kind: "reply", at: "t1", text: "Working." },
+      { kind: "reply", at: "t1", text: "No response requested." },
+      { kind: "interjection", at: "t2", text: "also rename it" },
+      { kind: "interrupt", at: "t3" },
+      {
+        kind: "compaction",
+        at: "t4",
+        tokens_before: 900,
+        tokens_after: 100,
+        duration_ms: 3000,
+      },
+      { kind: "turn_end", at: "t5", duration_ms: 1200 },
+    ]);
+  });
+});
+
+describe("what Copilot CLI records about usage and interruptions", () => {
+  it("reads Copilot CLI's steering messages, aborts, usage and session totals", () => {
+    const events = [
+      {
+        type: "user.message",
+        timestamp: "t1",
+        data: { content: "use the other folder", delivery: "steering" },
+      },
+      { type: "abort", timestamp: "t2", data: { reason: "user_initiated" } },
+      {
+        type: "model.model_call_success",
+        timestamp: "t3",
+        data: {
+          callId: "c1",
+          modelCall: { model: "gpt-5.4-nano" },
+          usage: {
+            prompt_tokens: 600,
+            completion_tokens: 35,
+            prompt_tokens_details: {
+              cached_tokens: 100,
+              cache_write_tokens: 0,
+            },
+          },
+        },
+      },
+      {
+        type: "session.shutdown",
+        timestamp: "t4",
+        data: {
+          totalPremiumRequests: 7,
+          modelMetrics: {
+            "claude-opus-4.8": {
+              usage: {
+                inputTokens: 1000,
+                outputTokens: 50,
+                cacheReadTokens: 800,
+                cacheWriteTokens: 150,
+              },
+            },
+          },
+        },
+      },
+    ].flatMap(copilotEvents);
+    expect(events).toEqual([
+      { kind: "interjection", at: "t1", text: "use the other folder" },
+      { kind: "interrupt", at: "t2" },
+      {
+        kind: "usage",
+        at: "t3",
+        scope: "call",
+        call: "c1",
+        model: "gpt-5.4-nano",
+        input: 500,
+        cache_read: 100,
+        cache_write: 0,
+        output: 35,
+      },
+      { kind: "billing", at: "t4", premium_requests: 7 },
+      {
+        kind: "usage",
+        at: "t4",
+        scope: "session",
+        call: null,
+        model: "claude-opus-4.8",
+        input: 50,
+        cache_read: 800,
+        cache_write: 150,
+        output: 50,
+      },
+    ]);
+  });
+});
+
+describe("conversation turns", () => {
   it("splits turns at prompts and drops what comes before the first", () => {
     const turns = turnsOf([
       { kind: "reply", at: null, text: "tail of a resumed session" },

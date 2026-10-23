@@ -1038,8 +1038,15 @@ async function boot() {
   agent ??= await initAgent({
     host: document.getElementById("agent-controls"),
     getProject: activeProject,
-    onState: (session) =>
-      void projects.lock(session.running ? session.project : undefined),
+    onState: (session) => {
+      // The Agent terminal button glows while an agent runs.
+      const button = document.getElementById("open-agent");
+      button.toggleAttribute("data-running", Boolean(session.running));
+      button.title = session.running
+        ? `${session.label ?? "An agent"} is running`
+        : "";
+      void projects.lock(session.running ? session.project : undefined);
+    },
     onStarted: showAgentView,
   }).catch((cause) => {
     document.getElementById("agent-controls").textContent =

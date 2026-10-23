@@ -126,7 +126,9 @@ async function record(out) {
       .prepare("SELECT id, name FROM nodes WHERE kind IN ('function', 'method') ORDER BY id LIMIT 40")
       .all();
     const words = [...new Set(sample.map((n) => n.name.slice(0, 5)))].slice(0, 20);
-    const files = db.prepare("SELECT path FROM files ORDER BY path LIMIT 20").all().map((f) => f.path);
+    // Code files: documents are the doc layer, which the SQLite baseline
+    // never indexed, and the sync below edits the first two of these.
+    const files = db.prepare("SELECT path FROM files WHERE language <> 'markdown' ORDER BY path LIMIT 20").all().map((f) => f.path);
     // Storage sizes differ by backend and the update time by run.
     const { dbSizeBytes: _size, walSizeBytes: _wal, lastUpdated: _when, ...stats } = cg.getStats();
     const battery = {

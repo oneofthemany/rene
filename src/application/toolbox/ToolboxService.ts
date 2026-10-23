@@ -91,6 +91,9 @@ const declareTopic = (input: RecordTopicInput) => ({
   summary: input.summary,
   evidence: input.evidence,
   turns: input.turns,
+  phase: input.phase ?? null,
+  plan: input.plan ?? null,
+  estimate: input.estimate ?? null,
   declared_at: new Date().toISOString(),
   created: input.topic_id === undefined,
 });
