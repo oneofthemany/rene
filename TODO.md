@@ -78,6 +78,75 @@
   source graph first. Compare tool calls, tokens and time on one real code
   question with and without it.
 
+## Agent usage and budget
+
+The usage bar (topic `d3c08a85-f721-4c00-8aa0-7c4816b5d9c1`) and what is
+left of it. Each task has a budget, what it needs first and what it
+overlaps. Budgets are model calls, then the share of Claude's 5-hour
+window, measured on 23 Oct: about 5 calls per percent at a 250k-token
+context (this conversation), about 20 per percent expected in a fresh
+conversation (60k). Judge each estimate against what the task used.
+
+**Done:** per-session tokens and time (working, waiting on commands,
+waiting on you, wasted); waste reasons and wrong-assumption signals; plan
+windows, live from Claude Code's status line, with Copilot's quota; limit
+resets and the `/limit-reset` button; up-front `estimate`, `plan` and
+`phase` on `record_topic`, judged across conversations and restarts;
+deviation by cause (assumption, you, instructions, blocked, unplanned and
+skipped phases).
+
+In order (a task needs those above it it names):
+
+1. **A window starting mid-turn drops that turn** (`turnsOf` in
+   `frontend/usage.mjs`). Needs nothing. 5–10 calls (under 1%).
+2. **Compact `rene call` output** (the item under Closing items: it prints
+   the whole Evidence envelope; a topic declaration costs about 340 tokens,
+   re-read on every later call). Needs nothing; overlaps the topic gate's
+   expected output. 20–35 calls (2–7%). Largest saving per call.
+3. **Refusals that state the fix**: the gate and argument validation say
+   the right form (argument names, the allowed command). Needs nothing;
+   overlaps 2 (same output path). 15–25 calls (1–5%).
+4. **Budget panel in the usage bar**: for the current task and the next
+   ones, the estimate as a share of the window at the measured calls per
+   percent and the live figure, and whether it fits now, fits in a fresh
+   conversation, or waits for the reset. Needs the estimate fields and live
+   limits (done). 25–40 calls (2–8%).
+5. **One owner for attribution.** `frontend/topics.mjs` files a turn under
+   the last topic it declares; `frontend/usage.mjs` counts each call under
+   the topic and phase in force. Make one module own "which topic and phase
+   was this call for", and have History use it (the Turn attribution and
+   History should nest items, below, are the same fix). Needs nothing;
+   must come before 6, or the store records two answers. 40–60 calls
+   (2–12%).
+6. **Usage store**: one row per model call and per tool call (time, agent,
+   conversation, project, topic, phase, model, tokens, context size, result
+   size, outcome, waste reason and deviation cause with their evidence
+   line), DuckDB over Parquet. Needs 5. Overlaps the telemetry item
+   (decide first whether usage is its own store or a `rene-usage` topic in
+   the journal: one owner) and CodeGraph's store (reuse its sealing and
+   layout, `packages/codegraph-store`). 60–100 calls (3–20%).
+7. **Usage view**: charts sliced by agent, project, conversation › topic ›
+   phase, waste reason, deviation cause and time; estimate against actual;
+   drill-down to the turn and call. Needs 6. 60–90 calls (3–18%).
+8. **Tasks from TODO.md and `docs/plans/*.md`**: each item a task with a
+   stable id (file and heading, from CodeGraph's doc layer), its estimate
+   and its topic. Needs 4; overlaps `docs/plans/graph.md` steps 3–4 (doc
+   sections in the graph). 40–70 calls (2–14%).
+9. **Impact, overlap and prerequisites per task**: what each item would
+   change (its named files and symbols, through `documents` links and
+   `analyze_source_impact`), which items touch the same symbols, and which
+   need another's work first (stated: "after", "needs"; or derived: it
+   changes what another creates). Order the list by them. Needs 8;
+   overlaps the roadmap's Link topics to code. 50–90 calls (3–18%).
+10. **Feed estimate accuracy back**: at session start, the agent's own bias
+    in this project ("time estimates ran 3x high") and its recent misses
+    ("search_text takes root and query; jq isn't installed"). Needs 6.
+    20–30 calls (1–6%).
+11. **Limit-reset availability**: Claude Code asks the usage API for
+    resets only at a limit or for `/limit-reset`. Asking it from the
+    workbench means calling Anthropic's API with the user's login: needs
+    the user's decision first.
+
 ## Closing items (MCP → local CLI toolkit)
 
 Finish these before the move off MCP is called done.
