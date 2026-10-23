@@ -413,6 +413,51 @@ it("counts use per phase and names what caused each deviation from the plan", ()
   });
 });
 
+it("counts the wait on a backgrounded command as waiting on commands, not on you", () => {
+  const records = [
+    prompt(0, "run the tests"),
+    call(10 * SECOND, "u1", 10, "Bash", { command: "npm test" }),
+    result(
+      11 * SECOND,
+      "u1",
+      "Command was moved to the background (ID: b1). You will be notified when it completes.",
+    ),
+    turnEnd(20 * SECOND),
+    // The command ends four minutes later and wakes the agent.
+    {
+      type: "user",
+      timestamp: at(4 * MINUTE + 20 * SECOND),
+      message: { content: "<task-notification>done</task-notification>" },
+    },
+    {
+      type: "assistant",
+      timestamp: at(4 * MINUTE + 30 * SECOND),
+      message: {
+        id: "msg_w",
+        model: "claude-opus-5-5",
+        usage: { input_tokens: 1, output_tokens: 5 },
+        content: [{ type: "text", text: "Tests pass." }],
+      },
+    },
+    turnEnd(4 * MINUTE + 40 * SECOND),
+  ];
+  const usage = sessionUsage({
+    conversations: [
+      {
+        meta: { session: "s", agent: "Claude Code", format: "claude-code" },
+        events: records.flatMap((record) => eventsFromRecord(record)),
+      },
+    ],
+    since: T0,
+    now: T0 + 5 * MINUTE,
+  });
+  expect(usage.time).toMatchObject({
+    working: 30 * SECOND,
+    waitingOnTools: 4 * MINUTE + 10 * SECOND,
+    waitingOnYou: 20 * SECOND,
+  });
+});
+
 it("takes the plan's live limits from the status line over Claude Code's older cached figures", () => {
   const empty = {
     calls: 0,

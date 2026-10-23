@@ -43,6 +43,7 @@ function timeBar(time) {
   const parts = [
     ["productive", "Working", productive],
     ["wasted", "Wasted", time.wasted],
+    ["tools", "Waiting on commands", time.waitingOnTools ?? 0],
     ["waiting", "Waiting on you", time.waitingOnYou],
   ];
   const total = parts.reduce((sum, [, , ms]) => sum + ms, 0);

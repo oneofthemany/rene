@@ -1757,6 +1757,11 @@ progress {
   background: var(--rule);
 }
 
+.usage-tools {
+  background: var(--observed);
+  opacity: 0.5;
+}
+
 .usage-legend {
   display: flex;
   flex-wrap: wrap;

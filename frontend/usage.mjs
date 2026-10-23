@@ -18,6 +18,9 @@ const MAX_EXAMPLES = 3;
 const EXAMPLE_CHARS = 160;
 const ASKING = new Set(["AskUserQuestion", "ask_user"]);
 const TOPIC_TOOL = "record_topic";
+// Claude Code's word that a command went on running in the background; it
+// wakes the agent with a notification when it ends.
+const BACKGROUND = /moved to the background/iu;
 // Tools that change a file, after which reading it again is not a repeat.
 const WRITING =
   /^(Edit|Write|MultiEdit|NotebookEdit|edit|create|write_file|edit_file)$/u;
@@ -274,6 +277,7 @@ export function sessionUsage({ conversations, since, now, topics, actuals }) {
       });
   };
   let working = 0;
+  let waitingOnTools = 0;
   let asking = 0;
   let turnCount = 0;
   let running = false;
@@ -341,11 +345,30 @@ export function sessionUsage({ conversations, since, now, topics, actuals }) {
       if (topic)
         deviations.push({ topic, phase, cause, kind, at, text: example(text) });
     };
+    let backgrounded = false;
     for (const [index, turn] of turns.entries()) {
       turnCount += 1;
       firstActivity = Math.min(firstActivity ?? turn.start, turn.start);
       if (turn.running) running = true;
       const next = turns[index + 1];
+      // A turn the agent began itself, while a command it sent to the
+      // background ran: the gap before it was spent waiting on that
+      // command, not on you.
+      const previous = turns[index - 1];
+      if (turn.prompt) backgrounded = false;
+      else if (
+        backgrounded &&
+        previous &&
+        turn.events[0]?.kind !== "interjection"
+      )
+        waitingOnTools += Math.max(0, turn.start - previous.end);
+      if (
+        turn.events.some(
+          (event) =>
+            event.kind === "tool_result" && BACKGROUND.test(event.text ?? ""),
+        )
+      )
+        backgrounded = true;
       const span = turn.end - turn.start;
       // Waiting on you inside the turn: questions it asked you.
       let asked = 0;
@@ -571,7 +594,8 @@ export function sessionUsage({ conversations, since, now, topics, actuals }) {
     time: {
       elapsed,
       working,
-      waitingOnYou: Math.max(0, elapsed - working),
+      waitingOnYou: Math.max(0, elapsed - working - waitingOnTools),
+      waitingOnTools,
       askingYou: asking,
       wasted: Math.min(wastedMs, working),
     },
@@ -595,7 +619,7 @@ export function sessionUsage({ conversations, since, now, topics, actuals }) {
     method: {
       tokens:
         "The agent's own per-call counts; Copilot CLI records its main model's tokens only when the session ends, and its premium requests as it goes.",
-      time: "Working is each turn from your message to the agent's last event (to now while it runs), less time it waited on a question to you; waiting on you is the rest.",
+      time: "Working is each turn from your message to the agent's last event (to now while it runs), less time it waited on a question to you; waiting on commands is the gap before a turn the agent began itself while a command it sent to the background ran; waiting on you is the rest.",
       waste:
         "Wasted time is work your next message corrected or you stopped, refused and failed calls up to the agent's next call, repeated identical calls, and compaction; overlapping time counts once. Output tokens in wasted time are measured; context tokens are estimated at 4 characters a token from what the calls returned.",
       signals:
