@@ -188,28 +188,32 @@ function exclusiveTime(intervals) {
 function turnsOf(meta, events, since, now) {
   const turns = [];
   let turn;
-  // The prompt of a turn still under way when the window starts.
+  // A turn still under way when the window starts: its prompt, or null for
+  // work a background task woke after the turn before it ended.
   let earlier;
   for (const event of events) {
     const at = timeOf(event);
     if (at === undefined) continue;
     if (at < since) {
-      if (event.kind === "prompt") earlier = event;
+      if (event.kind === "prompt") earlier = { prompt: event };
       else if (event.kind === "turn_end") earlier = undefined;
+      else earlier ??= { prompt: null };
       continue;
     }
-    // That turn's work inside the window is counted from the window's start.
-    if (!turn && earlier && event.kind !== "prompt") {
+    // Work before the window's first prompt: that turn's is counted from the
+    // window's start, and work after an ended turn from its own first event.
+    if (!turn && event.kind !== "prompt") {
+      if (!earlier && event.kind === "turn_end") continue;
+      const start = earlier ? since : at;
       turn = {
         meta,
-        start: since,
-        end: since,
+        start,
+        end: start,
         events: [],
-        prompt: earlier,
+        prompt: earlier?.prompt ?? null,
         ended: false,
       };
       turns.push(turn);
-      earlier = undefined;
     }
     if (event.kind === "prompt") {
       turn = {
@@ -223,7 +227,6 @@ function turnsOf(meta, events, since, now) {
       turns.push(turn);
       continue;
     }
-    if (!turn) continue;
     // Work after a turn ended (a background task finishing wakes the agent)
     // is its own turn, not the ended one stretched over the wait.
     if (turn.ended && event.kind !== "turn_end") {

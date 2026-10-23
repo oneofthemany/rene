@@ -97,8 +97,10 @@ skipped phases).
 
 In order (a task needs those above it it names):
 
-1. **A window starting mid-turn drops that turn** (`turnsOf` in
-   `frontend/usage.mjs`). Needs nothing. 5–10 calls (under 1%).
+1. **Done: a window starting mid-turn drops that turn** (`turnsOf` in
+   `frontend/usage.mjs`). A prompted turn was already kept; a turn a
+   background task woke (no prompt) was still dropped, and now counts from
+   the window's start.
 2. **Compact `rene call` output** (the item under Closing items: it prints
    the whole Evidence envelope; a topic declaration costs about 340 tokens,
    re-read on every later call). Needs nothing; overlaps the topic gate's
@@ -111,6 +113,18 @@ In order (a task needs those above it it names):
    percent and the live figure, and whether it fits now, fits in a fresh
    conversation, or waits for the reset. Needs the estimate fields and live
    limits (done). 25–40 calls (2–8%).
+   **Weigh every window, not only the session.** The weekly limit can be
+   the tighter one: on 23 Oct the session window rose 54% → 89% (35
+   points) while the weekly rose 49% → 55%, so a full session costs very
+   roughly 17 weekly points (two readings only), and at 56% weekly with
+   the reset on 28 Oct 15:00 about 2–3 heavy sessions were left. For each
+   task show its cost in both windows, name the binding one, and project
+   when the weekly runs out at the recent pace (weekly points per session
+   point, measured from the live figures the status line records over
+   time, not two readings). Recommend fresh conversations for big tasks:
+   calls per percent measured 2.3 at a 450k context against an expected
+   ~20 at 60k. Needs the live figures kept over time (keep each status
+   line reading, not only the latest).
 5. **One owner for attribution.** `frontend/topics.mjs` files a turn under
    the last topic it declares; `frontend/usage.mjs` counts each call under
    the topic and phase in force. Make one module own "which topic and phase
@@ -146,6 +160,31 @@ In order (a task needs those above it it names):
     resets only at a limit or for `/limit-reset`. Asking it from the
     workbench means calling Anthropic's API with the user's login: needs
     the user's decision first.
+12. **Show the usage bar as pictures, not only text**
+    (`frontend/public/usage.js`). Today every figure is a line of text
+    ("Model calls 256 of 100–160 over", the waste table), so you have to read
+    it all to see what's off. Present the same data visually, **without
+    dropping or softening any finding**: every figure, label, basis ("from
+    the 3 of 54 finished topics"), over/under verdict and example line
+    stays on screen or one click away, and each picture keeps its text
+    beside it or as its accessible label. Shapes to try:
+    - **Estimate against actual**: per measure (calls, output, context
+      read, working), the low–high range as a band with the actual as a
+      marker, past the band in the over colour; the first estimate and
+      the re-estimate both shown, for the task and each phase.
+    - **Time**: one stacked bar for elapsed (working, waiting on
+      commands, waiting on you, asking you, wasted), and time so far
+      against time left as a progress bar with its range.
+    - **Phases**: a strip in plan order, each phase sized by its working
+      time (or calls), unplanned and skipped phases marked.
+    - **Deviation**: one bar split by cause (assumption, instructions,
+      blocked, you, unplanned), counts on the segments.
+    - **Waste**: horizontal bars per reason (time, with count, output and
+      context tokens beside), the latest example under each, the rest
+      expandable.
+      Works in light and dark and at narrow widths. Needs nothing; overlaps
+      7 (reuse its chart pieces, or build them here first for 7 to reuse)
+      and 4 (the budget panel goes in the same bar). 25–45 calls (2–9%).
 
 ## Closing items (MCP → local CLI toolkit)
 

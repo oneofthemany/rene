@@ -542,6 +542,39 @@ it("keeps a turn under way when the window starts, counted from the window's sta
   expect(usage.time.working).toBe(45 * SECOND + 20 * SECOND);
 });
 
+it("keeps work a background task woke when the window starts inside it", () => {
+  const reply = (ms: number, id: string) => ({
+    type: "assistant",
+    timestamp: at(ms),
+    message: {
+      id,
+      model: "claude-opus-5-5",
+      usage: { input_tokens: 1, output_tokens: 5 },
+      content: [{ type: "text", text: id }],
+    },
+  });
+  const records = [
+    prompt(0, "run the tests"),
+    turnEnd(20 * SECOND),
+    // Woken with no prompt of yours, after the turn above ended.
+    reply(4 * MINUTE + 10 * SECOND, "msg_w1"),
+    reply(5 * MINUTE, "msg_w2"),
+    turnEnd(5 * MINUTE + 10 * SECOND),
+  ];
+  const usage = sessionUsage({
+    conversations: [
+      {
+        meta: { session: "s", agent: "Claude Code", format: "claude-code" },
+        events: records.flatMap((record) => eventsFromRecord(record)),
+      },
+    ],
+    since: T0 + 4 * MINUTE + 20 * SECOND,
+    now: T0 + 6 * MINUTE,
+  });
+  expect(usage.turns).toBe(1);
+  expect(usage.time.working).toBe(50 * SECOND);
+});
+
 it("takes the plan's live limits from the status line over Claude Code's older cached figures", () => {
   const empty = {
     calls: 0,
