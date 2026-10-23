@@ -145,13 +145,17 @@ const emptyTokens = () => ({
   cacheRead: 0,
   cacheWrite: 0,
   output: 0,
+  aiCreditsNano: 0,
 });
 const addTokens = (into, usage) => {
   into.input += usage.input;
   into.cacheRead += usage.cacheRead;
   into.cacheWrite += usage.cacheWrite;
   into.output += usage.output;
+  into.aiCreditsNano += usage.aiCreditsNano ?? 0;
 };
+// Credits are billed in billionths, and shown as the agent shows them.
+const CREDITS_PER_NANO = 1e-9;
 
 /** Interval lengths per reason, each moment counted once under its strongest reason. */
 function exclusiveTime(intervals) {
@@ -184,9 +188,29 @@ function exclusiveTime(intervals) {
 function turnsOf(meta, events, since, now) {
   const turns = [];
   let turn;
+  // The prompt of a turn still under way when the window starts.
+  let earlier;
   for (const event of events) {
     const at = timeOf(event);
-    if (at === undefined || at < since) continue;
+    if (at === undefined) continue;
+    if (at < since) {
+      if (event.kind === "prompt") earlier = event;
+      else if (event.kind === "turn_end") earlier = undefined;
+      continue;
+    }
+    // That turn's work inside the window is counted from the window's start.
+    if (!turn && earlier && event.kind !== "prompt") {
+      turn = {
+        meta,
+        start: since,
+        end: since,
+        events: [],
+        prompt: earlier,
+        ended: false,
+      };
+      turns.push(turn);
+      earlier = undefined;
+    }
     if (event.kind === "prompt") {
       turn = {
         meta,
@@ -244,6 +268,7 @@ export function sessionUsage({ conversations, since, now, topics, actuals }) {
   const byModel = new Map();
   let calls = 0;
   let context;
+  let contextLimit = null;
   let premiumRequests;
   const intervals = [];
   const waste = new Map(
@@ -293,7 +318,7 @@ export function sessionUsage({ conversations, since, now, topics, actuals }) {
   for (const { meta, events } of conversations) {
     const turns = turnsOf(meta, events, since, now);
     // Usage: a call's records repeat its counts, so keep one per call; a
-    // session total replaces the calls of the same model.
+    // session total counts only for a model whose calls weren't recorded.
     const perCall = new Map();
     const perSession = new Map();
     let lastCall;
@@ -308,12 +333,14 @@ export function sessionUsage({ conversations, since, now, topics, actuals }) {
         lastCall = event;
       }
     }
-    const counted = [...perCall.values()].filter(
-      (usage) => !perSession.has(usage.model),
+    const callModels = new Set([...perCall.values()].map((use) => use.model));
+    const counted = [...perCall.values()];
+    const sessionTotals = [...perSession.values()].filter(
+      (usage) => !callModels.has(usage.model),
     );
     // This conversation's own totals, by its id.
     const own = { ...emptyTokens(), calls: 0 };
-    for (const usage of [...counted, ...perSession.values()]) {
+    for (const usage of [...counted, ...sessionTotals]) {
       addTokens(tokens, usage);
       addTokens(own, usage);
       if (usage.scope === "call") own.calls += 1;
@@ -326,9 +353,15 @@ export function sessionUsage({ conversations, since, now, topics, actuals }) {
         calls += 1;
       }
     }
-    if (lastCall)
+    if (lastCall) {
       context = lastCall.input + lastCall.cacheRead + lastCall.cacheWrite;
-    if (turns.length === 0 && counted.length === 0 && perSession.size === 0)
+      contextLimit = lastCall.contextLimit ?? null;
+    }
+    if (
+      turns.length === 0 &&
+      counted.length === 0 &&
+      sessionTotals.length === 0
+    )
       continue;
     conversationsUsed.push({
       session: meta.session,
@@ -587,6 +620,10 @@ export function sessionUsage({ conversations, since, now, topics, actuals }) {
         tokens.input + tokens.cacheRead + tokens.cacheWrite + tokens.output,
       calls,
       context: context ?? null,
+      contextLimit,
+      aiCredits: tokens.aiCreditsNano
+        ? tokens.aiCreditsNano * CREDITS_PER_NANO
+        : null,
       compactions,
       premiumRequests: premiumRequests ?? null,
       byModel: [...byModel.values()].sort((a, b) => b.output - a.output),
@@ -618,7 +655,7 @@ export function sessionUsage({ conversations, since, now, topics, actuals }) {
     deviations,
     method: {
       tokens:
-        "The agent's own per-call counts; Copilot CLI records its main model's tokens only when the session ends, and its premium requests as it goes.",
+        "The agent's own per-call counts, as each call finishes; context is what the last call read, against the prompt window it was allowed where the agent records it. Credits are what the agent's service billed each call, the figure the agent shows itself. A Copilot CLI session old enough to have recorded no calls one by one counts from its totals at shutdown instead, and its premium requests come as it goes.",
       time: "Working is each turn from your message to the agent's last event (to now while it runs), less time it waited on a question to you; waiting on commands is the gap before a turn the agent began itself while a command it sent to the background ran; waiting on you is the rest.",
       waste:
         "Wasted time is work your next message corrected or you stopped, refused and failed calls up to the agent's next call, repeated identical calls, and compaction; overlapping time counts once. Output tokens in wasted time are measured; context tokens are estimated at 4 characters a token from what the calls returned.",
@@ -673,6 +710,10 @@ function actualOf(calls, time) {
   return {
     model_calls: used.length,
     output_tokens: used.reduce((sum, usage) => sum + usage.output, 0),
+    ai_credits: used.reduce(
+      (sum, usage) => sum + (usage.aiCreditsNano ?? 0) * CREDITS_PER_NANO,
+      0,
+    ),
     context_tokens: used.reduce(
       (sum, usage) => sum + usage.input + usage.cacheRead + usage.cacheWrite,
       0,

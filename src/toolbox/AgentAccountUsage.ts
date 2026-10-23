@@ -212,7 +212,9 @@ interface FileState {
   mtimeMs: number;
   /** Claude Code repeats a call's usage on each of its records: one per call. */
   calls: Map<string, Entry>;
-  /** Copilot CLI's session totals, which replace its calls'. */
+  /** Models some call of was counted above, so a session total would repeat it. */
+  callModels: Set<string>;
+  /** Session totals, counted only for a model whose calls weren't recorded. */
   sessions: Map<string, Entry>;
   premium: Entry[];
   lastPremium: number;
@@ -225,7 +227,7 @@ const READ_SLICE = 8 * 1024 * 1024;
 const WORTH: Readonly<Record<LedgerAgent, RegExp>> = {
   "claude-code": /"usage"/u,
   "copilot-cli":
-    /"(model\.model_call_success|session\.shutdown|session\.usage_checkpoint)"/u,
+    /"(model\.model_call_success|session\.usage_record|session\.shutdown|session\.usage_checkpoint)"/u,
 };
 
 async function claudeTranscripts(directory: string): Promise<string[]> {
@@ -280,7 +282,10 @@ function take(agent: LedgerAgent, state: FileState, value: unknown) {
       if (!entry) continue;
       if (event.scope === "session")
         state.sessions.set(event.model ?? "", entry);
-      else state.calls.set(event.call ?? `${state.calls.size}`, entry);
+      else {
+        state.calls.set(event.call ?? `${state.calls.size}`, entry);
+        state.callModels.add(event.model ?? "");
+      }
     }
   }
 }
@@ -317,6 +322,7 @@ const freshState = (): FileState => ({
   offset: 0,
   mtimeMs: 0,
   calls: new Map(),
+  callModels: new Set(),
   sessions: new Map(),
   premium: [],
   lastPremium: 0,
@@ -362,10 +368,13 @@ export function createUsageLedger(env: Environment, horizonMs: number) {
       for (const file of files.values()) {
         if (file.agent !== agent) continue;
         const { state } = file;
-        const sessionModels = state.sessions.size > 0;
+        // Calls are preferred: they carry their own times, so they fall in
+        // the right window, where a session total lands at the session's end.
         const entries = [
-          ...(sessionModels ? [] : state.calls.values()),
-          ...state.sessions.values(),
+          ...state.calls.values(),
+          ...[...state.sessions]
+            .filter(([model]) => !state.callModels.has(model))
+            .map(([, entry]) => entry),
           ...state.premium,
         ];
         for (const entry of entries) {

@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 
-import { parseReaCallCommands } from "./ReaCallCommand.js";
+import { parseReaCallCommands, reneCallFailed } from "./ReaCallCommand.js";
 
 /**
  * Agent conversations: what was asked in a project folder, what the agent
@@ -55,8 +55,13 @@ export type ConversationEvent =
   /**
    * Tokens one model call used (`scope: "call"`; records of one call share
    * its `call` id and repeat its usage), or a session's running total for a
-   * model (`scope: "session"`, the latest replaces earlier ones). `input`
-   * excludes cache reads and writes.
+   * model (`scope: "session"`, the latest replaces earlier ones, and covers
+   * only models whose calls weren't recorded one by one). `input` excludes
+   * cache reads and writes. `context_limit` is the prompt window the call
+   * was allowed, where the agent records it, so what a call read can be read
+   * as a share of it. `ai_credits_nano` is what the call was billed in the
+   * agent service's own unit, in billionths of a credit, where it bills in
+   * one; the agent shows the user the same figure.
    */
   | {
       kind: "usage";
@@ -68,6 +73,8 @@ export type ConversationEvent =
       cache_read: number;
       cache_write: number;
       output: number;
+      context_limit: number | null;
+      ai_credits_nano: number | null;
     }
   /** Billing units the agent's service reported so far in the session. */
   | { kind: "billing"; at: string | null; premium_requests: number }
@@ -209,6 +216,8 @@ export function claudeUsage(value: unknown): ConversationEvent[] {
       cache_read: count(usage.cache_read_input_tokens),
       cache_write: count(usage.cache_creation_input_tokens),
       output: count(usage.output_tokens),
+      context_limit: null,
+      ai_credits_nano: null,
     },
   ];
 }
@@ -263,7 +272,10 @@ export function claudeEvents(value: unknown): ConversationEvent[] {
             kind: "tool_result",
             at: time,
             id: typeof part.tool_use_id === "string" ? part.tool_use_id : null,
-            is_error: part.is_error === true,
+            // A failed `rene call` piped through a filter exits 0; its
+            // receipt on stderr still says it failed.
+            is_error:
+              part.is_error === true || reneCallFailed(textOf(part.content)),
             text: textOf(part.content),
           });
         else if (part.type === "text" && typeof part.text === "string") {
@@ -375,6 +387,38 @@ export function copilotEvents(value: unknown): ConversationEvent[] {
           cache_read: cacheRead,
           cache_write: cacheWrite,
           output: count(usage.completion_tokens),
+          context_limit: null,
+          ai_credits_nano: null,
+        },
+      ];
+    }
+    // One model call Copilot CLI billed, written as the call finishes: the
+    // only per-call record of its main model, whose calls `model_call_success`
+    // doesn't cover. `inputTokens` is the whole prompt, cache included.
+    case "session.usage_record": {
+      const usage = record(data.usage);
+      const cacheRead = count(usage.cacheReadTokens);
+      const cacheWrite = count(usage.cacheWriteTokens);
+      const accounting = record(usage.accounting);
+      const call =
+        typeof accounting.usageId === "string"
+          ? accounting.usageId
+          : typeof usage.apiCallId === "string"
+            ? usage.apiCallId
+            : null;
+      return [
+        {
+          kind: "usage",
+          at: time,
+          scope: "call",
+          call,
+          model: typeof usage.model === "string" ? usage.model : null,
+          input: Math.max(0, count(usage.inputTokens) - cacheRead - cacheWrite),
+          cache_read: cacheRead,
+          cache_write: cacheWrite,
+          output: count(usage.outputTokens),
+          context_limit: countOrNull(usage.maxPromptTokens),
+          ai_credits_nano: countOrNull(record(usage.copilotUsage).totalNanoAiu),
         },
       ];
     }
@@ -387,8 +431,9 @@ export function copilotEvents(value: unknown): ConversationEvent[] {
         },
       ];
     case "session.shutdown": {
-      // The session's totals per model: Copilot doesn't record its main
-      // model's calls one by one.
+      // The session's totals per model, for a session whose calls weren't
+      // recorded one by one (Copilot CLI before `session.usage_record`): a
+      // reader counts these only for a model it saw no call of.
       const events: ConversationEvent[] = [
         {
           kind: "billing",
@@ -412,6 +457,8 @@ export function copilotEvents(value: unknown): ConversationEvent[] {
           cache_read: cacheRead,
           cache_write: cacheWrite,
           output: count(usage.outputTokens),
+          context_limit: null,
+          ai_credits_nano: null,
         });
       }
       return events;
@@ -439,7 +486,10 @@ export function copilotEvents(value: unknown): ConversationEvent[] {
           kind: "tool_result",
           at: time,
           id: typeof data.toolCallId === "string" ? data.toolCallId : null,
-          is_error: data.success === false,
+          is_error:
+            data.success === false ||
+            reneCallFailed(textOf(record(data.result).content)) ||
+            shellCommandFailed(textOf(record(data.result).content)),
           text: textOf(record(data.result).content),
         },
       ];
@@ -447,6 +497,18 @@ export function copilotEvents(value: unknown): ConversationEvent[] {
       return [];
   }
 }
+
+/**
+ * Copilot CLI counts a shell call that ran as a success whatever the command
+ * returned, and records the status only in the line it appends to the output.
+ * A command that failed is a failed call, so read that line. A command it
+ * moved to the background or stopped records no status and is not a failure.
+ */
+const SHELL_STATUS = /<shellId: [^>]*? exit code (\d+)>$/u;
+const shellCommandFailed = (text: string): boolean => {
+  const status = SHELL_STATUS.exec(text.trimEnd());
+  return status !== null && status[1] !== "0";
+};
 
 /** The `cwd:` line of a Copilot session's workspace.yaml. */
 const copilotFolder = (yaml: string): string | undefined => {

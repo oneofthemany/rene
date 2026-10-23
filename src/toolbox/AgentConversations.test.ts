@@ -11,6 +11,7 @@ import {
   readEvents,
   turnsOf,
 } from "./AgentConversations.js";
+import { failureReceipt, reneCallFailed } from "./ReaCallCommand.js";
 
 describe("agent transcripts", () => {
   it("reads a Claude Code turn: prompt, reasoning, reply, rene and built-in tools, results", () => {
@@ -130,6 +131,26 @@ describe("agent transcripts", () => {
     expect(events[2]).toMatchObject({ tool: "search_text", rene: true });
     expect(events[3]).toMatchObject({ is_error: true, text: "failed" });
   });
+
+  it("reads the status of a shell command Copilot counted as a success", () => {
+    const result = (content: string) =>
+      copilotEvents({
+        type: "tool.execution_complete",
+        timestamp: "t1",
+        data: { toolCallId: "c", success: true, result: { content } },
+      })[0];
+    // Copilot counts the call a success whatever the command returned.
+    expect(
+      result("jq: parse error\n<shellId: 65 completed with exit code 5>"),
+    ).toMatchObject({ is_error: true });
+    expect(result("ok\n<shellId: 7 completed with exit code 0>")).toMatchObject(
+      { is_error: false },
+    );
+    // A command still running, or one the user stopped, reports no status.
+    expect(
+      result("<shellId: 9 moved to background by the user. You will be…>"),
+    ).toMatchObject({ is_error: false });
+  });
 });
 
 describe("what Claude Code records about usage and interruptions", () => {
@@ -205,6 +226,8 @@ describe("what Claude Code records about usage and interruptions", () => {
         cache_read: 900,
         cache_write: 50,
         output: 40,
+        ai_credits_nano: null,
+        context_limit: null,
       },
       { kind: "reply", at: "t1", text: "Working." },
       { kind: "reply", at: "t1", text: "No response requested." },
@@ -248,6 +271,23 @@ describe("what Copilot CLI records about usage and interruptions", () => {
         },
       },
       {
+        // Its main model's own call, written as the call finished.
+        type: "session.usage_record",
+        timestamp: "t35",
+        data: {
+          usage: {
+            model: "claude-opus-4.8",
+            inputTokens: 1000,
+            outputTokens: 50,
+            cacheReadTokens: 800,
+            cacheWriteTokens: 150,
+            maxPromptTokens: 200000,
+            accounting: { usageId: "msg_9" },
+            copilotUsage: { totalNanoAiu: 4500000000 },
+          },
+        },
+      },
+      {
         type: "session.shutdown",
         timestamp: "t4",
         data: {
@@ -278,9 +318,26 @@ describe("what Copilot CLI records about usage and interruptions", () => {
         cache_read: 100,
         cache_write: 0,
         output: 35,
+        context_limit: null,
+        ai_credits_nano: null,
+      },
+      {
+        kind: "usage",
+        at: "t35",
+        scope: "call",
+        call: "msg_9",
+        model: "claude-opus-4.8",
+        input: 50,
+        cache_read: 800,
+        cache_write: 150,
+        output: 50,
+        context_limit: 200000,
+        ai_credits_nano: 4500000000,
       },
       { kind: "billing", at: "t4", premium_requests: 7 },
       {
+        // The shutdown total repeats the call above: a reader counts a
+        // session total only for a model it saw no call of.
         kind: "usage",
         at: "t4",
         scope: "session",
@@ -290,6 +347,8 @@ describe("what Copilot CLI records about usage and interruptions", () => {
         cache_read: 800,
         cache_write: 150,
         output: 50,
+        context_limit: null,
+        ai_credits_nano: null,
       },
     ]);
   });
@@ -351,5 +410,39 @@ describe("finding a folder's conversations", () => {
     expect(await readEvents(claudeSource)).toEqual([
       { kind: "prompt", at: null, text: "hello" },
     ]);
+  });
+});
+
+describe("failed rene calls behind a pipe", () => {
+  it("counts a result carrying rene call's failure receipt as failed", () => {
+    const output = `{"isError":true}\n${failureReceipt("search_text")}`;
+    const claude = claudeEvents({
+      type: "user",
+      timestamp: "t1",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "a",
+            is_error: false,
+            content: output,
+          },
+        ],
+      },
+    });
+    const copilot = copilotEvents({
+      type: "tool.execution_complete",
+      timestamp: "t2",
+      data: { toolCallId: "b", success: true, result: { content: output } },
+    });
+    expect(
+      [...claude, ...copilot].map(
+        (event) => (event as { is_error: boolean }).is_error,
+      ),
+    ).toEqual([true, true]);
+    // Text that only quotes the words is not a receipt.
+    expect(
+      reneCallFailed("see `rene call: x failed; its result is above.` in docs"),
+    ).toBe(false);
   });
 });

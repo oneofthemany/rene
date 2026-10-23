@@ -467,6 +467,19 @@ const EARLIER_RECEIPT = "rea call: declared topic ";
  */
 export const declarationReceipt = (topicId: string) => `${RECEIPT}${topicId}\n`;
 
+const FAILURE = /^rene call: (\S+) failed; its result is above\.$/mu;
+
+/**
+ * The line `rene call` writes to stderr when the tool call failed, so a
+ * filter on its stdout doesn't hide the failure from the agent or its
+ * transcript.
+ */
+export const failureReceipt = (tool: string) =>
+  `rene call: ${tool} failed; its result is above.\n`;
+
+/** Whether a shell's output holds a failed `rene call`'s receipt. */
+export const reneCallFailed = (text: string) => FAILURE.test(text);
+
 /**
  * The topics a shell command's output shows were declared: a declaration
  * receipt, or a line of record_topic's Evidence as `rene call record_topic`

@@ -74,6 +74,68 @@ const CLAUDE_STATE = {
   },
 };
 
+/**
+ * A Copilot CLI session that records each call as it makes it, and repeats
+ * those calls in its shutdown totals alongside a model that recorded none.
+ */
+const COPILOT_SESSION = [
+  {
+    type: "session.usage_record",
+    timestamp: T(0),
+    data: {
+      usage: {
+        model: "claude-opus-5",
+        inputTokens: 1000,
+        outputTokens: 50,
+        cacheReadTokens: 800,
+        cacheWriteTokens: 150,
+        maxPromptTokens: 200000,
+        accounting: { usageId: "u1" },
+      },
+    },
+  },
+  {
+    type: "session.usage_record",
+    timestamp: T(30),
+    data: {
+      usage: {
+        model: "claude-opus-5",
+        inputTokens: 2000,
+        outputTokens: 60,
+        cacheReadTokens: 1900,
+        cacheWriteTokens: 50,
+        maxPromptTokens: 200000,
+        accounting: { usageId: "u2" },
+      },
+    },
+  },
+  {
+    type: "session.shutdown",
+    timestamp: T(40),
+    data: {
+      totalPremiumRequests: 5,
+      modelMetrics: {
+        "claude-opus-5": {
+          usage: {
+            inputTokens: 3000,
+            outputTokens: 110,
+            cacheReadTokens: 2700,
+            cacheWriteTokens: 200,
+          },
+        },
+        "gpt-5.4-nano": {
+          usage: {
+            inputTokens: 600,
+            outputTokens: 35,
+            cacheReadTokens: 100,
+            cacheWriteTokens: 0,
+          },
+        },
+      },
+    },
+  },
+];
+
 describe("account usage", () => {
   let root: string;
   let env: Record<string, string>;
@@ -131,6 +193,7 @@ describe("account usage", () => {
             },
           },
         },
+        ...COPILOT_SESSION,
       ]),
     );
     await writeFile(
@@ -165,6 +228,24 @@ describe("account usage", () => {
     // A second read finds nothing new and counts nothing twice.
     await ledger.refresh(now);
     expect(ledger.totals("claude-code", 0, now).calls).toBe(3);
+  });
+
+  it("counts Copilot's recorded calls, not the shutdown totals repeating them", async () => {
+    const now = Date.parse(T(60));
+    const ledger = createUsageLedger(env, Number.MAX_SAFE_INTEGER);
+    await ledger.refresh(now);
+    // The two calls, plus the shutdown total of the model that recorded
+    // none; claude-opus-5's own shutdown total would count them twice.
+    expect(ledger.totals("copilot-cli", 0, now)).toEqual({
+      calls: 2,
+      input: 600,
+      cache_read: 2800,
+      cache_write: 200,
+      output: 145,
+      premium_requests: 5,
+    });
+    // Each call falls in the window it was made in, not at the session's end.
+    expect(ledger.totals("copilot-cli", 0, Date.parse(T(1))).output).toBe(50);
   });
 
   it("reads Claude Code's cached plan windows and extra usage, nothing else of its state", async () => {

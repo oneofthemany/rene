@@ -653,7 +653,11 @@ function render(usage) {
         "Calls",
         String(used.calls),
         [
-          used.context !== null ? `context ${tokens(used.context)}` : undefined,
+          used.context !== null
+            ? used.contextLimit
+              ? `context ${tokens(used.context)} of ${tokens(used.contextLimit)} (${Math.round((used.context / used.contextLimit) * 100)}%)`
+              : `context ${tokens(used.context)}`
+            : undefined,
           used.compactions ? `${used.compactions} compacted` : undefined,
           used.premiumRequests !== null
             ? `${used.premiumRequests} premium requests`
@@ -662,6 +666,15 @@ function render(usage) {
           .filter(Boolean)
           .join(" · "),
       ),
+      ...(used.aiCredits === null
+        ? []
+        : [
+            stat(
+              "Credits",
+              used.aiCredits.toFixed(2),
+              "AI credits its service billed",
+            ),
+          ]),
       stat(
         usage.running ? "Time, running" : "Time",
         duration(time.elapsed),

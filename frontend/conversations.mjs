@@ -130,6 +130,8 @@ export const storedEvent = (event) => {
         cacheRead: event.cache_read,
         cacheWrite: event.cache_write,
         output: event.output,
+        contextLimit: event.context_limit,
+        aiCreditsNano: event.ai_credits_nano,
       };
     case "billing":
       return {
@@ -277,10 +279,13 @@ function ingestTranscript(store, id) {
  * Which reading of transcripts a session's stored events came from. Raise it
  * when rene parses transcripts into different events (2: one tool use per
  * `rene call` on a shell line; 3: usage, interjections, interruptions,
- * compactions and turn ends), so stored sessions are read again from the
- * start rather than keeping events the current parser wouldn't produce.
+ * compactions and turn ends; 4: Copilot CLI's per-call usage records and the
+ * prompt window a call was allowed; 5: the AI credits a call was billed; 6:
+ * a failed `rene call` hidden behind a pipe counts as failed), so
+ * stored sessions are read again from the start rather than keeping events
+ * the current parser wouldn't produce.
  */
-const EVENTS_VERSION = 3;
+const EVENTS_VERSION = 6;
 
 async function ingestFrom(store, stored) {
   let meta = stored;

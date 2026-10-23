@@ -1,12 +1,18 @@
 import { expect, it } from "vitest";
 
 // The Agent Terminal's usage bar (frontend/usage.mjs): one session's tokens,
-// where its time went and what was wasted, from a Claude Code transcript as
-// rene parses it and the workbench stores it.
+// where its time went and what was wasted, from a Claude Code or Copilot CLI
+// transcript as rene parses it and the workbench stores it.
 
 interface Usage {
   readonly turns: number;
-  readonly tokens: { readonly output: number; readonly calls: number };
+  readonly tokens: {
+    readonly output: number;
+    readonly calls: number;
+    readonly cacheRead: number;
+    readonly context: number | null;
+    readonly contextLimit: number | null;
+  };
   readonly time: Record<string, number>;
   readonly waste: {
     readonly reasons: readonly { reason: string; count: number; ms: number }[];
@@ -23,7 +29,7 @@ interface Usage {
 }
 const { eventsFromRecord } = (await import(
   new URL("../../frontend/conversations.mjs", import.meta.url).href
-)) as { eventsFromRecord(record: unknown): object[] };
+)) as { eventsFromRecord(record: unknown, format?: string): object[] };
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the account summary is checked field by field.
 const usageModule = (await import(
   new URL("../../frontend/usage.mjs", import.meta.url).href
@@ -456,6 +462,84 @@ it("counts the wait on a backgrounded command as waiting on commands, not on you
     waitingOnTools: 4 * MINUTE + 10 * SECOND,
     waitingOnYou: 20 * SECOND,
   });
+});
+
+it("counts Copilot CLI's calls as it makes them, against the context window it was given", () => {
+  const record = (ms: number, id: string, output: number) => ({
+    type: "session.usage_record",
+    timestamp: at(ms),
+    data: {
+      usage: {
+        model: "claude-opus-5",
+        inputTokens: 1000,
+        outputTokens: output,
+        cacheReadTokens: 900,
+        cacheWriteTokens: 90,
+        maxPromptTokens: 200_000,
+        accounting: { usageId: id },
+      },
+    },
+  });
+  const events = [
+    {
+      type: "user.message",
+      timestamp: at(0),
+      data: { content: "read the plan" },
+    },
+    record(SECOND, "u1", 20),
+    record(2 * SECOND, "u2", 30),
+    {
+      type: "session.shutdown",
+      timestamp: at(3 * SECOND),
+      data: {
+        totalPremiumRequests: 2,
+        modelMetrics: {
+          // Repeats the two calls above, which were counted as they came.
+          "claude-opus-5": {
+            usage: {
+              inputTokens: 2000,
+              outputTokens: 50,
+              cacheReadTokens: 1800,
+              cacheWriteTokens: 180,
+            },
+          },
+          // A model no call was recorded of: its total is all there is.
+          "gpt-5.4-nano": {
+            usage: {
+              inputTokens: 600,
+              outputTokens: 5,
+              cacheReadTokens: 100,
+              cacheWriteTokens: 0,
+            },
+          },
+        },
+      },
+    },
+  ].flatMap((line) => eventsFromRecord(line, "copilot-cli"));
+  const usage = sessionUsage({
+    conversations: [{ meta: { session: "c1", agent: "copilot-cli" }, events }],
+    since: T0,
+    now: T0 + MINUTE,
+  });
+  expect(usage.tokens).toMatchObject({
+    calls: 2,
+    output: 55,
+    cacheRead: 1900,
+    // What the last call read, of the window it was allowed.
+    context: 1000,
+    contextLimit: 200_000,
+  });
+});
+
+it("keeps a turn under way when the window starts, counted from the window's start", () => {
+  const usage = sessionUsage({
+    conversations,
+    // Inside the first turn, after its first call.
+    since: T0 + 15 * SECOND,
+    now: T0 + 6 * MINUTE,
+  });
+  expect(usage.turns).toBe(2);
+  expect(usage.time.working).toBe(45 * SECOND + 20 * SECOND);
 });
 
 it("takes the plan's live limits from the status line over Claude Code's older cached figures", () => {

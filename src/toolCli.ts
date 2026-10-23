@@ -31,6 +31,7 @@ import {
 import {
   declarationReceipt,
   declaredTopicIds,
+  failureReceipt,
   parseCallWords,
 } from "./toolbox/ReaCallCommand.js";
 import {
@@ -498,6 +499,9 @@ const runCall = async (
     if (name === "record_topic" && result.isError !== true)
       for (const id of declaredTopicIds(resultText(result)))
         io.writeStderr(declarationReceipt(id));
+    // A pipe (`| jq`, `| head`) hides the exit status from the agent's shell
+    // and from the transcript; this line, on stderr, survives it.
+    if (result.isError === true) io.writeStderr(failureReceipt(name));
     return result.isError === true ? 1 : 0;
   });
 };
