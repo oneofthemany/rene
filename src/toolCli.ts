@@ -384,6 +384,123 @@ export const compactResultText = (text: string): string => {
   );
 };
 
+/**
+ * Whether the SDK refused a call against its tool's input schema: an
+ * argument missing, unknown or of the wrong type. A tool's own invalid_input
+ * error is about a value (old_text not in the file, a relative path), and
+ * its message already says which.
+ */
+export const isSchemaRefusal = (text: string): boolean =>
+  text.startsWith("Input validation error");
+
+type SchemaProperty = {
+  readonly type?: unknown;
+  readonly enum?: readonly unknown[];
+  readonly default?: unknown;
+};
+
+const propertyForm = (
+  name: string,
+  property: SchemaProperty,
+  required: boolean,
+): string => {
+  const type =
+    property.enum !== undefined
+      ? property.enum.join("|")
+      : typeof property.type === "string"
+        ? property.type
+        : "value";
+  const notes = [
+    type,
+    ...(required ? ["required"] : []),
+    ...(property.default === undefined
+      ? []
+      : [`default ${JSON.stringify(property.default)}`]),
+  ];
+  return `${name} (${notes.join(", ")})`;
+};
+
+/**
+ * The arguments a tool takes, as one line for a call refused for its
+ * arguments: each name with its type, whether it is required and its
+ * default, then the schema's first example as a call.
+ */
+export const argumentForm = (tool: Tool): string => {
+  const schema = tool.inputSchema as {
+    properties?: Record<string, SchemaProperty>;
+    required?: readonly string[];
+    examples?: readonly unknown[];
+  };
+  const required = new Set(schema.required ?? []);
+  const properties = Object.entries(schema.properties ?? {}).sort(
+    ([a], [b]) => Number(required.has(b)) - Number(required.has(a)),
+  );
+  const example = schema.examples?.[0];
+  return [
+    `${tool.name} takes ${properties
+      .map(([name, property]) =>
+        propertyForm(name, property, required.has(name)),
+      )
+      .join(", ")}.`,
+    ...(example === undefined
+      ? []
+      : [`For example: rene call ${tool.name} '${JSON.stringify(example)}'.`]),
+    `\`rene tools describe ${tool.name}\` shows each argument's meaning.`,
+  ].join(" ");
+};
+
+const nameWords = (name: string) =>
+  name
+    .toLowerCase()
+    .split(/[^a-z0-9]+/u)
+    .filter((word) => word.length > 2)
+    // read_files and read_file share both words.
+    .map((word) => word.replace(/s$/u, ""));
+
+/**
+ * For a tool name nothing answers to: the tools whose names share a word
+ * with it, those sharing most first.
+ */
+export const missingToolHint = (
+  name: string,
+  tools: readonly Tool[],
+): string => {
+  const words = new Set(nameWords(name));
+  const near = tools
+    .map((tool) => ({
+      name: tool.name,
+      shared: nameWords(tool.name).filter((word) => words.has(word)).length,
+    }))
+    .filter(({ shared }) => shared > 0)
+    .sort((a, b) => b.shared - a.shared)
+    .slice(0, 6)
+    .map((tool) => tool.name);
+  return [
+    `No tool is named ${name}.`,
+    ...(near.length === 0 ? [] : [`Near it: ${near.join(", ")}.`]),
+    "`rene tools search <words>` finds tools.",
+  ].join(" ");
+};
+
+/** The SDK's refusal of a call to a tool it doesn't have, which it throws. */
+const MISSING_TOOL = /\bTool \S+ not found\b/u;
+
+/**
+ * The right form, for a call its tool's schema refused; undefined for any
+ * other failure, which the tool's own result explains.
+ */
+const failureHint = async (
+  client: Client,
+  name: string,
+  text: string,
+): Promise<string | undefined> => {
+  if (!isSchemaRefusal(text)) return undefined;
+  const tool = (await listAllTools(client)).find(
+    (candidate) => candidate.name === name,
+  );
+  return tool === undefined ? undefined : argumentForm(tool);
+};
+
 /** The wait for a tool that declares no deadline of its own. */
 const DEFAULT_CALL_MS = 120_000;
 /** Time a call that met its own deadline still needs to report it. */
@@ -428,27 +545,19 @@ const deadlineDefaults = async (
   args: Readonly<Record<string, unknown>>,
 ): Promise<Record<string, unknown>> => {
   if (deadlineIn(args) !== undefined) return {};
-  let cursor: string | undefined;
-  do {
-    const page = await client.listTools(
-      cursor === undefined ? undefined : { cursor },
-    );
-    const tool = page.tools.find((candidate) => candidate.name === name);
-    if (tool !== undefined) {
-      const properties = (tool.inputSchema.properties ?? {}) as Record<
-        string,
-        { default?: unknown }
-      >;
-      return Object.fromEntries(
-        DEADLINE_ARGUMENTS.map((argument) => [
-          argument,
-          properties[argument]?.default,
-        ]),
-      );
-    }
-    cursor = page.nextCursor;
-  } while (cursor !== undefined);
-  return {};
+  const tool = (await listAllTools(client)).find(
+    (candidate) => candidate.name === name,
+  );
+  const properties = (tool?.inputSchema.properties ?? {}) as Record<
+    string,
+    { default?: unknown }
+  >;
+  return Object.fromEntries(
+    DEADLINE_ARGUMENTS.map((argument) => [
+      argument,
+      properties[argument]?.default,
+    ]),
+  );
 };
 
 /**
@@ -533,7 +642,17 @@ const runCall = async (
       : { ...parsed.value, [stdinField]: await io.readStdin() };
   const reports = historyReports(io);
   return withToolClient(io, async (client) => {
-    const result = await callRecorded(client, reports, name, callArgs);
+    let result: ToolResult;
+    try {
+      result = await callRecorded(client, reports, name, callArgs);
+    } catch (cause: unknown) {
+      if (!MISSING_TOOL.test(errorMessage(cause))) throw cause;
+      await reports?.drain();
+      io.writeStderr(
+        `${errorMessage(cause)}\n${failureReceipt(name)}${missingToolHint(name, await listAllTools(client))}\n`,
+      );
+      return 1;
+    }
     await reports?.drain();
     const text = resultText(result);
     io.writeStdout(`${full ? text : compactResultText(text)}\n`);
@@ -544,8 +663,12 @@ const runCall = async (
         io.writeStderr(declarationReceipt(id));
     // A pipe (`| jq`, `| head`) hides the exit status from the agent's shell
     // and from the transcript; this line, on stderr, survives it.
-    if (result.isError === true) io.writeStderr(failureReceipt(name));
-    return result.isError === true ? 1 : 0;
+    if (result.isError !== true) return 0;
+    io.writeStderr(failureReceipt(name));
+    // On stderr too, so a filter on stdout leaves the fix in view.
+    const hint = await failureHint(client, name, text);
+    if (hint !== undefined) io.writeStderr(`${hint}\n`);
+    return 1;
   });
 };
 

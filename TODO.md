@@ -110,9 +110,19 @@ In order (a task needs those above it it names):
    bytes, e.g. "Artifact identity is unavailable…"), and record_topic's
    result echoing the whole declaration back. Both carry findings, so cut
    them only with a way to see them once per tool or topic.
-3. **Refusals that state the fix**: the gate and argument validation say
-   the right form (argument names, the allowed command). Needs nothing;
-   overlaps 2 (same output path). 15–25 calls (1–5%).
+3. **Done: refusals that state the fix.** The topic gate
+   (`frontend/topicGate.mjs`) refuses a built-in with the rene call that does
+   what it was asked, built from its input (Bash's command and cwd, Read's
+   offset and limit as start_line and max_lines, Grep as search_text's root,
+   query and glob), shell-quoted, values over 300 characters shown as "…";
+   an undeclared turn is refused with record_topic's forms (continue, new
+   topic, new thread, the kinds); and `rene tools search|describe` runs
+   before a declaration. `rene call` (`src/toolCli.ts`) follows a schema
+   refusal with the tool's arguments (required first, types, defaults) and
+   its schema's example, on stderr so `| jq` keeps it, and an unknown tool
+   name with the tools whose names share most words with it. A tool's own
+   invalid_input error (old_text not found, a relative path) gets no hint:
+   its message names the value. Used about 50 calls against 15–25 budgeted.
 4. **Budget panel in the usage bar**: for the current task and the next
    ones, the estimate as a share of the window at the measured calls per
    percent and the live figure, and whether it fits now, fits in a fresh

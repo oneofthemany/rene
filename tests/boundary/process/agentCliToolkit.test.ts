@@ -68,15 +68,24 @@ describe("cli toolkit", () => {
     expect(prompt?.hookSpecificOutput?.additionalContext).toContain(
       "rene call record_topic",
     );
-    // Not rea at all: refused, naming the recorded way to run it.
-    const ls = await bash("ls -la");
+    // Not rea at all: refused, giving the call that runs it, recorded.
+    const ls = await bash("ls -la 'a b'", { cwd: "/r" });
     expect(decision(ls)).toBe("deny");
     expect(ls?.hookSpecificOutput?.permissionDecisionReason).toContain(
-      "rene call run_command",
+      `Run it as \`rene call run_command '{"command":"ls -la '\\''a b'\\''","cwd":"/r"}'\``,
     );
-    expect(decision(await bash(`rene call read_file '{"path":"/x"}'`))).toBe(
-      "deny", // rea, but no topic yet.
+    // rea, but no topic yet: refused, with record_topic's arguments spelled out.
+    const early = await bash(`rene call read_file '{"path":"/x"}'`);
+    expect(decision(early)).toBe("deny");
+    expect(early?.hookSpecificOutput?.permissionDecisionReason).toContain(
+      `rene call record_topic '{"title":"…","kind":"feature","parent_id":"<thread id>"}'`,
     );
+    // Looking the arguments up needs no declaration.
+    expect(
+      decision(
+        await bash("rene tools describe record_topic | jq .input_schema"),
+      ),
+    ).toBeUndefined();
     expect(decision(await bash(recordTopic))).toBeUndefined();
     // A declaration that failed doesn't count; the one that printed Evidence does.
     await event("PostToolUse", {
@@ -94,15 +103,6 @@ describe("cli toolkit", () => {
     expect(
       decision(await bash(`rene call read_file '{"path":"/x"}' | head -c 100`)),
     ).toBeUndefined();
-    // Built-ins rene replaces are refused with the rene call that does it.
-
-    const read = await event("PreToolUse", {
-      tool_name: "Read",
-      tool_input: { file_path: "/a/b.ts" },
-    });
-    expect(read?.hookSpecificOutput?.permissionDecisionReason).toContain(
-      "`rene call read_file '<json>'`",
-    );
     // The git rule reaches into run_command's own command line.
     const commit = await bash(
       `rene call run_command '{"command":"git commit -m x","cwd":"/r"}'`,
@@ -129,7 +129,7 @@ describe("cli toolkit", () => {
     );
     expect(answer?.hookSpecificOutput?.permissionDecision).toBe("deny");
     expect(answer?.hookSpecificOutput?.permissionDecisionReason).toContain(
-      "rene isn't reached over MCP. Run `rene call read_file '<json>'`",
+      `rene isn't reached over MCP. Run \`rene call read_file '{"path":"/a/b.ts"}'\``,
     );
   });
 
@@ -232,6 +232,40 @@ it.each([
   );
   expect(refused?.code).toBe(77);
   expect(refused?.stderr).toContain("Agents reach rene through `rene call");
+});
+
+it("refuses a built-in rene replaces with the rene call that does what it was asked", async () => {
+  const directory = await createTestTempDirectory("rea-builtin-gate-");
+  const refusal = async (
+    tool_name: string,
+    tool_input: Record<string, unknown>,
+  ) =>
+    (
+      await gate(
+        {
+          hook_event_name: "PreToolUse",
+          session_id: "s",
+          cwd: "/r",
+          tool_name,
+          tool_input,
+        },
+        directory,
+      )
+    )?.hookSpecificOutput?.permissionDecisionReason;
+  expect(
+    await refusal("Read", { file_path: "/a/b.ts", offset: 40, limit: 20 }),
+  ).toContain(
+    `run \`rene call read_file '{"path":"/a/b.ts","start_line":40,"max_lines":20}'\``,
+  );
+  expect(await refusal("Grep", { pattern: "a.b", glob: "*.ts" })).toContain(
+    `run \`rene call search_text '{"root":"/r","query":"a.b","regex":true,"pattern":"*.ts"}'\``,
+  );
+  // Content the agent must supply again isn't echoed back.
+  expect(
+    await refusal("Write", { file_path: "/a/b.ts", content: "x".repeat(5000) }),
+  ).toContain(
+    `run \`rene call write_file '{"path":"/a/b.ts","content":"…"}'\` (or \`--stdin-field content\``,
+  );
 });
 
 it("counts a declaration whose output was filtered, from its stderr receipt", async () => {

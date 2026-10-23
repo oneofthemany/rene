@@ -65,6 +65,14 @@ const TOPIC_CHOICE =
   "or declare a new feature, question, bug, investigation, refactor, docs, decision or other topic under its thread " +
   "(declare a thread first when none fits). Every turn needs its own declaration.";
 const DECLARE = `Declare this request's topic before anything else with \`rene call record_topic '<json>'\` in your shell: ${TOPIC_CHOICE}`;
+// record_topic's arguments, spelled out where a turn is refused for want of
+// a declaration, so the agent needn't look them up first.
+const DECLARE_FORMS =
+  'To continue a topic: `rene call record_topic \'{"topic_id":"<id>","title":"<its title>","kind":"<its kind>","parent_id":"<its thread\'s id>"}\'`. ' +
+  'A new topic: `rene call record_topic \'{"title":"…","kind":"feature","parent_id":"<thread id>"}\'`; ' +
+  'a new thread: `rene call record_topic \'{"title":"…","kind":"thread"}\'`. ' +
+  "kind is one of thread, feature, question, bug, investigation, refactor, docs, decision, other. " +
+  "`rene tools describe record_topic` runs before a declaration and shows the rest (estimate, plan, phase).";
 
 // The user's standing rule on limitations, given with every prompt so it
 // needn't be repeated: a missing tool, program or capability is closed, not
@@ -102,6 +110,60 @@ const RENE_REPLACEMENTS = new Map([
   ["LS", "find_files"],
 ]);
 const SHOWN_BY_READ_ONLY = /\.(?:png|jpe?g|gif|webp|bmp|pdf)$/iu;
+
+/**
+ * The rene tool's arguments for what a built-in was asked to do, so its
+ * refusal can give the call that does it. Text the agent must supply anew
+ * (a file's content) is left as "…".
+ */
+const RENE_ARGUMENTS = {
+  Bash: (input, cwd) => ({ command: input.command, cwd: cwd ?? "…" }),
+  Read: (input) => ({
+    path: input.file_path,
+    start_line: input.offset,
+    max_lines: input.limit,
+  }),
+  Write: (input) => ({ path: input.file_path, content: "…" }),
+  Edit: (input) => ({
+    path: input.file_path,
+    old_text: input.old_string,
+    new_text: input.new_string,
+    replace_all: input.replace_all,
+  }),
+  MultiEdit: (input) => ({
+    path: input.file_path,
+    old_text: "…",
+    new_text: "…",
+  }),
+  Grep: (input, cwd) => ({
+    root: input.path ?? cwd ?? "…",
+    query: input.pattern,
+    regex: true,
+    pattern: input.glob,
+    case_sensitive: input["-i"] === true ? false : undefined,
+  }),
+  Glob: (input, cwd) => ({
+    root: input.path ?? cwd ?? "…",
+    pattern: input.pattern,
+  }),
+  LS: (input) => ({ root: input.path }),
+};
+/** A longer value is shown as "…" rather than repeated into the refusal. */
+const SHOWN_VALUE_CHARS = 300;
+
+/** The shell line that makes this rene call, its JSON quoted for the shell. */
+const reneCallSuggestion = (tool, args) => {
+  const shown = Object.fromEntries(
+    Object.entries(args).map(([name, value]) => [
+      name,
+      typeof value === "string" && value.length > SHOWN_VALUE_CHARS
+        ? "…"
+        : value,
+    ]),
+  );
+  const json = JSON.stringify(shown).replaceAll("'", "'\\''");
+  return `rene call ${tool} '${json}'`;
+};
 /** rene's tools as an MCP server registered under the name rea. */
 const RENE_MCP_TOOL = /^mcp__rea__(.+)$/u;
 
@@ -110,10 +172,10 @@ const RENE_MCP_TOOL = /^mcp__rea__(.+)$/u;
  * with a rene counterpart, or rene's own tool reached over MCP. The shell is
  * how rene is reached, so a line that runs rene and nothing else passes.
  */
-export function builtInToolRefusal(toolName, toolInput) {
+export function builtInToolRefusal(toolName, toolInput, cwd) {
   const overMcp = RENE_MCP_TOOL.exec(toolName ?? "");
   if (overMcp)
-    return `${toolName} is refused: rene isn't reached over MCP. Run \`rene call ${overMcp[1]} '<json>'\` in your shell instead, so the call is recorded in the project history. ${USE_RENE}`;
+    return `${toolName} is refused: rene isn't reached over MCP. Run \`${reneCallSuggestion(overMcp[1], toolInput ?? {})}\` in your shell instead, so the call is recorded in the project history. ${USE_RENE}`;
   const replacement = RENE_REPLACEMENTS.get(toolName);
   if (replacement === undefined) return undefined;
   if (
@@ -121,12 +183,20 @@ export function builtInToolRefusal(toolName, toolInput) {
     SHOWN_BY_READ_ONLY.test(String(toolInput?.file_path ?? ""))
   )
     return undefined;
+  const call = reneCallSuggestion(
+    replacement,
+    RENE_ARGUMENTS[toolName](toolInput ?? {}, cwd),
+  );
   if (toolName === "Bash") {
     const line = reaOnlyShellLine(String(toolInput?.command ?? ""));
     if (line.ok) return undefined;
-    return `This shell runs only rene commands, and this one doesn't (${line.reason}). Run a shell command with \`rene call run_command '{"command":"…","cwd":"…"}'\`, so it is recorded in the project history. ${USE_RENE}`;
+    return `This shell runs only rene commands, and this one doesn't (${line.reason}). Run it as \`${call}\`, so it is recorded in the project history. ${USE_RENE}`;
   }
-  return `${toolName} is refused: use rene's ${replacement} (\`rene call ${replacement} '<json>'\`) instead, so the call is recorded in the project history. ${USE_RENE}`;
+  const stdin =
+    toolName === "Write"
+      ? " (or `--stdin-field content` to take the content from stdin)"
+      : "";
+  return `${toolName} is refused: run \`${call}\`${stdin} instead, so the call is recorded in the project history. ${USE_RENE}`;
 }
 
 const readStdin = async () => {
@@ -283,7 +353,7 @@ export async function gate(input, directory) {
   if (event === "PreToolUse") {
     const refusal =
       gitHistoryRefusal(input.tool_name, input.tool_input) ??
-      builtInToolRefusal(input.tool_name, input.tool_input);
+      builtInToolRefusal(input.tool_name, input.tool_input, input.cwd);
     if (refusal !== undefined)
       return {
         hookSpecificOutput: {
@@ -305,6 +375,14 @@ export async function gate(input, directory) {
   }
   if (event === "PreToolUse") {
     if (ALWAYS_ALLOWED.has(input.tool_name)) return;
+    // `rene tools search|describe` only shows the toolkit, so it may run
+    // before a declaration: the refusal below points to it.
+    if (
+      input.tool_name === "Bash" &&
+      reaOnlyShellLine(String(input.tool_input?.command ?? "")).calls
+        ?.length === 0
+    )
+      return;
     const state = await store.read();
     if (declaresTopic(input.tool_name, input.tool_input)) {
       if (!state.pending) await store.write({ ...state, pending: true });
@@ -316,7 +394,7 @@ export async function gate(input, directory) {
       hookSpecificOutput: {
         hookEventName: event,
         permissionDecision: "deny",
-        permissionDecisionReason: `No topic is declared for this turn yet. ${DECLARE}`,
+        permissionDecisionReason: `No topic is declared for this turn yet. ${DECLARE} ${DECLARE_FORMS}`,
       },
     };
   }
@@ -336,7 +414,7 @@ export async function gate(input, directory) {
     if ((await store.read()).declared) return;
     return {
       decision: "block",
-      reason: `This turn has no successful topic declaration. ${DECLARE} Then finish your answer.`,
+      reason: `This turn has no successful topic declaration. ${DECLARE} ${DECLARE_FORMS} Then finish your answer.`,
     };
   }
 }
