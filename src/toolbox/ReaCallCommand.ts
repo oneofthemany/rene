@@ -320,12 +320,15 @@ export interface CallWords {
   readonly input: string | undefined;
   /** The field `--stdin-field` fills with stdin's raw text. */
   readonly stdinField: string | undefined;
+  /** `--full`: print the whole Evidence envelope, not its compact form. */
+  readonly full: boolean;
 }
 
 /**
- * Reads `<tool> [<json> | -] [--stdin-field <field>]`, the flag before or
- * after the arguments; undefined for anything else. stdin can feed the
- * arguments or one field, not both, so --stdin-field needs JSON on the line.
+ * Reads `<tool> [<json> | -] [--stdin-field <field>] [--full]`, the flags
+ * before or after the arguments; undefined for anything else. stdin can feed
+ * the arguments or one field, not both, so --stdin-field needs JSON on the
+ * line.
  */
 export const parseCallWords = (
   words: readonly string[],
@@ -334,9 +337,13 @@ export const parseCallWords = (
   if (tool === undefined) return undefined;
   let input: string | undefined;
   let stdinField: string | undefined;
+  let full = false;
   for (let at = 0; at < rest.length; at++) {
     const word = rest[at] as string;
-    if (word === "--stdin-field") {
+    if (word === "--full") {
+      if (full) return undefined;
+      full = true;
+    } else if (word === "--stdin-field") {
       const field = rest[at + 1];
       if (stdinField !== undefined || field === undefined) return undefined;
       stdinField = field;
@@ -346,7 +353,7 @@ export const parseCallWords = (
   }
   if (stdinField !== undefined && (input === undefined || input === "-"))
     return undefined;
-  return { tool, input, stdinField };
+  return { tool, input, stdinField, full };
 };
 
 /** The call one simple command makes, if it runs `rene call` with arguments rea accepts. */

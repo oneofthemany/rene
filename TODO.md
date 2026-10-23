@@ -101,10 +101,15 @@ In order (a task needs those above it it names):
    `frontend/usage.mjs`). A prompted turn was already kept; a turn a
    background task woke (no prompt) was still dropped, and now counts from
    the window's start.
-2. **Compact `rene call` output** (the item under Closing items: it prints
-   the whole Evidence envelope; a topic declaration costs about 340 tokens,
-   re-read on every later call). Needs nothing; overlaps the topic gate's
-   expected output. 20–35 calls (2–7%). Largest saving per call.
+2. **Compact `rene call` output.** First step done: `rene call` leaves out
+   `parameters`, `provider`, `predicate_type` and null or empty fields
+   (`compactResultText` in `src/toolCli.ts`); `--full` prints the whole
+   envelope, and history records it whole either way. Measured on 23 Oct in
+   bytes, not tokens: read_file 1156 → 827 (−28%), record_topic 1207 → 710
+   (−41%). Left: the limitations every call of a tool repeats (about 200
+   bytes, e.g. "Artifact identity is unavailable…"), and record_topic's
+   result echoing the whole declaration back. Both carry findings, so cut
+   them only with a way to see them once per tool or topic.
 3. **Refusals that state the fix**: the gate and argument validation say
    the right form (argument names, the allowed command). Needs nothing;
    overlaps 2 (same output path). 15–25 calls (1–5%).
@@ -210,12 +215,10 @@ Finish these before the move off MCP is called done.
   `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`. Agents reading another file (Gemini
   CLI's `GEMINI.md`) still need their own way in, and none of them has a
   topic gate (that is Claude Code's hooks).
-- **rene call spends agent tokens on every call.** Each call prints the
-  whole Evidence envelope on stdout, so an agent reading one field pays for
-  all of it and has to pipe through `jq` to find it. An output selector
-  (`--field`, or a `--quiet` that prints only the normalised result) would
-  cut the cost of the common read materially; the complete Evidence stays
-  recorded in history either way.
+- **rene call spends agent tokens on every call.** Partly done: the
+  envelope prints without the fields that repeat the call (item 2 under
+  Agent usage and budget, which tracks what is left). An output selector
+  (`--field`) would still save the `jq` step on the common read.
 - **rene call cannot carry a long command.** `run_command` accepts a
   `timeout_ms` up to 1,800,000, but the call itself gives up long before
   that: a 45-second command returns, while 60-second and 150-second ones

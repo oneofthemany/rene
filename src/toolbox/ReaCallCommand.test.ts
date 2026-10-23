@@ -101,6 +101,18 @@ describe("rea, the older name, and --stdin-field", () => {
     expect(parseReaCallCommands(`rene call write_file --stdin-field`)).toEqual(
       [],
     );
+    // --full changes what is printed, not the call; once, either side.
+    expect(
+      parseReaCallCommands(
+        `rene call read_file --full '{"path":"/x"}'; rene call read_file '{"path":"/y"}' --full`,
+      ),
+    ).toEqual([
+      { tool: "read_file", args: { path: "/x" } },
+      { tool: "read_file", args: { path: "/y" } },
+    ]);
+    expect(
+      parseReaCallCommands(`rene call read_file '{}' --full --full`),
+    ).toEqual([]);
     expect(
       reaOnlyShellLine(
         `rene call write_file '{"path":"/x"}' --stdin-field content <<'EOF'\nhi\nEOF`,

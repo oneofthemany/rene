@@ -72,6 +72,9 @@ const USAGE = `Usage:
   rene call <name> <json> --stdin-field <field>
                                  Run one tool with <field> set to stdin's raw text
                                  (the flag may also come before <json>)
+  rene call <name> … --full       Print the whole Evidence envelope; without it
+                                 the fields that repeat the call (parameters,
+                                 provider, predicate_type) and empty ones are left out
   rene skill status               Show the installed reverse-engineer-anything skill
   rene skill install [--client <id>…]
                                  Install or update the skill: the shared
@@ -342,6 +345,45 @@ export const resultText = (result: ToolResult): string => {
     : JSON.stringify(result.structuredContent ?? result);
 };
 
+/** Evidence fields that only repeat the call: its arguments and who answered it. */
+const ECHOED_FIELDS = new Set(["parameters", "provider", "predicate_type"]);
+
+const isEmpty = (value: unknown): boolean =>
+  value === null || (Array.isArray(value) && value.length === 0);
+
+/**
+ * What `rene call` prints of a tool's text: an Evidence envelope without the
+ * fields that only repeat the call or hold nothing (null, []), so the agent's
+ * context gets the answer with its provenance, confidence, limitations and
+ * locations, at about half to two thirds of the bytes. normalized_result is
+ * always kept. Anything that isn't Evidence prints as it came; `--full`
+ * prints the envelope whole, and history records it whole either way.
+ */
+export const compactResultText = (text: string): string => {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return text;
+  }
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    typeof (value as { evidence_id?: unknown }).evidence_id !== "string"
+  )
+    return text;
+  return JSON.stringify(
+    Object.fromEntries(
+      Object.entries(value).filter(
+        ([field, entry]) =>
+          field === "normalized_result" ||
+          (!ECHOED_FIELDS.has(field) && !isEmpty(entry)),
+      ),
+    ),
+  );
+};
+
 /** The wait for a tool that declares no deadline of its own. */
 const DEFAULT_CALL_MS = 120_000;
 /** Time a call that met its own deadline still needs to report it. */
@@ -477,7 +519,7 @@ const runCall = async (
     io.writeStderr(USAGE);
     return 2;
   }
-  const { tool: name, input, stdinField } = call;
+  const { tool: name, input, stdinField, full } = call;
   const text =
     input === undefined ? "{}" : input === "-" ? await io.readStdin() : input;
   const parsed = parseArguments(text);
@@ -493,11 +535,12 @@ const runCall = async (
   return withToolClient(io, async (client) => {
     const result = await callRecorded(client, reports, name, callArgs);
     await reports?.drain();
-    io.writeStdout(`${resultText(result)}\n`);
+    const text = resultText(result);
+    io.writeStdout(`${full ? text : compactResultText(text)}\n`);
     // A receipt on stderr, which a filter on stdout (jq, head) leaves alone,
     // so the workbench's topic gate sees the declaration either way.
     if (name === "record_topic" && result.isError !== true)
-      for (const id of declaredTopicIds(resultText(result)))
+      for (const id of declaredTopicIds(text))
         io.writeStderr(declarationReceipt(id));
     // A pipe (`| jq`, `| head`) hides the exit status from the agent's shell
     // and from the transcript; this line, on stderr, survives it.

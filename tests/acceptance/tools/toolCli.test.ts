@@ -88,6 +88,22 @@ describe("explicit tool CLI", () => {
     };
     expect(evidence.operation).toBe("read_file");
     expect(evidence.normalized_result.text).toBe("hello\n");
+    // The fields that only repeat the call, and empty ones, are left out
+    // unless --full asks for the whole envelope.
+    expect(evidence).not.toHaveProperty("parameters");
+    expect(evidence).not.toHaveProperty("provider");
+    expect(evidence).not.toHaveProperty("raw_result");
+    expect(evidence).toHaveProperty("limitations");
+    const whole = await rea(
+      ["call", "read_file", JSON.stringify({ path: file }), "--full"],
+      env,
+    );
+    expect(whole.code).toBe(0);
+    const envelope = JSON.parse(whole.stdout) as Record<string, unknown>;
+    expect(envelope.parameters).toMatchObject({ path: file });
+    expect(envelope).toHaveProperty("provider");
+    expect(envelope.raw_result).toBeNull();
+    expect(whole.stdout.length).toBeGreaterThan(called.stdout.length);
 
     expect((await rea(["call", "read_file", "not json"], env)).code).toBe(2);
     expect((await rea(["call", "no_such_tool", "{}"], env)).code).toBe(1);
