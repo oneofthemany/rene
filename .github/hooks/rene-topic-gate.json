@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "node \"$(git rev-parse --show-toplevel)/frontend/topicGate.mjs\" --copilot sessionStart || true",
+        "timeoutSec": 15
+      }
+    ],
+    "userPromptSubmitted": [
+      {
+        "type": "command",
+        "bash": "node \"$(git rev-parse --show-toplevel)/frontend/topicGate.mjs\" --copilot userPromptSubmitted || true",
+        "timeoutSec": 15
+      }
+    ],
+    "preToolUse": [
+      {
+        "type": "command",
+        "bash": "node \"$(git rev-parse --show-toplevel)/frontend/topicGate.mjs\" --copilot preToolUse || true",
+        "timeoutSec": 15
+      }
+    ],
+    "postToolUse": [
+      {
+        "type": "command",
+        "bash": "node \"$(git rev-parse --show-toplevel)/frontend/topicGate.mjs\" --copilot postToolUse || true",
+        "timeoutSec": 15
+      }
+    ],
+    "agentStop": [
+      {
+        "type": "command",
+        "bash": "node \"$(git rev-parse --show-toplevel)/frontend/topicGate.mjs\" --copilot agentStop || true",
+        "timeoutSec": 15
+      }
+    ]
+  }
+}

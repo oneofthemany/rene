@@ -137,9 +137,9 @@ describe("topic gate", () => {
     ).hookSpecificOutput;
 
     expect(context.hookEventName).toBe("UserPromptSubmit");
-    // Declare the turn's topic first.
+    // Orient if need be, then declare the turn's topic before acting.
     expect(context.additionalContext).toContain(
-      "Declare this request's topic before anything else with `rene call record_topic",
+      "declare this request's topic with `rene call record_topic",
     );
     // Work through rene's tools, not the agent's built-in ones.
     expect(context.additionalContext).toContain(

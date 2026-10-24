@@ -70,7 +70,7 @@ export const agentInstructions = (assessment) =>
     ...BASE_INSTRUCTIONS,
     ...(assessment
       ? [
-          `This folder keeps its project assessment in ${assessment}: read it before you start and follow its Rules.`,
+          `This folder keeps its project assessment in ${assessment}; its Target, Rules, layout and open topics come to you at session start in the session briefing (.rene/briefing.md), so read the full file only when you need more, and follow its Rules.`,
           "As you learn, keep its Target, Rules, Findings and Open questions sections current, citing the",
           "history entry ids a finding rests on when you know them. Leave the text between the",
           "rene:generated markers alone; the workbench rewrites it from the recorded tool calls.",
@@ -80,6 +80,12 @@ export const agentInstructions = (assessment) =>
           "files: for a file of a listed type, use that tool rather than a shell command or a generic reader.",
         ]
       : []),
+    "Every session follows the process the session briefing opens with: 1. budget (the plan's live limits),",
+    "2. orient on the assessment, 3. orient on the open items in TODO.md, 4. understand the request (match it",
+    "to a TODO item or open topic, check earlier agents' work), 5. declare its topic with estimate and plan and",
+    "say whether it is affordable now, 6. act in phases, 7. close out (verify, close the topic with a summary,",
+    "update the TODO item and Findings, report the estimate against what was used, say what is ready to commit).",
+    "Steps 1 to 4 may use read_file, search_text, find_files and the agent conversation tools before a declaration.",
     "When a request begins, declare it with `rene call record_topic`: a new feature, question, bug,",
     "investigation and so on goes under the thread it belongs to (declare a thread first when none fits),",
     "and you update the topic with status done or abandoned, and a summary of what was found or decided,",
@@ -158,6 +164,8 @@ const topicGateSettings = (stateDirectory) => {
   ];
   return {
     hooks: {
+      // Startup, resume and compaction alike: the session briefing.
+      SessionStart: [{ hooks }],
       UserPromptSubmit: [{ hooks }],
       PreToolUse: [{ matcher: "*", hooks }],
       // A declaration is a `rene call record_topic` in the shell.

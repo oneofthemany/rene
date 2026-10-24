@@ -528,9 +528,124 @@ const template = (name, block) =>
     "",
   ].join("\n");
 
+// The session briefing: what an agent needs at the start of a session, from
+// the same parts as the assessment, small enough to hand it whole (the topic
+// gate does, when a session starts). The assessment stays the full record.
+export const BRIEFING_FILE = join(".rene", "briefing.md");
+const BRIEF_SECTION_CHARS = { Target: 1_500, Rules: 6_000 };
+const BRIEF_FILES = 10;
+const BRIEF_SYMBOLS = 8;
+
+/** A section of the assessment's own (not generated) text, by its heading. */
+function sectionText(markdown, heading, limit) {
+  const start = markdown.indexOf(`\n## ${heading}\n`);
+  if (start === -1) return undefined;
+  const body = markdown.slice(start + heading.length + 5);
+  const ends = [body.indexOf("\n## "), body.indexOf(BEGIN)].filter(
+    (index) => index !== -1,
+  );
+  const text = body.slice(0, Math.min(body.length, ...ends)).trim();
+  if (!text) return undefined;
+  return text.length > limit
+    ? `${text.slice(0, limit)}… (the rest in ${ASSESSMENT_FILE})`
+    : text;
+}
+
+/**
+ * Open work, by thread: each thread that is open or holds open topics, and
+ * its open topics, with the ids a declaration continues them by.
+ */
+function openTopicLines(tree) {
+  const lines = [];
+  const open = (node) => node.status === "open";
+  const holdsOpen = (node) =>
+    open(node) || node.children.some((child) => holdsOpen(child));
+  let closed = 0;
+  const walk = (node, depth) => {
+    for (const child of node.children) {
+      if (!holdsOpen(child)) {
+        closed += 1;
+        continue;
+      }
+      const phase = child.phases?.at(-1)?.name;
+      lines.push(
+        `${"  ".repeat(depth)}- **${child.title}** — ${child.kind}, ${child.status}${phase ? `, phase ${phase}` : ""} (\`${child.topic_id}\`)`,
+      );
+      walk(child, depth + 1);
+    }
+  };
+  for (const thread of tree?.threads ?? []) {
+    if (!holdsOpen(thread)) {
+      closed += 1;
+      continue;
+    }
+    lines.push(
+      `- Thread **${thread.title}** — ${thread.status} (\`${thread.topic_id}\`)`,
+    );
+    walk(thread, 1);
+  }
+  if (!lines.length) lines.push("_No open topics._");
+  if (closed)
+    lines.push(
+      `- ${closed} closed threads and topics are in ${ASSESSMENT_FILE}'s Topics section.`,
+    );
+  return lines;
+}
+
+/** The session briefing's text. */
+export function briefingText(name, assessment, { codeMap, topics }) {
+  const lines = [
+    `# Session briefing — ${name}`,
+    "",
+    `_Written by the workbench with ${ASSESSMENT_FILE}, which has the full record (conversations, pathways, the folder survey)._`,
+    "",
+  ];
+  for (const heading of ["Target", "Rules"]) {
+    const text = sectionText(assessment, heading, BRIEF_SECTION_CHARS[heading]);
+    if (text) lines.push(`## ${heading}`, "", text, "");
+  }
+  lines.push("## Layout", "");
+  if (codeMap) {
+    const { map } = codeMap;
+    lines.push(
+      `Languages: ${map.languages
+        .slice(0, 6)
+        .map(({ language, files }) => `${language} (${files})`)
+        .join(", ")}. Most depended-on files: ${map.most_depended_on_files
+        .slice(0, BRIEF_FILES)
+        .map((file) => `\`${file.file}\``)
+        .join(", ")}. Most-called symbols: ${map.most_called_symbols
+        .slice(0, BRIEF_SYMBOLS)
+        .map((symbol) => `\`${symbol.name}\` (\`${symbol.file}\`)`)
+        .join(
+          ", ",
+        )}. Ask explore_source_graph before reading files one by one.`,
+    );
+  } else
+    lines.push(
+      "_No code map yet: index_source_graph builds the source graph._",
+    );
+  lines.push("", "## Open topics", "", ...openTopicLines(topics), "");
+  return lines.join("\n");
+}
+
+async function writeBriefing(folder, name, assessment, parts) {
+  const path = join(folder, BRIEFING_FILE);
+  const text = briefingText(name, assessment, parts);
+  if ((await readFile(path, "utf8").catch(() => undefined)) === text) return;
+  const temporary = `${path}.${process.pid}.tmp`;
+  await writeFile(temporary, text);
+  await rename(temporary, path);
+}
+
+/** The session briefing's text, or undefined when there is none. */
+export const readBriefing = (folder) =>
+  readFile(join(folder, BRIEFING_FILE), "utf8").catch(() => undefined);
+
 /**
  * Writes the generated block into the project's assessment, creating the
- * file from the template when there is none. Returns what happened.
+ * file from the template when there is none, and the session briefing
+ * beside it. Returns what happened to the assessment.
  * @returns {Promise<"created" | "updated" | "unchanged" | "markers-missing">}
  */
 export async function writeAssessment(folder, name, parts) {
@@ -550,10 +665,15 @@ export async function writeAssessment(folder, name, parts) {
     const begin = current.indexOf(BEGIN);
     const end = current.indexOf(END, begin);
     // Someone removed the markers; the block isn't put back against their edit.
-    if (begin === -1 || end === -1) return "markers-missing";
+    if (begin === -1 || end === -1) {
+      await writeBriefing(folder, name, current, parts);
+      return "markers-missing";
+    }
     text = current.slice(0, begin) + block + current.slice(end + END.length);
+    await writeBriefing(folder, name, text, parts);
     if (text === current) return "unchanged";
   }
+  if (current === undefined) await writeBriefing(folder, name, text, parts);
   const temporary = `${path}.${process.pid}.tmp`;
   await writeFile(temporary, text);
   // An edit made while this was being written wins; ours is retried later.

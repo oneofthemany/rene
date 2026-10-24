@@ -28,6 +28,7 @@ import {
 import { homedir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
 import { createConversationStore } from "./conversations.mjs";
+import { createUsageStore } from "./usageStore.mjs";
 import { createHistory } from "./history.mjs";
 
 const PROJECT_ID = /^[0-9a-f]{16}$/;
@@ -118,6 +119,7 @@ export function createProjects(root, historyLimits) {
       conversations: createConversationStore(
         join(root, manifest.id, "conversations"),
       ),
+      usage: createUsageStore(join(root, manifest.id, "usage")),
     };
     open.set(manifest.id, entry);
     return entry;

@@ -582,7 +582,8 @@ async function terminalUsage() {
   const since = Math.min(described.startedAt, ...firsts);
   const { topics, declaredBy, filed, ...declared } =
     await cachedTopics(project);
-  const { topicTime, topicCalls, ...usage } = sessionUsage({
+  // The ledger is the usage store's (cachedActuals), not the page's.
+  const { topicTime, topicCalls, ledger, ...usage } = sessionUsage({
     conversations: active,
     since,
     now,
@@ -634,14 +635,50 @@ function cachedActuals(project, conversations, now, declared) {
   ].join(",");
   const cached = usageActuals.get(project.manifest.id);
   if (cached?.stamp === stamp) return cached.actuals;
-  const actuals = topicActuals({
+  const { ledger, ...actuals } = topicActuals({
     conversations,
     now,
     declaredBy: declared.declaredBy,
     filed: declared.filed,
   });
   usageActuals.set(project.manifest.id, { stamp, actuals });
+  sealUsage(project, ledger);
   return actuals;
+}
+
+// The usage store is sealed again at most this often while use grows, so an
+// active session isn't rewriting it on every poll.
+const USAGE_SEAL_MS = 2 * 60_000;
+/** project id -> when its usage store was last sealed, and the ledger waiting. */
+const usageSeals = new Map();
+
+/**
+ * Seals a project's ledger into its usage store (usageStore.mjs): now, or
+ * once USAGE_SEAL_MS has passed since the last seal, with the newest ledger.
+ */
+function sealUsage(project, ledger) {
+  const id = project.manifest.id;
+  const state = usageSeals.get(id) ?? { at: 0, ledger: null, timer: null };
+  usageSeals.set(id, state);
+  state.ledger = ledger;
+  if (state.timer) return;
+  const seal = () => {
+    state.timer = null;
+    state.at = Date.now();
+    const sealed = project.usage.write({
+      project: project.manifest.path,
+      ledger: state.ledger,
+    });
+    state.ledger = null;
+    if (!sealed.ok)
+      console.warn(`usage store for ${id} not sealed: ${sealed.reason}`);
+  };
+  const wait = state.at + USAGE_SEAL_MS - Date.now();
+  if (wait <= 0) seal();
+  else {
+    state.timer = setTimeout(seal, wait);
+    state.timer.unref();
+  }
 }
 
 // Keystrokes, mouse reports and resizes reach the agent over one WebSocket

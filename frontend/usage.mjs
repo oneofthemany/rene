@@ -317,6 +317,8 @@ export function sessionUsage({
   const unattributed = { calls: new Set(), output: 0, working: 0 };
   const conversationsUsed = [];
   let compactions = 0;
+  /** One row per model call, tool call and message of yours that turned the work: the usage store's (usageStore.mjs). */
+  const ledger = [];
 
   for (const { meta, events } of conversations) {
     // Which topic and phase each event was for, over the whole conversation,
@@ -377,11 +379,36 @@ export function sessionUsage({
     });
 
     // A deviation from the task, by its cause, under the topic and phase in
-    // force at the event it rests on.
-    const deviate = (inForce, cause, kind, at, text) => {
+    // force at the event it rests on. A call's row names it; one from your
+    // message (a correction, added scope, a stop) is a row of its own, so the
+    // store counts every cause the bar does, even before any declaration.
+    const deviate = (inForce, cause, kind, at, text, row) => {
+      if (row && !row.deviation)
+        row.deviation = { cause, kind, text: example(text) };
+      if (!row)
+        ledger.push({
+          ...rowOf(kind === "stopped" ? "interrupt" : "message", {
+            time: at,
+            inForce,
+          }),
+          deviation: { cause, kind, text: example(text) },
+        });
       if (inForce)
         deviations.push({ ...inForce, cause, kind, at, text: example(text) });
     };
+    // Each model call once (its records repeat its counts; the last is kept).
+    const modelRows = new Map();
+    const rowOf = (kind, event) => ({
+      kind,
+      at: event.time,
+      agent: meta.agent ?? null,
+      conversation: meta.session,
+      topic: event.inForce?.topic ?? null,
+      phase: event.inForce?.phase ?? null,
+      basis: event.inForce ? (event.inForce.basis ?? "declared") : null,
+      waste: null,
+      deviation: null,
+    });
     let backgrounded = false;
     for (const [index, turn] of turns.entries()) {
       turnCount += 1;
@@ -442,7 +469,14 @@ export function sessionUsage({
       };
       const add = (inForce, reason, start, end, text, measured = true) => {
         if (end <= start) return;
-        intervals.push({ reason, start, end, topic: inForce?.topic });
+        intervals.push({
+          reason,
+          start,
+          end,
+          topic: inForce?.topic,
+          session: meta.session,
+          text: example(text),
+        });
         const entry = waste.get(reason);
         note(entry, start, text);
         if (measured) {
@@ -461,6 +495,18 @@ export function sessionUsage({
         }
         // Each model call counts toward the topic, and its phase, in force
         // when it was made.
+        if (event.kind === "usage" && event.scope === "call")
+          modelRows.set(event.call ?? `${event.time}`, {
+            ...rowOf("model", event),
+            id: event.call ?? null,
+            model: event.model ?? null,
+            input: event.input,
+            cacheRead: event.cacheRead,
+            cacheWrite: event.cacheWrite,
+            output: event.output,
+            context: event.input + event.cacheRead + event.cacheWrite,
+            contextLimit: event.contextLimit ?? null,
+          });
         if (event.kind === "usage" && event.scope === "call" && inForce)
           for (const key of keysOf(inForce.topic, inForce.phase)) {
             const calls = topicCalls.get(key) ?? new Map();
@@ -512,8 +558,28 @@ export function sessionUsage({
             .slice(position + 1)
             .find((later) => later.kind === "tool_use");
           let assumed = false;
+          const row = {
+            ...rowOf("tool", event),
+            id: event.toolUseId ?? null,
+            tool: event.tool,
+            resultChars: result
+              ? (result.chars ?? result.text?.length ?? 0)
+              : null,
+            outcome: !result
+              ? "pending"
+              : !result.isError
+                ? "ok"
+                : GATE.test(result.text)
+                  ? "refused"
+                  : "error",
+          };
+          ledger.push(row);
           if (result?.isError) {
             const reason = GATE.test(result.text) ? "refused" : "failed";
+            row.waste = {
+              reason,
+              text: `${event.tool}: ${example(result.text)}`,
+            };
             add(
               inForce,
               reason,
@@ -544,6 +610,7 @@ export function sessionUsage({
                 assumption.kind,
                 event.time,
                 `${event.tool}: ${line}`,
+                row,
               );
               assumed = true;
               break;
@@ -557,6 +624,7 @@ export function sessionUsage({
                 GATE.test(result.text) ? "refused" : "failed",
                 event.time,
                 `${event.tool}: ${example(result.text)}`,
+                row,
               );
             const key = `${event.tool}\u0000${event.argsKey}`;
             // Each turn declares its topic again, as the gate asks.
@@ -565,7 +633,11 @@ export function sessionUsage({
               seen.has(key) &&
               !result.isError &&
               event.tool !== TOPIC_TOOL
-            )
+            ) {
+              row.waste = {
+                reason: "repeated",
+                text: `${event.tool}${event.target ? ` ${event.target}` : ""}`,
+              };
               add(
                 inForce,
                 "repeated",
@@ -573,6 +645,7 @@ export function sessionUsage({
                 result.time,
                 `${event.tool}${event.target ? ` ${event.target}` : ""}`,
               );
+            }
             if (!result.isError && event.argsKey) seen.set(key, event);
           }
           // After a change, the same call again is new work.
@@ -594,7 +667,32 @@ export function sessionUsage({
       asking += asked;
       unattributed.working += creditTurnTime(topicTime, turn, worked);
     }
+    ledger.push(...modelRows.values());
   }
+  // A call that wasn't waste itself (refused, failed, repeated) but was made
+  // in wasted time (you stopped or corrected it, recovery from a failed
+  // call, compaction) is waste for that time's strongest reason.
+  const ranked = [...intervals].sort(
+    (a, b) => RANK.get(a.reason) - RANK.get(b.reason),
+  );
+  for (const row of ledger) {
+    // A message row's deviation already says how its time was spent.
+    if (row.kind !== "model" && row.kind !== "tool") continue;
+    row.waste ??=
+      ranked.find(
+        (interval) =>
+          interval.session === row.conversation &&
+          row.at >= interval.start &&
+          row.at <= interval.end,
+      ) ?? null;
+    if (row.waste)
+      row.waste = { reason: row.waste.reason, text: row.waste.text };
+  }
+  // A model call comes before the tool calls it made, at the same moment.
+  ledger.sort(
+    (a, b) =>
+      a.at - b.at || Number(b.kind === "model") - Number(a.kind === "model"),
+  );
 
   const exclusive = exclusiveTime(intervals);
   const wastedMs = [...exclusive.values()].reduce((sum, ms) => sum + ms, 0);
@@ -666,6 +764,7 @@ export function sessionUsage({
     topicTime,
     topicCalls,
     deviations,
+    ledger,
     method: {
       tokens:
         "The agent's own per-call counts, as each call finishes; context is what the last call read, against the prompt window it was allowed where the agent records it. Credits are what the agent's service billed each call, the figure the agent shows itself. A Copilot CLI session old enough to have recorded no calls one by one counts from its totals at shutdown instead, and its premium requests come as it goes.",
@@ -688,7 +787,7 @@ export function sessionUsage({
  * and its working time, under the topic in force when it was made.
  */
 export function topicActuals({ conversations, now, declaredBy, filed }) {
-  const { topicTime, topicCalls, deviations } = sessionUsage({
+  const { topicTime, topicCalls, deviations, ledger } = sessionUsage({
     conversations,
     since: -Infinity,
     now,
@@ -696,7 +795,7 @@ export function topicActuals({ conversations, now, declaredBy, filed }) {
     declaredBy,
     filed,
   });
-  return { topicTime, topicCalls, deviations };
+  return { topicTime, topicCalls, deviations, ledger };
 }
 
 /**

@@ -1,5 +1,6 @@
-// The topic gate: Claude Code hooks that hold a workbench agent to declaring
-// the topic of every turn with rene's record_topic tool.
+// The topic gate: Claude Code and Copilot CLI hooks that hold an agent to
+// declaring the topic of every turn with rene's record_topic tool (Copilot's
+// adapter, copilotGate, is at the end).
 //
 // An agent reaches rene's tools as `rene call <tool> '<json>'` in its shell.
 // The shell runs rene and nothing else (reaOnlyShellLine), and a
@@ -7,12 +8,14 @@
 // gate sees it succeed. rene is never reached over MCP: an `mcp__rea__*` tool,
 // left by an old registration, is refused like the built-ins rene replaces.
 //
-// A turn belongs to the topic declared in it and to no other (topics.mjs), so
-// a turn without a declaration has no topic at all. The gate makes that
-// rare: when a prompt arrives the agent is reminded; until record_topic has
-// been called in the turn, every other tool is refused (ToolSearch stays
-// allowed); and a turn that would end without a successful declaration is
-// sent back once to make one.
+// A turn without a declaration only inherits its conversation's last topic,
+// marked carried (attribution.mjs), which the agent never confirmed for it.
+// The gate makes that rare: when a session starts the agent is given the
+// session process and briefing (sessionBriefing.mjs); when a prompt arrives
+// it is reminded; until record_topic has been called in the turn, every tool
+// but the read-only ones the process orients with is refused (ToolSearch
+// stays allowed); and a turn that would end without a successful declaration
+// is sent back once to make one.
 //
 // The bridge registers this file for UserPromptSubmit, PreToolUse,
 // PostToolUse (the shell only) and Stop (terminal.mjs), with
@@ -22,6 +25,7 @@
 // doesn't give them: Claude Code writes it a little later, so a call sent in
 // the same message as record_topic found no declaration there.
 //
+//   SessionStart       the session process and briefing, as context
 //   UserPromptSubmit   a new turn: nothing declared
 //   PreToolUse         record_topic marks the turn pending, so calls sent
 //                      with it pass; any other tool needs pending or declared
@@ -40,9 +44,9 @@
 // (builtInToolRefusal). The hook file is read on every event, so the rules
 // hold in every session the bridge starts or resumes, running ones included.
 
-import { readFile, rename, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   declaredTopicIds,
@@ -54,17 +58,29 @@ import {
 } from "../dist/toolbox/GitHistory.js";
 import { CONSENT_RULE, consentNeeded } from "../dist/toolbox/CommandConsent.js";
 
+import { sessionBriefing } from "./sessionBriefing.mjs";
+
 // The git rule's owner is src/toolbox/GitHistory.ts; re-exported for tests.
 export { gitHistoryWrite };
 
 const ALWAYS_ALLOWED = new Set(["ToolSearch"]);
 const SESSION = /^[\w-]{1,120}$/;
 
+// Read-only tools steps 1 to 4 of a session (sessionBriefing.mjs) may use
+// before the turn's declaration: orienting, not working.
+const ORIENTATION_TOOLS = new Set([
+  "read_file",
+  "search_text",
+  "find_files",
+  "list_agent_conversations",
+  "read_agent_conversation",
+]);
+
 const TOPIC_CHOICE =
-  "pass the topic_id of the topic it continues (the project assessment's Topics section lists them, with their threads), " +
+  "pass the topic_id of the topic it continues (the session briefing's Open topics lists them, with their threads; .rene/briefing.md), " +
   "or declare a new feature, question, bug, investigation, refactor, docs, decision or other topic under its thread " +
   "(declare a thread first when none fits). Every turn needs its own declaration.";
-const DECLARE = `Declare this request's topic before anything else with \`rene call record_topic '<json>'\` in your shell: ${TOPIC_CHOICE}`;
+const DECLARE = `Follow the session process from the briefing you were given at session start (.rene/briefing.md has its project part): orient first if you need to (read_file, search_text, find_files and the agent conversations run before a declaration), then declare this request's topic with \`rene call record_topic '<json>'\` in your shell before acting on it: ${TOPIC_CHOICE}`;
 // record_topic's arguments, spelled out where a turn is refused for want of
 // a declaration, so the agent needn't look them up first.
 const DECLARE_FORMS =
@@ -212,6 +228,18 @@ const reaCalls = (toolName, toolInput) => {
   return line.ok ? line.calls : [];
 };
 
+/** Whether a shell line only orients: every rene call on it a read-only tool. */
+const orientsOnly = (toolName, toolInput) => {
+  const calls = reaCalls(toolName, toolInput);
+  return (
+    calls.length > 0 && calls.every(({ tool }) => ORIENTATION_TOOLS.has(tool))
+  );
+};
+
+/** Where the plan's live limits are kept: beside the gate's state folder. */
+const statusFileFor = (directory) =>
+  directory ? join(dirname(directory), "claude-status.json") : undefined;
+
 /** Whether a tool use declares the turn's topic with `rene call record_topic`. */
 const declaresTopic = (toolName, toolInput) =>
   reaCalls(toolName, toolInput).some(({ tool }) => tool === "record_topic");
@@ -350,6 +378,18 @@ const consentAnswer = (event, toolName, toolInput) => {
  */
 export async function gate(input, directory) {
   const event = input.hook_event_name;
+  // A session starting (or resuming, or compacted): the process and what
+  // its first steps need, so they cost no calls.
+  if (event === "SessionStart")
+    return {
+      hookSpecificOutput: {
+        hookEventName: event,
+        additionalContext: await sessionBriefing(
+          input.cwd,
+          statusFileFor(directory),
+        ),
+      },
+    };
   if (event === "PreToolUse") {
     const refusal =
       gitHistoryRefusal(input.tool_name, input.tool_input) ??
@@ -383,6 +423,8 @@ export async function gate(input, directory) {
         ?.length === 0
     )
       return;
+    // Orienting (steps 1 to 4) needs no declaration: read-only tools only.
+    if (orientsOnly(input.tool_name, input.tool_input)) return;
     const state = await store.read();
     if (declaresTopic(input.tool_name, input.tool_input)) {
       if (!state.pending) await store.write({ ...state, pending: true });
@@ -419,15 +461,135 @@ export async function gate(input, directory) {
   }
 }
 
+// Copilot CLI runs the same gate from the repository's hooks
+// (.github/hooks/rene-topic-gate.json), so a session the workbench starts
+// and one started by hand are held alike. Its hooks name the event on the
+// command line (`--copilot <event>`) and send camelCase fields: the session
+// in sessionId, the tool in toolName with its arguments in toolArgs (a JSON
+// string or an object), the result in toolResult. Its prompt hook can't add
+// context, so the reminder comes once, when the session starts.
+const COPILOT_EVENTS = new Map([
+  ["userPromptSubmitted", "UserPromptSubmit"],
+  ["preToolUse", "PreToolUse"],
+  ["postToolUse", "PostToolUse"],
+  ["agentStop", "Stop"],
+]);
+
+/**
+ * Copilot CLI's tools as the Claude Code tools the gate's rules name: its
+ * shell (and input written to a running one) as Bash, its file built-ins as
+ * the ones rene replaces, rene over MCP (`rea-<tool>`) as mcp__rea__<tool>.
+ */
+const COPILOT_TOOLS = {
+  bash: (args) => ["Bash", { command: args.command }],
+  write_bash: (args) => ["Bash", { command: args.input ?? args.command }],
+  view: (args) => ["Read", { file_path: args.path }],
+  create: (args) => ["Write", { file_path: args.path }],
+  edit: (args) => [
+    "Edit",
+    {
+      file_path: args.path,
+      old_string: args.old_str,
+      new_string: args.new_str,
+    },
+  ],
+  grep: (args) => [
+    "Grep",
+    { pattern: args.pattern, path: args.path, glob: args.glob },
+  ],
+  glob: (args) => ["Glob", { pattern: args.pattern, path: args.path }],
+};
+
+const copilotArguments = (toolArgs) => {
+  if (typeof toolArgs !== "string") return toolArgs ?? {};
+  try {
+    return JSON.parse(toolArgs);
+  } catch {
+    return {};
+  }
+};
+
+/**
+ * The text a Copilot tool result showed the agent: the text it gave the
+ * model, or its content, so the declaration receipt in it is read as
+ * printed, not escaped inside JSON.
+ */
+const copilotResultText = (result) => {
+  if (typeof result === "string") return result;
+  for (const text of [result?.textResultForLlm, result?.content])
+    if (typeof text === "string") return text;
+  return JSON.stringify(result ?? "");
+};
+
+const copilotTool = (toolName, toolArgs) => {
+  const args = copilotArguments(toolArgs);
+  const overMcp = /^rea-(.+)$/u.exec(toolName ?? "");
+  if (overMcp) return [`mcp__rea__${overMcp[1]}`, args];
+  return COPILOT_TOOLS[toolName]?.(args) ?? [toolName, args];
+};
+
+/**
+ * The Copilot CLI hook's answer for one event, or undefined to let it
+ * through: the event in the gate's terms, and its answer in Copilot's.
+ * @param {string} copilotEvent the hook's event name, as configured
+ * @param {object} input the hook's JSON
+ * @param {string} directory the gate's state folder
+ */
+export async function copilotGate(copilotEvent, input, directory) {
+  // Copilot's prompt hook can't add context, so the rules come here too.
+  if (copilotEvent === "sessionStart")
+    return {
+      additionalContext: `${await sessionBriefing(input.cwd, statusFileFor(directory))}\n\n${USE_RENE} ${CLOSE_GAPS}`,
+    };
+  const event = COPILOT_EVENTS.get(copilotEvent);
+  if (!event) return undefined;
+  const [toolName, toolInput] = copilotTool(input.toolName, input.toolArgs);
+  const answer = await gate(
+    {
+      hook_event_name: event,
+      session_id: input.sessionId,
+      cwd: input.cwd,
+      tool_name: toolName,
+      tool_input: toolInput,
+      tool_response: copilotResultText(input.toolResult),
+      stop_hook_active: input.stop_hook_active,
+    },
+    directory,
+  );
+  const decision = answer?.hookSpecificOutput?.permissionDecision;
+  if (event === "PreToolUse" && decision)
+    return {
+      permissionDecision: decision,
+      permissionDecisionReason:
+        answer.hookSpecificOutput.permissionDecisionReason,
+    };
+  if (event === "Stop" && answer?.decision) return answer;
+  return undefined;
+}
+
+/** Where Copilot CLI sessions keep the gate's state, beside the bridge's. */
+const COPILOT_STATE = fileURLToPath(
+  new URL("./.workbench-agent/topic-gate", import.meta.url),
+);
+
 if (
   process.argv[1] &&
   import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
   try {
-    const answer = await gate(
-      await readStdin(),
-      process.env.REA_TOPIC_GATE_DIR,
-    );
+    const copilot = process.argv.indexOf("--copilot");
+    let answer;
+    if (copilot === -1)
+      answer = await gate(await readStdin(), process.env.REA_TOPIC_GATE_DIR);
+    else {
+      const directory = process.env.REA_TOPIC_GATE_DIR ?? COPILOT_STATE;
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      answer = await copilotGate(
+        process.argv[copilot + 1],
+        await readStdin(),
+        directory,
+      );
+    }
     if (answer) process.stdout.write(`${JSON.stringify(answer)}\n`);
   } catch (cause) {
     process.stderr.write(`topic gate: ${cause?.message ?? cause}\n`);

@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -74,8 +75,11 @@ describe("cli toolkit", () => {
     expect(ls?.hookSpecificOutput?.permissionDecisionReason).toContain(
       `Run it as \`rene call run_command '{"command":"ls -la '\\''a b'\\''","cwd":"/r"}'\``,
     );
-    // rea, but no topic yet: refused, with record_topic's arguments spelled out.
-    const early = await bash(`rene call read_file '{"path":"/x"}'`);
+    // rea, but no topic yet: refused, with record_topic's arguments spelled
+    // out (reading to orient is allowed: workbenchSessionBriefing).
+    const early = await bash(
+      `rene call write_file '{"path":"/x","content":"y"}'`,
+    );
     expect(decision(early)).toBe("deny");
     expect(early?.hookSpecificOutput?.permissionDecisionReason).toContain(
       `rene call record_topic '{"title":"…","kind":"feature","parent_id":"<thread id>"}'`,
@@ -156,7 +160,90 @@ describe("cli toolkit", () => {
     expect(context).toContain("`rene call <tool> '<json>'`");
     expect(context).not.toContain("mcp__rea__record_topic");
   });
+});
 
+describe("copilot cli gate", () => {
+  it("holds Copilot CLI to the same gate through the repository's hooks", async () => {
+    const directory = await createTestTempDirectory("rea-copilot-gate-");
+    const hooks = JSON.parse(
+      await readFile(
+        new URL("../../../.github/hooks/rene-topic-gate.json", import.meta.url),
+        "utf8",
+      ),
+    ) as { hooks: Record<string, { bash: string }[]> };
+    // Each event's command, run as Copilot runs it: its JSON on stdin.
+    const run = async (event: string, input: Record<string, unknown> = {}) => {
+      const [hook] = hooks.hooks[event]!;
+      const child = execute("bash", ["-c", hook!.bash], {
+        cwd: fileURLToPath(frontend),
+        env: { ...process.env, REA_TOPIC_GATE_DIR: directory },
+      });
+      child.child.stdin?.end(
+        JSON.stringify({ sessionId: "c1", timestamp: 0, cwd: "/r", ...input }),
+      );
+      const { stdout } = await child;
+      return stdout.trim()
+        ? (JSON.parse(stdout) as Record<string, string>)
+        : undefined;
+    };
+    const tool = (toolName: string, toolArgs: Record<string, unknown>) =>
+      run("preToolUse", { toolName, toolArgs: JSON.stringify(toolArgs) });
+
+    // Copilot's prompt hook can't add context: the rules come at session start.
+    expect((await run("sessionStart"))?.additionalContext).toContain(
+      "rene call record_topic",
+    );
+    expect(await run("userPromptSubmitted", { prompt: "fix it" })).toBe(
+      undefined,
+    );
+    const ls = await tool("bash", { command: "ls -la", description: "list" });
+    expect(ls?.permissionDecision).toBe("deny");
+    expect(ls?.permissionDecisionReason).toContain(
+      "This shell runs only rene commands",
+    );
+    // Input written to a running shell is a shell line too.
+    expect(
+      (await tool("write_bash", { shellId: "1", input: "rm -rf x" }))
+        ?.permissionDecision,
+    ).toBe("deny");
+    expect(
+      (await tool("view", { path: "/r/a.ts" }))?.permissionDecisionReason,
+    ).toContain(`run \`rene call read_file '{"path":"/r/a.ts"}'\``);
+    expect(
+      (await tool("rea-read_file", { path: "/x" }))?.permissionDecisionReason,
+    ).toContain("rene isn't reached over MCP");
+    const early = await tool("bash", {
+      command: `rene call write_file '{"path":"/x","content":"y"}'`,
+    });
+    expect(early?.permissionDecisionReason).toContain(
+      "No topic is declared for this turn yet",
+    );
+    expect(await tool("bash", { command: recordTopic })).toBe(undefined);
+    expect((await run("agentStop", { stopReason: "end_turn" }))?.decision).toBe(
+      "block",
+    );
+    await run("postToolUse", {
+      toolName: "bash",
+      toolArgs: JSON.stringify({ command: recordTopic }),
+      toolResult: { resultType: "success", textResultForLlm: topicEvidence },
+    });
+    expect(
+      await tool("bash", { command: `rene call read_file '{"path":"/x"}'` }),
+    ).toBe(undefined);
+    expect(await run("agentStop", { stopReason: "end_turn" })).toBe(undefined);
+    // A new prompt is a new turn: nothing declared again.
+    await run("userPromptSubmitted", { prompt: "next" });
+    expect(
+      (
+        await tool("bash", {
+          command: `rene call write_file '{"path":"/x","content":"y"}'`,
+        })
+      )?.permissionDecision,
+    ).toBe("deny");
+  });
+});
+
+describe("cli toolkit session", () => {
   it("tells the agent to use rene call, not MCP tools", () => {
     const instructions = agentInstructions(undefined);
     expect(instructions).toContain("`rene call <tool> '<json>'`");

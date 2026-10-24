@@ -162,7 +162,26 @@ In order (a task needs those above it it names):
    History should nest items, below, are the same fix). Needs nothing;
    must come before 6, or the store records two answers. 40–60 calls
    (2–12%).
-6. **Usage store**: one row per model call and per tool call (time, agent,
+6. **Done (24 Oct): usage store.** Decided: rene owns it, not the journal
+   (its rows name conversations, topics and evidence lines; the telemetry
+   item may later mirror path-free counts as `rene-usage`).
+   `frontend/usageStore.mjs`: table `calls` (kind model, tool, message or
+   interrupt; at_ms, agent, conversation, project, topic, phase, basis,
+   model, tokens, context, result chars, outcome, waste reason and
+   deviation cause/kind, each with its evidence line), sealed as Parquet
+   generations with a manifest through CodeGraph's store addon
+   (`packages/codegraph-store`, sorted by conversation and time). Rows come
+   from `sessionUsage`'s `ledger` (one owner of classification): a call that
+   is waste in itself (refused, failed, repeated) says so, else it takes the
+   strongest wasted interval it falls in; your corrections, added scope and
+   stops are rows of their own, so every deviation cause the bar counts is
+   in the store. Each seal replaces the whole ledger (derived data: a store
+   sealed under another schema is rebuilt). The bridge seals from
+   `cachedActuals` at most every 2 minutes, on a trailing timer, into
+   `<project>/usage`. Tests in `workbenchUsageStore` (real addon). Left: not
+   yet seen against a live bridge; one writer per project (the bridge); a
+   missing addon logs a warning per seal; no reader yet beyond
+   `query` (item 7). Original item: one row per model call and per tool call (time, agent,
    conversation, project, topic, phase, model, tokens, context size, result
    size, outcome, waste reason and deviation cause with their evidence
    line), DuckDB over Parquet. Needs 5. Overlaps the telemetry item
