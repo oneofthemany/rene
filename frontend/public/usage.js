@@ -139,6 +139,40 @@ function task(progress) {
       ),
     ),
     deviationLine(current.deviation),
+    allocationLine(current.callsBy),
+  );
+}
+
+/**
+ * How the task's calls came to be counted under it: a call made in a turn
+ * that declared nothing is carried from the conversation's last topic, which
+ * the agent never confirmed for it.
+ */
+function allocationLine(callsBy) {
+  if (!callsBy || (!callsBy.carried && !callsBy.named)) return undefined;
+  const parts = [
+    `${count(callsBy.declared)} declared`,
+    callsBy.named ? `${count(callsBy.named)} named later` : undefined,
+    callsBy.carried
+      ? `${count(callsBy.carried)} carried from an earlier declaration (their turn declared nothing)`
+      : undefined,
+  ].filter(Boolean);
+  return h(
+    "div",
+    { class: "usage-detail" },
+    h("span", { class: "usage-label" }, "Calls counted "),
+    parts.join(" · "),
+  );
+}
+
+/** Use made before any topic was declared: counted, under no task. */
+function unattributedLine(unattributed) {
+  if (!unattributed?.calls) return undefined;
+  return h(
+    "p",
+    { class: "usage-detail" },
+    h("span", { class: "usage-label" }, "In no task "),
+    `${count(unattributed.calls)} model calls · ${tokens(unattributed.outputTokens)} out · ${duration(unattributed.working)} working, made before any topic was declared in their conversation.`,
   );
 }
 
@@ -682,7 +716,7 @@ function budgetTask(entry, budget) {
       ? "Past its estimate: nothing left of it to price; re-estimate it."
       : undefined,
     entry.verdict === "fresh" && entry.cost.fresh
-      ? `In a fresh conversation (${tokens(budget.freshContext)} context a call): session ${pointsRange(entry.cost.fresh.session)} · weekly ${pointsRange(entry.cost.fresh.weekly)}.`
+      ? `In a fresh conversation (${tokens(budget.fresh.perCall)} context a call, ${budget.fresh.source === "measured" ? `measured over this project's last ${budget.fresh.conversations} conversations` : "assumed: too few conversations here to measure"}): session ${pointsRange(entry.cost.fresh.session)} · weekly ${pointsRange(entry.cost.fresh.weekly)}.`
       : undefined,
     entry.waitsUntil ? `Fits after ${when(entry.waitsUntil)}.` : undefined,
   ].filter(Boolean);
@@ -804,6 +838,7 @@ function render(usage) {
     ),
     timeBar(time),
     task(usage.progress),
+    unattributedLine(usage.unattributed),
     budgetPanel(usage.budget),
     breakdown(usage),
   ];

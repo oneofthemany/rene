@@ -145,8 +145,9 @@ it("builds threads, topics and turns from declarations, with factual links", asy
     [
       turn(0, ["d-thread", "d-feature", "h-feature-read"]),
       turn(1, ["d-bug", "h-bug-read"]),
+      // Declares nothing: carried under the topic turn 1 ended in.
       turn(2, []),
-      // Declares two topics: the turn is filed under the last.
+      // Declares two topics: the turn is listed under both.
       turn(3, ["d-thread-again", "d-feature-done"]),
     ],
     recorded.map(({ entry }) => entry),
@@ -158,7 +159,7 @@ it("builds threads, topics and turns from declarations, with factual links", asy
   ]);
   const [thread, bug] = threads as [TopicNode, TopicNode];
   expect(thread.declarations).toBe(2);
-  expect(thread.turns).toEqual([]);
+  expect(thread.turns.map(({ index }) => index)).toEqual([0, 3]);
   const [feature] = thread.children as [TopicNode];
   expect(feature).toMatchObject({
     topic_id: FEATURE,
@@ -167,8 +168,11 @@ it("builds threads, topics and turns from declarations, with factual links", asy
     declared_by: "Claude Code",
   });
   expect(feature.turns.map(({ index }) => index)).toEqual([0, 3]);
-  expect(bug.turns.map(({ index }) => index)).toEqual([1]);
-  expect(loose_turns.map(({ index }) => index)).toEqual([2]);
+  expect(bug.turns).toEqual([
+    expect.objectContaining({ index: 1, basis: "declared" }),
+    expect.objectContaining({ index: 2, basis: "carried", calls: [] }),
+  ]);
+  expect(loose_turns).toEqual([]);
 
   // Topics whose calls read the same file are linked by it; declarations
   // themselves link nothing.
@@ -181,5 +185,50 @@ it("builds threads, topics and turns from declarations, with factual links", asy
       shared: [{ kind: "file", value: "/shared.ts" }],
       more: 0,
     },
+  ]);
+});
+
+it("carries a topic into turns that declare nothing, marked, and leaves only turns before any declaration loose", async () => {
+  const declared = await topicsModule.currentTopics(history);
+  const inSession = (
+    session: string,
+    index: number,
+    ids: readonly string[],
+  ) => ({
+    ...turn(index, ids),
+    session,
+    at: new Date(Date.parse("2026-10-21T10:00:00Z") + index).toISOString(),
+  });
+  const { threads, loose_turns } = topicsModule.topicTree(
+    declared,
+    [
+      // Nothing declared yet in this conversation: in no topic.
+      inSession("s2", 0, ["h-bug-read"]),
+      inSession("s2", 1, ["d-feature"]),
+      // Declares nothing: its call is carried under the feature.
+      inSession("s2", 2, ["h-feature-read"]),
+      // Another conversation carries nothing in from s2.
+      inSession("s3", 3, ["h-feature-read"]),
+      // A turn that closes its topic carries nothing on.
+      inSession("s4", 4, ["d-feature-done"]),
+      inSession("s4", 5, ["h-bug-read"]),
+    ],
+    recorded.map(({ entry }) => entry),
+  );
+  const [thread] = threads as [TopicNode];
+  const [feature] = thread.children as [TopicNode];
+  expect(feature.turns).toEqual([
+    expect.objectContaining({ index: 1, basis: "declared" }),
+    expect.objectContaining({
+      index: 2,
+      basis: "carried",
+      calls: ["h-feature-read"],
+    }),
+    expect.objectContaining({ index: 4, basis: "declared" }),
+  ]);
+  expect(loose_turns).toEqual([
+    expect.objectContaining({ session: "s2", index: 0, calls: ["h-bug-read"] }),
+    expect.objectContaining({ session: "s3", index: 3 }),
+    expect.objectContaining({ session: "s4", index: 5 }),
   ]);
 });

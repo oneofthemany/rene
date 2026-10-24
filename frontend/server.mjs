@@ -55,6 +55,7 @@ import {
 import {
   accountUsage,
   budgetOf,
+  freshContext,
   sessionUsage,
   statusReadings,
   topicActuals,
@@ -519,10 +520,10 @@ async function cachedTopics(project) {
   });
   const stamp = `${declarations.length}:${declarations.at(-1)?.id ?? ""}`;
   const cached = usageTopics.get(project.manifest.id);
-  if (cached?.stamp === stamp) return cached.topics;
-  const { topics } = await currentTopics(project.history);
-  usageTopics.set(project.manifest.id, { stamp, topics });
-  return topics;
+  if (cached?.stamp === stamp) return cached.declared;
+  const declared = { ...(await currentTopics(project.history)), stamp };
+  usageTopics.set(project.manifest.id, { stamp, declared });
+  return declared;
 }
 
 // This machine's agent transcripts over the last month and a bit, followed
@@ -579,12 +580,20 @@ async function terminalUsage() {
     .map(({ events }) => Date.parse(events.find((event) => event.at)?.at ?? ""))
     .filter(Number.isFinite);
   const since = Math.min(described.startedAt, ...firsts);
+  const { topics, declaredBy, filed, ...declared } =
+    await cachedTopics(project);
   const { topicTime, topicCalls, ...usage } = sessionUsage({
     conversations: active,
     since,
     now,
-    topics: await cachedTopics(project),
-    actuals: cachedActuals(project, all, now),
+    topics,
+    declaredBy,
+    filed,
+    actuals: cachedActuals(project, all, now, {
+      declaredBy,
+      filed,
+      stamp: declared.stamp,
+    }),
   });
   // Each change in the live limits the status line recorded, for the pace.
   const readings = statusReadings(
@@ -604,21 +613,33 @@ async function terminalUsage() {
       ledger: usageLedger,
       progress: usage.progress,
       context: usage.tokens.context,
+      fresh: freshContext(all),
       now: Date.now(),
     }),
   };
 }
 
-/** project id -> { stamp, actuals }: every topic's use, again when a conversation grows. */
+/**
+ * project id -> { stamp, actuals }: every topic's use, again when a
+ * conversation grows or a declaration is made (it can name earlier turns).
+ */
 const usageActuals = new Map();
 
-function cachedActuals(project, conversations, now) {
-  const stamp = conversations
-    .map(({ meta, events }) => `${meta.session}:${events.length}`)
-    .join(",");
+function cachedActuals(project, conversations, now, declared) {
+  const stamp = [
+    declared.stamp,
+    ...conversations.map(
+      ({ meta, events }) => `${meta.session}:${events.length}`,
+    ),
+  ].join(",");
   const cached = usageActuals.get(project.manifest.id);
   if (cached?.stamp === stamp) return cached.actuals;
-  const actuals = topicActuals({ conversations, now });
+  const actuals = topicActuals({
+    conversations,
+    now,
+    declaredBy: declared.declaredBy,
+    filed: declared.filed,
+  });
   usageActuals.set(project.manifest.id, { stamp, actuals });
   return actuals;
 }

@@ -6,13 +6,14 @@
 // its current state. A thread is the chat relationship at the top; topics of
 // a kind (feature, question, bug, ...) sit under it.
 //
-// A turn belongs to the topic declared in it (the last, when it declared
-// more than one) and to no other: nothing is carried over from an earlier
-// turn, so a turn without a declaration is listed as undeclared rather than
-// filed under a topic it may not be about. An undeclared turn is filed only
-// by a declaration that names it by its recorded identity (its session and
-// the time of its request, in record_topic's turns); a topic's named turns
-// add up across its declarations, and the latest naming of a turn wins. A
+// Which topic each call was for is attribution.mjs's answer: a call is filed
+// under the topic in force when it was made, and a turn is listed under every
+// topic it declared or made a call for, with its basis. A turn without a
+// declaration is carried under the topic its conversation was last in,
+// marked carried, unless a declaration names it by its recorded identity
+// (its session and the time of its request, in record_topic's turns); a
+// topic's named turns add up across its declarations, and the latest naming
+// of a turn wins. Only turns before any declaration stay undeclared. A
 // declaration's evidence (the Evidence its conclusion rests on) links the
 // topic like Evidence its calls named. Workbench agents are held to a
 // declaration in every turn (topicGate.mjs). Calls join through their turns
@@ -21,7 +22,9 @@
 // file, or named or returned the same Evidence, are linked, with what they
 // share.
 
-export const TOPIC_TOOL = "record_topic";
+import { attributeTurns, TOPIC_TOOL, turnKey } from "./attribution.mjs";
+
+export { TOPIC_TOOL };
 const MAX_SHARED = 5;
 // Arguments naming one file a call read or changed.
 const FILE_TOOLS = new Set(["read_file", "write_file", "edit_file"]);
@@ -84,7 +87,10 @@ export async function currentTopics(history) {
       declarations: (previous?.declarations ?? 0) + 1,
       declared_by: entry.source === "agent" ? (entry.agent ?? "Agent") : "You",
     });
-    declaredBy.set(entry.id, declared.topic_id);
+    declaredBy.set(entry.id, {
+      topic: declared.topic_id,
+      status: declared.status,
+    });
     for (const turn of declared.turns ?? [])
       filed.set(turnKey(turn.session, turn.at), declared.topic_id);
   }
@@ -109,9 +115,6 @@ const addPhase = (phases, declared) => {
     },
   ];
 };
-
-/** A turn's recorded identity: its session and the time of its request. */
-const turnKey = (session, at) => `${session}\u0000${Date.parse(at)}`;
 
 /** What a call touched that another topic's call could share: files and Evidence. */
 const touched = (entry) => {
@@ -149,41 +152,55 @@ export function topicTree(
 }
 
 /**
- * Files each turn under the topic it declared, or the one a declaration named
- * it for; returns the turns no topic holds.
+ * Files each call under the topic in force when it was made, and lists each
+ * turn, with its calls for that topic, under every topic it declared or made
+ * a call for, or else the topic it ended in (attribution.mjs), with the
+ * basis it is there on: declared, named or carried. Returns the turns no
+ * topic holds: those before any declaration in their conversation, or under
+ * a topic the history doesn't know.
  */
 function fileTurns(nodes, turns, declaredBy, filed) {
   const loose = [];
-
-  const byTime = [...turns].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
-  for (const turn of byTime) {
-    let topicId;
-    for (const event of turn.events)
-      if (
-        event.kind === "tool_use" &&
-        event.tool === TOPIC_TOOL &&
-        event.historyId
-      )
-        topicId = declaredBy.get(event.historyId) ?? topicId;
-    topicId ??= filed.get(turnKey(turn.session, turn.at));
-    const node = nodes.get(topicId);
-    const summary = {
+  for (const { turn, declared, inForce, ended } of attributeTurns(turns, {
+    declaredBy,
+    filed,
+  })) {
+    /** topic id -> this turn's calls for it and its basis, declared first. */
+    const byTopic = new Map(
+      declared.map((topicId) => [topicId, { calls: [], basis: "declared" }]),
+    );
+    const unfiled = [];
+    for (const [position, event] of turn.events.entries()) {
+      if (event.kind !== "tool_use" || !event.rea || !event.historyId) continue;
+      const held = inForce[position];
+      if (!nodes.has(held?.topic)) {
+        unfiled.push(event.historyId);
+        continue;
+      }
+      if (!byTopic.has(held.topic))
+        byTopic.set(held.topic, { calls: [], basis: held.basis });
+      byTopic.get(held.topic).calls.push(event.historyId);
+    }
+    // A turn that made no call for a topic is still the one it ended in.
+    if (byTopic.size === 0 && unfiled.length === 0 && nodes.has(ended?.topic))
+      byTopic.set(ended.topic, { calls: [], basis: ended.basis });
+    const summary = (calls, basis) => ({
       session: turn.session,
       index: turn.index,
       at: turn.at,
       prompt: turn.prompt,
-      calls: turn.events
-        .filter(
-          (event) => event.kind === "tool_use" && event.rea && event.historyId,
-        )
-        .map((event) => event.historyId),
-    };
-    if (!node) {
-      loose.push(summary);
-      continue;
+      calls,
+      ...(basis ? { basis } : {}),
+    });
+    let held = false;
+    for (const [topicId, { calls, basis }] of byTopic) {
+      const node = nodes.get(topicId);
+      if (!node) continue;
+      held = true;
+      node.turns.push(summary(calls, basis));
+      node.calls.push(...calls);
     }
-    node.turns.push(summary);
-    node.calls.push(...summary.calls);
+    if (!held) loose.push(summary(unfiled));
   }
   return loose;
 }

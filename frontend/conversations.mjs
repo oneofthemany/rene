@@ -39,6 +39,8 @@ import {
   findConversations,
 } from "../dist/toolbox/AgentConversations.js";
 
+import { splitTurns } from "./attribution.mjs";
+
 const SESSION = /^[\w-]{1,120}$/;
 const MAX_TEXT = 4000;
 const MAX_RESULT_TEXT = 2000;
@@ -423,28 +425,11 @@ export function conversationTurns(meta, events, history) {
     if (best) used.add(best.id);
     return best;
   };
-  const turns = [];
-  let turn;
-  for (const event of events) {
-    if (event.sidechain) continue;
-    if (event.kind === "prompt" || !turn) {
-      turn = {
-        session: meta.session,
-        agent: meta.agent,
-        index: turns.length,
-        at: event.at,
-        prompt: event.kind === "prompt" ? event.text : null,
-        events: [],
-      };
-      turns.push(turn);
-      if (event.kind === "prompt") continue;
-    }
-    const kept = { ...event };
-    if (event.kind === "tool_use" && event.rea)
-      kept.historyId = callFor(event)?.id ?? null;
-    turn.events.push(kept);
-  }
-  return turns;
+  return splitTurns(meta, events, (event) =>
+    event.kind === "tool_use" && event.rea
+      ? { ...event, historyId: callFor(event)?.id ?? null }
+      : { ...event },
+  );
 }
 
 /**

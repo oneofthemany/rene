@@ -229,3 +229,29 @@ it("follows Claude Code and Copilot CLI conversations into turns and audit trail
     outcome: [{ kind: "reply", text: "Done." }],
   });
 });
+
+it("starts a turn at a message sent while the agent works, so its work isn't bundled into the request before", () => {
+  const at = (second: number) =>
+    new Date(Date.parse("2026-10-23T10:00:00Z") + second * 1_000).toISOString();
+  const events = [
+    { kind: "prompt", at: at(0), text: "look at the usage plan" },
+    { kind: "tool_use", at: at(1), tool: "read_file", toolUseId: "a" },
+    // Copilot's steering, Claude Code's queued message: a request of its own.
+    { kind: "interjection", at: at(5), text: "this should count as waste" },
+    { kind: "tool_use", at: at(6), tool: "edit_file", toolUseId: "b" },
+  ] as unknown as StoredEvent[];
+  const turns = conversations.conversationTurns(
+    { session: "c1", agent: "GitHub Copilot CLI" } as Meta,
+    events,
+    [],
+  );
+  expect(
+    turns.map((turn) => ({
+      prompt: turn.prompt,
+      tools: turn.events.map(({ tool }) => tool),
+    })),
+  ).toEqual([
+    { prompt: "look at the usage plan", tools: ["read_file"] },
+    { prompt: "this should count as waste", tools: ["edit_file"] },
+  ]);
+});

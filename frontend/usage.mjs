@@ -8,6 +8,8 @@
 // are classifications of those events: each names the event it rests on, so
 // they can be checked, and none is proof on its own.
 
+import { attributeConversation, TOPIC_TOOL } from "./attribution.mjs";
+
 const MINUTE = 60_000;
 // A Copilot turn records no end; one whose last event is this recent is
 // taken to be still running.
@@ -17,7 +19,6 @@ const CHARS_PER_TOKEN = 4;
 const MAX_EXAMPLES = 3;
 const EXAMPLE_CHARS = 160;
 const ASKING = new Set(["AskUserQuestion", "ask_user"]);
-const TOPIC_TOOL = "record_topic";
 // Claude Code's word that a command went on running in the background; it
 // wakes the agent with a notification when it ends.
 const BACKGROUND = /moved to the background/iu;
@@ -122,22 +123,6 @@ const isAddition = (text) => ADDITION.test(text);
 const keysOf = (topic, phase) =>
   phase ? [topic, `${topic}\u0000${phase}`] : [topic];
 
-/**
- * The topic and phase a record_topic call declared: from its arguments, or
- * when they came on stdin and the transcript doesn't show them, from what
- * it printed (`declared topic <id>` and the result's phase).
- */
-const declarationOf = (use, result) => {
-  const text = result?.isError ? "" : (result?.text ?? "");
-  const topic =
-    (typeof use.args?.topic_id === "string" ? use.args.topic_id : undefined) ??
-    /declared topic ([0-9a-f-]{36})/u.exec(text)?.[1];
-  const phase =
-    (typeof use.args?.phase === "string" ? use.args.phase : undefined) ??
-    /"phase":"((?:[^"\\]|\\.)*)"/u.exec(text)?.[1];
-  return { topic, phase };
-};
-
 const correctsClaim = (text) =>
   CLAIM_CORRECTION.test(text.slice(0, OPENING_CHARS));
 const emptyTokens = () => ({
@@ -183,15 +168,16 @@ function exclusiveTime(intervals) {
 
 /**
  * One conversation's events inside the window, as turns: each prompt and the
- * agent's work after it, up to its last event (or now, while it runs).
+ * agent's work after it, up to its last event (or now, while it runs). Each
+ * event keeps what was in force at it (held, attributeConversation's).
  */
-function turnsOf(meta, events, since, now) {
+function turnsOf(meta, events, since, now, held) {
   const turns = [];
   let turn;
   // A turn still under way when the window starts: its prompt, or null for
   // work a background task woke after the turn before it ended.
   let earlier;
-  for (const event of events) {
+  for (const [index, event] of events.entries()) {
     const at = timeOf(event);
     if (at === undefined) continue;
     if (at < since) {
@@ -240,7 +226,7 @@ function turnsOf(meta, events, since, now) {
       };
       turns.push(turn);
     }
-    turn.events.push({ ...event, time: at });
+    turn.events.push({ ...event, time: at, inForce: held[index] });
     turn.end = Math.max(turn.end, at);
     if (event.kind === "turn_end") turn.ended = true;
   }
@@ -265,8 +251,20 @@ function turnsOf(meta, events, since, now) {
  * @param {number} input.since when the session started
  * @param {number} input.now now, or when the session ended
  * @param {Map<string, object>} input.topics current topics by id (topics.mjs)
+ * @param {Map<string, { topic: string, status: string }>} [input.declaredBy]
+ *   record_topic history id -> the topic and status it declared (currentTopics), for attribution.mjs
+ * @param {Map<string, string>} [input.filed] turn -> the topic a declaration
+ *   named it for (currentTopics), for attribution.mjs
  */
-export function sessionUsage({ conversations, since, now, topics, actuals }) {
+export function sessionUsage({
+  conversations,
+  since,
+  now,
+  topics,
+  actuals,
+  declaredBy,
+  filed,
+}) {
   const tokens = emptyTokens();
   const byModel = new Map();
   let calls = 0;
@@ -315,11 +313,16 @@ export function sessionUsage({ conversations, since, now, topics, actuals }) {
   const topicCalls = new Map();
   /** Deviations from each task, by cause: see deviate. */
   const deviations = [];
+  /** Model calls and working time made before any topic was declared. */
+  const unattributed = { calls: new Set(), output: 0, working: 0 };
   const conversationsUsed = [];
   let compactions = 0;
 
   for (const { meta, events } of conversations) {
-    const turns = turnsOf(meta, events, since, now);
+    // Which topic and phase each event was for, over the whole conversation,
+    // so a window starting part-way carries in what was in force.
+    const held = attributeConversation(meta, events, { declaredBy, filed });
+    const turns = turnsOf(meta, events, since, now, held);
     // Usage: a call's records repeat its counts, so keep one per call; a
     // session total counts only for a model whose calls weren't recorded.
     const perCall = new Map();
@@ -373,13 +376,11 @@ export function sessionUsage({ conversations, since, now, topics, actuals }) {
       total: own.input + own.cacheRead + own.cacheWrite + own.output,
     });
 
-    let topic;
-    let phase = null;
     // A deviation from the task, by its cause, under the topic and phase in
-    // force.
-    const deviate = (cause, kind, at, text) => {
-      if (topic)
-        deviations.push({ topic, phase, cause, kind, at, text: example(text) });
+    // force at the event it rests on.
+    const deviate = (inForce, cause, kind, at, text) => {
+      if (inForce)
+        deviations.push({ ...inForce, cause, kind, at, text: example(text) });
     };
     let backgrounded = false;
     for (const [index, turn] of turns.entries()) {
@@ -439,9 +440,9 @@ export function sessionUsage({ conversations, since, now, topics, actuals }) {
             chars += event.chars ?? event.text?.length ?? 0;
         return Math.round(chars / CHARS_PER_TOKEN);
       };
-      const add = (reason, start, end, text, measured = true) => {
+      const add = (inForce, reason, start, end, text, measured = true) => {
         if (end <= start) return;
-        intervals.push({ reason, start, end, topic });
+        intervals.push({ reason, start, end, topic: inForce?.topic });
         const entry = waste.get(reason);
         note(entry, start, text);
         if (measured) {
@@ -451,16 +452,17 @@ export function sessionUsage({ conversations, since, now, topics, actuals }) {
       };
       let segmentStart = turn.start;
       for (const [position, event] of turn.events.entries()) {
-        if (event.kind === "tool_use" && event.tool === TOPIC_TOOL) {
-          const declared = declarationOf(event, results.get(event.toolUseId));
-          if (declared.topic && declared.topic !== topic) phase = null;
-          if (declared.topic) topic = declared.topic;
-          if (declared.phase) phase = declared.phase;
+        const { inForce } = event;
+        // A model call made before anything was declared counts apart, so
+        // it is neither lost nor put under a guessed topic.
+        if (event.kind === "usage" && event.scope === "call" && !inForce) {
+          unattributed.calls.add(event.call ?? `${event.time}`);
+          unattributed.output += event.output;
         }
         // Each model call counts toward the topic, and its phase, in force
         // when it was made.
-        if (event.kind === "usage" && event.scope === "call" && topic)
-          for (const key of keysOf(topic, phase)) {
+        if (event.kind === "usage" && event.scope === "call" && inForce)
+          for (const key of keysOf(inForce.topic, inForce.phase)) {
             const calls = topicCalls.get(key) ?? new Map();
             calls.set(event.call ?? `${event.time}`, event);
             topicCalls.set(key, calls);
@@ -470,8 +472,9 @@ export function sessionUsage({ conversations, since, now, topics, actuals }) {
           if (answer) asked += Math.max(0, answer.time - event.time);
         }
         if (event.kind === "interrupt") {
-          deviate("you", "stopped", event.time, turn.prompt?.text);
+          deviate(inForce, "you", "stopped", event.time, turn.prompt?.text);
           add(
+            inForce,
             "stopped",
             segmentStart,
             event.time,
@@ -481,10 +484,10 @@ export function sessionUsage({ conversations, since, now, topics, actuals }) {
         }
         if (event.kind === "interjection") {
           if (isCorrection(event.text)) {
-            add("corrected", segmentStart, event.time, event.text);
-            deviate("assumption", "corrected", event.time, event.text);
+            add(inForce, "corrected", segmentStart, event.time, event.text);
+            deviate(inForce, "assumption", "corrected", event.time, event.text);
           } else if (isAddition(event.text))
-            deviate("you", "scope-added", event.time, event.text);
+            deviate(inForce, "you", "scope-added", event.time, event.text);
           if (correctsClaim(event.text))
             note(signals.get("claim-corrected"), event.time, event.text);
           segmentStart = event.time;
@@ -493,6 +496,7 @@ export function sessionUsage({ conversations, since, now, topics, actuals }) {
           compactions += 1;
           if (event.durationMs)
             add(
+              inForce,
               "compaction",
               event.time - event.durationMs,
               event.time,
@@ -511,6 +515,7 @@ export function sessionUsage({ conversations, since, now, topics, actuals }) {
           if (result?.isError) {
             const reason = GATE.test(result.text) ? "refused" : "failed";
             add(
+              inForce,
               reason,
               event.time,
               following?.time ?? result.time,
@@ -534,6 +539,7 @@ export function sessionUsage({ conversations, since, now, topics, actuals }) {
                 `${event.tool}: ${line}`,
               );
               deviate(
+                inForce,
                 "assumption",
                 assumption.kind,
                 event.time,
@@ -546,6 +552,7 @@ export function sessionUsage({ conversations, since, now, topics, actuals }) {
             // (the gate), or the tools and environment.
             if (result.isError && !assumed)
               deviate(
+                inForce,
                 GATE.test(result.text) ? "instructions" : "blocked",
                 GATE.test(result.text) ? "refused" : "failed",
                 event.time,
@@ -560,6 +567,7 @@ export function sessionUsage({ conversations, since, now, topics, actuals }) {
               event.tool !== TOPIC_TOOL
             )
               add(
+                inForce,
                 "repeated",
                 event.time,
                 result.time,
@@ -571,23 +579,20 @@ export function sessionUsage({ conversations, since, now, topics, actuals }) {
           if (WRITING.test(event.tool)) seen.clear();
         }
       }
-      // Your next message corrects this turn's work, or adds to its scope.
+      // Your next message corrects this turn's work, or adds to its scope:
+      // the topic in force as the turn ended.
+      const ended = turn.events.at(-1)?.inForce ?? null;
       if (next?.prompt && isCorrection(next.prompt.text)) {
-        add("corrected", segmentStart, turn.end, next.prompt.text);
-        deviate("assumption", "corrected", next.start, next.prompt.text);
+        add(ended, "corrected", segmentStart, turn.end, next.prompt.text);
+        deviate(ended, "assumption", "corrected", next.start, next.prompt.text);
       } else if (next?.prompt && isAddition(next.prompt.text))
-        deviate("you", "scope-added", next.start, next.prompt.text);
+        deviate(ended, "you", "scope-added", next.start, next.prompt.text);
       if (next?.prompt && correctsClaim(next.prompt.text))
         note(signals.get("claim-corrected"), next.start, next.prompt.text);
       const worked = Math.max(0, span - asked);
       working += worked;
       asking += asked;
-      if (topic)
-        for (const key of keysOf(topic, phase)) {
-          const entry = topicTime.get(key) ?? { working: 0, wasted: 0 };
-          entry.working += worked;
-          topicTime.set(key, entry);
-        }
+      unattributed.working += creditTurnTime(topicTime, turn, worked);
     }
   }
 
@@ -646,6 +651,11 @@ export function sessionUsage({ conversations, since, now, topics, actuals }) {
       reasons: wasteList,
     },
     signals: [...signals.values()].filter((entry) => entry.count > 0),
+    unattributed: {
+      calls: unattributed.calls.size,
+      outputTokens: unattributed.output,
+      working: unattributed.working,
+    },
     // Tasks are judged on all their calls (actuals), not only this window's.
     progress: progressOf(
       topics,
@@ -662,6 +672,8 @@ export function sessionUsage({ conversations, since, now, topics, actuals }) {
       time: "Working is each turn from your message to the agent's last event (to now while it runs), less time it waited on a question to you; waiting on commands is the gap before a turn the agent began itself while a command it sent to the background ran; waiting on you is the rest.",
       waste:
         "Wasted time is work your next message corrected or you stopped, refused and failed calls up to the agent's next call, repeated identical calls, and compaction; overlapping time counts once. Output tokens in wasted time are measured; context tokens are estimated at 4 characters a token from what the calls returned.",
+      attribution:
+        "Each call counts toward the topic in force when it was made: one its turn declared, one a later declaration named the turn for, or, in a turn that declared nothing, the topic the conversation was last in (carried, counted apart so you can see it). Calls made before any declaration in their conversation are in no task and shown as such.",
       signals:
         "Each signal is a tool or you contradicting something the agent assumed; they point at likely wrong assumptions, not proof of them.",
       estimate:
@@ -675,14 +687,47 @@ export function sessionUsage({ conversations, since, now, topics, actuals }) {
  * conversation id, whichever session or restart they ran in: each model call
  * and its working time, under the topic in force when it was made.
  */
-export function topicActuals({ conversations, now }) {
+export function topicActuals({ conversations, now, declaredBy, filed }) {
   const { topicTime, topicCalls, deviations } = sessionUsage({
     conversations,
     since: -Infinity,
     now,
     topics: undefined,
+    declaredBy,
+    filed,
   });
   return { topicTime, topicCalls, deviations };
+}
+
+/**
+ * A turn's working time, by the topic and phase in force through it: each
+ * stretch between events counts toward what was in force at its start (the
+ * first toward the first event's), scaled to the share of the turn worked.
+ * Returns the working time no topic was in force for.
+ */
+function creditTurnTime(topicTime, turn, worked) {
+  const span = turn.end - turn.start;
+  if (span <= 0 || worked <= 0) return 0;
+  const share = worked / span;
+  let from = turn.start;
+  let inForce = turn.events[0]?.inForce ?? null;
+  let none = 0;
+  const credit = (to) => {
+    if (to > from && !inForce) none += (to - from) * share;
+    if (inForce && to > from)
+      for (const key of keysOf(inForce.topic, inForce.phase)) {
+        const entry = topicTime.get(key) ?? { working: 0, wasted: 0 };
+        entry.working += (to - from) * share;
+        topicTime.set(key, entry);
+      }
+    from = Math.max(from, to);
+  };
+  for (const event of turn.events) {
+    credit(event.time);
+    inForce = event.inForce ?? null;
+  }
+  credit(turn.end);
+  return none;
 }
 
 /** Wasted time per topic, each moment once under its strongest reason. */
@@ -723,6 +768,14 @@ function actualOf(calls, time) {
     ),
     working_minutes: Math.round((time?.working ?? 0) / MINUTE),
   };
+}
+
+/** Model calls by the basis they were allocated on: declared, named or carried. */
+function basisOf(calls) {
+  const by = { declared: 0, named: 0, carried: 0 };
+  for (const usage of calls?.values() ?? [])
+    by[usage.inForce?.basis ?? "declared"] += 1;
+  return by;
 }
 
 const ESTIMATED = [
@@ -856,6 +909,8 @@ function progressOf(topics, actuals, since, now) {
       ),
       working: time?.working ?? null,
       wasted: time?.wasted ?? null,
+      // On what basis its calls are counted here (attribution.mjs).
+      callsBy: basisOf(topicCalls.get(topic.topic_id)),
       // Only this session's calls: a task that spans sessions is judged on
       // the part seen here.
       accuracy: estimateAccuracy(
@@ -1113,8 +1168,47 @@ export function accountUsage({ plan, live, ledger, now }) {
 // ---------------------------------------------------------------------------
 // Budget: what the open tasks would take of each plan window
 
-// A fresh conversation's context per call (measured on 23 Oct: about 60k).
+// A fresh conversation's context per call when this project has too few
+// conversations to measure it (measured here on 23 Oct: about 60k).
 const FRESH_CONTEXT = 60_000;
+// A fresh conversation's context: each one's mean over its first calls, the
+// median over this project's most recent conversations with enough calls.
+const FRESH_CALLS = 20;
+const FRESH_MIN_CALLS = 5;
+const FRESH_CONVERSATIONS = 20;
+
+/**
+ * What a call in a fresh conversation reads in this project: each
+ * conversation's mean context over its first calls, the median of the most
+ * recent ones. Null with too few to measure.
+ * @param {Array<{ events: object[] }>} conversations
+ */
+export function freshContext(conversations) {
+  const means = conversations.flatMap(({ events }) => {
+    const calls = new Map();
+    for (const event of events) {
+      if (event.kind !== "usage" || event.scope === "session") continue;
+      const key = event.call ?? event.at;
+      if (!calls.has(key)) calls.set(key, event);
+    }
+    const first = [...calls.values()]
+      .sort((a, b) => (timeOf(a) ?? 0) - (timeOf(b) ?? 0))
+      .slice(0, FRESH_CALLS);
+    if (first.length < FRESH_MIN_CALLS) return [];
+    const read = first.reduce(
+      (sum, call) => sum + call.input + call.cacheRead + call.cacheWrite,
+      0,
+    );
+    return [{ at: timeOf(first[0]) ?? 0, perCall: read / first.length }];
+  });
+  const recent = means
+    .sort((a, b) => b.at - a.at)
+    .slice(0, FRESH_CONVERSATIONS)
+    .map((entry) => entry.perCall)
+    .sort((a, b) => a - b);
+  if (recent.length < 3) return null;
+  return { perCall: quantile(recent, 0.5), conversations: recent.length };
+}
 // Status line readings this recent measure what a percent costs.
 const CALIBRATION_MS = 7 * DAY;
 // Readings come in whole percents: fewer points than this are too coarse.
@@ -1283,12 +1377,12 @@ function fitOf(cost, windows) {
   return { fits: worst <= 1, binding, waitsUntil };
 }
 
-function taskBudget(task, current, perPercent, windows, context) {
+function taskBudget(task, current, perPercent, windows, context, perCall) {
   const remaining = remainingOf(task);
   const now = percentCost(tokensLeft(remaining, context), perPercent);
   const fresh =
-    context && context > FRESH_CONTEXT && remaining.calls
-      ? percentCost(tokensLeft(remaining, FRESH_CONTEXT), perPercent)
+    context && context > perCall && remaining.calls
+      ? percentCost(tokensLeft(remaining, perCall), perPercent)
       : null;
   const fitNow = fitOf(now, windows);
   const fitFresh = fitOf(fresh, windows);
@@ -1327,6 +1421,8 @@ function taskBudget(task, current, perPercent, windows, context) {
  * @param {object} input.ledger this machine's usage (createUsageLedger)
  * @param {object} input.progress sessionUsage's progress
  * @param {number | null} input.context the conversation's context per call now
+ * @param {{ perCall: number, conversations: number } | null} input.fresh
+ *   a fresh conversation's context per call here (freshContext)
  * @param {number} input.now
  */
 export function budgetOf({
@@ -1335,8 +1431,10 @@ export function budgetOf({
   ledger,
   progress,
   context,
+  fresh,
   now,
 }) {
+  const perCall = fresh?.perCall ?? FRESH_CONTEXT;
   const windows = (account.claude.plan?.windows ?? [])
     .filter((window) => window.group in WINDOW_MS)
     .map((window) => {
@@ -1366,7 +1464,7 @@ export function budgetOf({
         task.status !== "done" && task.status !== "abandoned" && task.accuracy,
     )
     .map((task) =>
-      taskBudget(task, progress.current, perPercent, windows, context),
+      taskBudget(task, progress.current, perPercent, windows, context, perCall),
     )
     .sort((a, b) => Number(b.current) - Number(a.current));
   const big = tasks.find((task) => (task.remaining.calls?.high ?? 0) >= 20);
@@ -1387,13 +1485,15 @@ export function budgetOf({
         }
       : null,
     context,
-    freshContext: FRESH_CONTEXT,
+    fresh: fresh
+      ? { perCall, conversations: fresh.conversations, source: "measured" }
+      : { perCall, conversations: 0, source: "assumed" },
     tasks,
     advice:
-      big && context > 2 * FRESH_CONTEXT
-        ? `Start big tasks in a fresh conversation: each call here reads about ${Math.round(context / 1000)}k tokens of context, against about ${FRESH_CONTEXT / 1000}k in a fresh one.`
+      big && context > 2 * perCall
+        ? `Start big tasks in a fresh conversation: each call here reads about ${Math.round(context / 1000)}k tokens of context, against about ${Math.round(perCall / 1000)}k in a fresh one.`
         : null,
     method:
-      "A task's cost is its latest estimate less what it has used: calls left times this conversation's context per call (or its context estimate), plus output left, as tokens. A percent's cost is this machine's tokens between the status line's readings over the last week, divided by the points each window rose; with fewer than 5 points, the window's use so far. The plan's figures count every device and app, so use elsewhere makes a percent look cheaper. A task fits when the top of its range fits what is left of every window; a fresh conversation assumes 60k tokens of context per call. The weekly window runs out at its pace over the last day of readings, or its average so far.",
+      "A task's cost is its latest estimate less what it has used: calls left times this conversation's context per call (or its context estimate), plus output left, as tokens. A percent's cost is this machine's tokens between the status line's readings over the last week, divided by the points each window rose; with fewer than 5 points, the window's use so far. The plan's figures count every device and app, so use elsewhere makes a percent look cheaper. A task fits when the top of its range fits what is left of every window; a fresh conversation reads what this project's recent conversations read a call over their first 20 calls (the median of their means), or 60k a call with fewer than 3 to measure. The weekly window runs out at its pace over the last day of readings, or its average so far.",
   };
 }

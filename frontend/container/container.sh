@@ -45,6 +45,19 @@ container_display() {
   podman container inspect --format '{{index .Config.Labels "rea.display"}}' "$name" 2>/dev/null || true
 }
 
+container_tasks() {
+  podman container inspect --format '{{index .Config.Labels "rea.tasks"}}' "$name" 2>/dev/null || true
+}
+
+# Claude Code's own temporary folder, where it writes a backgrounded
+# command's output: shared at the same path so rene's tools can read it. Only
+# this folder, not the rest of /tmp.
+tasks_folder() {
+  local folder="/tmp/claude-$(id -u)"
+  mkdir -p -m 0700 "$folder"
+  printf '%s' "$folder"
+}
+
 # The host's Wayland socket, so tools in the container can open windows on
 # the user's screen. Only the socket is shared, on a private tmpfs at the same
 # path as on the host; the rest of the runtime folder (D-Bus, PipeWire,
@@ -119,14 +132,19 @@ ensure() {
   local id state
   id="$(image_id)"
   state="$(container_state)"
-  local display
+  local display tasks
   display="$(wayland_socket)"
+  tasks="$(tasks_folder)"
   if [ "$state" != missing ] && [ "$(container_image)" != "$id" ]; then
     echo "Recreating the $name container from the rebuilt image."
     podman rm --force "$name" >/dev/null
     state=missing
   elif [ "$state" != missing ] && [ "$(container_display)" != "$display" ]; then
     echo "Recreating the $name container for the current display session."
+    podman rm --force "$name" >/dev/null
+    state=missing
+  elif [ "$state" != missing ] && [ "$(container_tasks)" != "$tasks" ]; then
+    echo "Recreating the $name container to share $tasks."
     podman rm --force "$name" >/dev/null
     state=missing
   fi
@@ -146,10 +164,12 @@ ensure() {
       podman run --detach --init --name "$name" \
         --label "rea.image=$id" \
         --label "rea.display=$display" \
+        --label "rea.tasks=$tasks" \
         --network host \
         --userns keep-id \
         --security-opt label=disable \
         --volume "$HOME:$HOME:rslave" \
+        --volume "$tasks:$tasks" \
         --env "HOME=$HOME" \
         --workdir "$HOME" \
         "${display_args[@]}" \

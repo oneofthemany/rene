@@ -275,7 +275,7 @@ it("judges a task's first estimate on all its calls, across conversations", () =
         first_declared_at: at(SECOND),
         declared_at: at(11 * MINUTE),
         first_estimate: {
-          model_calls: { low: 1, high: 3 },
+          model_calls: { low: 3, high: 5 },
           output_tokens: { low: 100, high: 200 },
           confidence: "medium",
           basis: "one small change",
@@ -292,16 +292,17 @@ it("judges a task's first estimate on all its calls, across conversations", () =
   }) as unknown as {
     progress: { topics: { accuracy: { measures: object[] } }[] };
   };
-  // The window holds the second conversation only; the task is judged on both.
+  // The window holds the second conversation only; the task is judged on both,
+  // each declaring call included (it comes before anything is in force).
   expect(usage.progress.topics[0]?.accuracy.measures).toEqual([
     expect.objectContaining({
       measure: "model_calls",
-      actual: 2,
+      actual: 4,
       within: true,
     }),
     expect.objectContaining({
       measure: "output_tokens",
-      actual: 50,
+      actual: 56,
       within: false,
       over: false,
     }),
@@ -369,7 +370,7 @@ it("counts use per phase and names what caused each deviation from the plan", ()
           {
             name: "schema",
             started_at: at(SECOND),
-            estimate: { model_calls: { low: 1, high: 2 }, confidence: "low" },
+            estimate: { model_calls: { low: 2, high: 4 }, confidence: "low" },
           },
           {
             name: "tests",
@@ -401,14 +402,16 @@ it("counts use per phase and names what caused each deviation from the plan", ()
   expect(
     task?.phases.map((phase) => [phase.name, phase.actual.model_calls]),
   ).toEqual([
-    // The call declaring the next phase is made while this one is in force.
-    ["schema", 2],
+    // The turn's first declaring call counts toward what it declares (nothing
+    // was in force before it); the call declaring the next phase is made
+    // while this one is in force.
+    ["schema", 3],
     ["tests", 1],
   ]);
   expect(task?.phases[0]?.accuracy?.measures).toEqual([
     expect.objectContaining({
       measure: "model_calls",
-      actual: 2,
+      actual: 3,
       within: true,
     }),
   ]);
@@ -416,6 +419,74 @@ it("counts use per phase and names what caused each deviation from the plan", ()
     unplanned: [{ name: "tests", cause: "you" }],
     skipped: ["docs"],
     byCause: { you: 2 },
+  });
+});
+
+it("allocates every call: carried into turns that declare nothing, marked, and before any declaration in no task", () => {
+  const id = "22222222-2222-4222-8222-222222222222";
+  const assistant = (ms: number, use: string, content: object[]) => ({
+    type: "assistant",
+    timestamp: at(ms),
+    message: {
+      id: `msg_${use}`,
+      model: "claude-opus-5-5",
+      usage: { input_tokens: 1, output_tokens: 10 },
+      content,
+    },
+  });
+  const records = [
+    // Nothing declared yet: this call is in no task.
+    prompt(0, "look around"),
+    assistant(10 * SECOND, "a", [{ type: "text", text: "looked" }]),
+    turnEnd(MINUTE),
+    prompt(2 * MINUTE, "build it"),
+    assistant(2 * MINUTE + SECOND, "b", [
+      {
+        type: "tool_use",
+        id: "b",
+        name: "mcp__rea__record_topic",
+        input: { topic_id: id },
+      },
+    ]),
+    result(2 * MINUTE + 2 * SECOND, "b", "declared"),
+    turnEnd(3 * MINUTE),
+    // Declares nothing: carried under the task, and counted as carried.
+    prompt(4 * MINUTE, "carry on"),
+    assistant(4 * MINUTE + 20 * SECOND, "c", [{ type: "text", text: "ok" }]),
+    turnEnd(5 * MINUTE),
+  ];
+  const conversation = {
+    meta: { session: "s", agent: "Claude Code", format: "claude-code" },
+    events: records.flatMap((record) => eventsFromRecord(record)),
+  };
+  const topics = new Map([
+    [
+      id,
+      {
+        topic_id: id,
+        title: "Build it",
+        kind: "feature",
+        status: "open",
+        first_declared_at: at(2 * MINUTE + SECOND),
+        declared_at: at(2 * MINUTE + SECOND),
+      },
+    ],
+  ]);
+  const usage = sessionUsage({
+    conversations: [conversation],
+    since: T0,
+    now: T0 + 6 * MINUTE,
+    topics,
+  }) as unknown as {
+    unattributed: { calls: number; outputTokens: number; working: number };
+    progress: { topics: { callsBy: object }[] };
+  };
+  expect(usage.unattributed).toMatchObject({ calls: 1, outputTokens: 10 });
+  expect(usage.unattributed.working).toBeGreaterThan(0);
+  expect(usage.progress.topics[0]?.callsBy).toEqual({
+    declared: 1,
+    named: 0,
+    carried: 1,
   });
 });
 
@@ -768,4 +839,33 @@ it("prices open tasks in both plan windows from the status line's readings", () 
   // Too big even fresh: waits for the session window to reset.
   expect(huge).toMatchObject({ verdict: "reset", waitsUntil: sessionReset });
   expect(budget.advice).toMatch(/fresh conversation/);
+  expect(budget.fresh).toMatchObject({ perCall: 60_000, source: "assumed" });
+});
+
+it("measures a fresh conversation's context from the project's first calls", () => {
+  const { freshContext } = usageModule;
+  // Context grows by `step` a call from `start`; the first 20 calls count,
+  // and a record repeated for one call counts once.
+  const conversation = (start: number, step: number, calls: number) => ({
+    events: Array.from({ length: calls }, (_, index) => ({
+      kind: "usage",
+      scope: "call",
+      call: `c${index}`,
+      at: at(index * MINUTE),
+      input: start + index * step,
+      cacheRead: 0,
+      cacheWrite: 0,
+    })).flatMap((event) => [event, event]),
+  });
+  expect(
+    freshContext([conversation(20_000, 0, 30), conversation(10_000, 0, 3)]),
+  ).toBeNull();
+  const fresh = freshContext([
+    conversation(20_000, 0, 30),
+    conversation(40_000, 2_000, 40),
+    conversation(90_000, 0, 10),
+    conversation(10_000, 0, 3),
+  ]);
+  // Means 20k, 59k (40k + 2k x 9.5) and 90k; too few calls in the last.
+  expect(fresh).toEqual({ perCall: 59_000, conversations: 3 });
 });
