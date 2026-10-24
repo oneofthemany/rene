@@ -8,7 +8,7 @@ import { h } from "./render.js";
 
 const REFRESH_MS = 5000;
 
-const tokens = (count) =>
+export const tokens = (count) =>
   count >= 1e6
     ? `${(count / 1e6).toFixed(count >= 1e7 ? 0 : 1)}M`
     : count >= 1e3
@@ -213,7 +213,7 @@ function deviationLine(deviation) {
   );
 }
 
-const MEASURE_LABELS = {
+export const MEASURE_LABELS = {
   model_calls: ["Model calls", (value) => count(value)],
   output_tokens: ["Output", (value) => tokens(value)],
   context_tokens: ["Context read", (value) => tokens(value)],

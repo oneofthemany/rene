@@ -207,8 +207,35 @@ In order (a task needs those above it it names):
    (decide first whether usage is its own store or a `rene-usage` topic in
    the journal: one owner) and CodeGraph's store (reuse its sealing and
    layout, `packages/codegraph-store`). 60–100 calls (3–20%).
-7. **Usage view**: charts sliced by agent, project, conversation › topic ›
-   phase, waste reason, deviation cause and time; estimate against actual;
+7. **Done (24 Oct): usage view.** The header's Usage button
+   (`frontend/public/usageView.js`, charts in `usageCharts.js`) reads the
+   usage store through `frontend/usageView.mjs`, which owns the SQL: the
+   calls grouped by up to three of agent, project, conversation, topic,
+   phase, waste reason, deviation cause or kind, model, tool, outcome,
+   attribution basis, row kind, day or hour (DuckDB `rollup`, so each
+   level's distinct turns are its own count, not its children's sum), with
+   model and tool calls, tokens, context read, wasted share, deviations and
+   turns, bars shaded by their wasted part; a timeline by day (by hour over
+   two days or less, in the page's time zone); filters (Only narrows to a
+   group and regroups by the rest); every task's estimate against actual
+   (`taskProgress` in `usage.mjs`, the bar's own judgement over all
+   conversations); This project or All projects (each store queried, groups
+   merged). Drill-down: a group's turns (newest 100, each with its request
+   and place in History), a turn's calls with waste and deviation evidence,
+   and Show the whole turn opens it as History does. The store gained
+   `turn_at` (a row's turn, its request time: `attributeConversation` now
+   gives each event its turn as well as what was in force), so a store
+   sealed before rebuilds. Routes: `GET /api/projects/<id|all>/usage`,
+   `…/usage/turns`, `…/usage/turn`; the view flushes a seal still waiting
+   on its 2 minutes first. Tests in `workbenchUsageStore` (real addon);
+   seen in headless Chromium against a copy of the real projects (5,538
+   model calls, 389 turns, no page errors). Also fixed: History's turn
+   entries showed "null" (`row.append` of a null). Left: usage.mjs's
+   `turnsOf` and attribution's `splitTurns` still split turns two ways
+   (turnsOf also splits on turn_end, splitTurns on your interjections);
+   the store keeps attribution's, the bar's time uses turnsOf's. Original
+   item: charts sliced by agent, project, conversation › topic › phase,
+   waste reason, deviation cause and time; estimate against actual;
    drill-down to the turn and call. Needs 6. 60–90 calls (3–18%).
 8. **Tasks from TODO.md and `docs/plans/*.md`** (a first form exists: the
    session briefing lists TODO.md's open items, id = section and number or

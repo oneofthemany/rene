@@ -208,6 +208,7 @@ function turnsOf(meta, events, since, now, held) {
         end: at,
         events: [],
         prompt: event,
+        turnAt: held[index].turn,
         ended: false,
       };
       turns.push(turn);
@@ -226,7 +227,12 @@ function turnsOf(meta, events, since, now, held) {
       };
       turns.push(turn);
     }
-    turn.events.push({ ...event, time: at, inForce: held[index] });
+    turn.events.push({
+      ...event,
+      time: at,
+      inForce: held[index].inForce,
+      turnAt: held[index].turn,
+    });
     turn.end = Math.max(turn.end, at);
     if (event.kind === "turn_end") turn.ended = true;
   }
@@ -379,18 +385,17 @@ export function sessionUsage({
     });
 
     // A deviation from the task, by its cause, under the topic and phase in
-    // force at the event it rests on. A call's row names it; one from your
-    // message (a correction, added scope, a stop) is a row of its own, so the
-    // store counts every cause the bar does, even before any declaration.
-    const deviate = (inForce, cause, kind, at, text, row) => {
+    // force at the event it rests on (its time, inForce and turnAt). A call's
+    // row names it; one from your message (a correction, added scope, a stop)
+    // is a row of its own, so the store counts every cause the bar does, even
+    // before any declaration.
+    const deviate = (source, cause, kind, text, row) => {
+      const { inForce, time: at } = source;
       if (row && !row.deviation)
         row.deviation = { cause, kind, text: example(text) };
       if (!row)
         ledger.push({
-          ...rowOf(kind === "stopped" ? "interrupt" : "message", {
-            time: at,
-            inForce,
-          }),
+          ...rowOf(kind === "stopped" ? "interrupt" : "message", source),
           deviation: { cause, kind, text: example(text) },
         });
       if (inForce)
@@ -406,6 +411,7 @@ export function sessionUsage({
       topic: event.inForce?.topic ?? null,
       phase: event.inForce?.phase ?? null,
       basis: event.inForce ? (event.inForce.basis ?? "declared") : null,
+      turn: event.turnAt ?? null,
       waste: null,
       deviation: null,
     });
@@ -518,7 +524,7 @@ export function sessionUsage({
           if (answer) asked += Math.max(0, answer.time - event.time);
         }
         if (event.kind === "interrupt") {
-          deviate(inForce, "you", "stopped", event.time, turn.prompt?.text);
+          deviate(event, "you", "stopped", turn.prompt?.text);
           add(
             inForce,
             "stopped",
@@ -531,9 +537,9 @@ export function sessionUsage({
         if (event.kind === "interjection") {
           if (isCorrection(event.text)) {
             add(inForce, "corrected", segmentStart, event.time, event.text);
-            deviate(inForce, "assumption", "corrected", event.time, event.text);
+            deviate(event, "assumption", "corrected", event.text);
           } else if (isAddition(event.text))
-            deviate(inForce, "you", "scope-added", event.time, event.text);
+            deviate(event, "you", "scope-added", event.text);
           if (correctsClaim(event.text))
             note(signals.get("claim-corrected"), event.time, event.text);
           segmentStart = event.time;
@@ -605,10 +611,9 @@ export function sessionUsage({
                 `${event.tool}: ${line}`,
               );
               deviate(
-                inForce,
+                event,
                 "assumption",
                 assumption.kind,
-                event.time,
                 `${event.tool}: ${line}`,
                 row,
               );
@@ -619,10 +624,9 @@ export function sessionUsage({
             // (the gate), or the tools and environment.
             if (result.isError && !assumed)
               deviate(
-                inForce,
+                event,
                 GATE.test(result.text) ? "instructions" : "blocked",
                 GATE.test(result.text) ? "refused" : "failed",
-                event.time,
                 `${event.tool}: ${example(result.text)}`,
                 row,
               );
@@ -655,11 +659,17 @@ export function sessionUsage({
       // Your next message corrects this turn's work, or adds to its scope:
       // the topic in force as the turn ended.
       const ended = turn.events.at(-1)?.inForce ?? null;
+      // Your message is in the turn it starts.
+      const message = {
+        time: next?.start,
+        inForce: ended,
+        turnAt: next?.turnAt,
+      };
       if (next?.prompt && isCorrection(next.prompt.text)) {
         add(ended, "corrected", segmentStart, turn.end, next.prompt.text);
-        deviate(ended, "assumption", "corrected", next.start, next.prompt.text);
+        deviate(message, "assumption", "corrected", next.prompt.text);
       } else if (next?.prompt && isAddition(next.prompt.text))
-        deviate(ended, "you", "scope-added", next.start, next.prompt.text);
+        deviate(message, "you", "scope-added", next.prompt.text);
       if (next?.prompt && correctsClaim(next.prompt.text))
         note(signals.get("claim-corrected"), next.start, next.prompt.text);
       const worked = Math.max(0, span - asked);
@@ -984,6 +994,14 @@ function deviationOf(topic, phases, deviations, closed) {
     })),
   };
 }
+
+/**
+ * Every task of a project, judged on all its calls (topicActuals): estimate
+ * against actual, its phases and deviations, as the usage bar judges the
+ * session's.
+ */
+export const taskProgress = (topics, actuals, now) =>
+  progressOf(topics, actuals, -Infinity, now).topics;
 
 function progressOf(topics, actuals, since, now) {
   const { topicTime, topicCalls, deviations = [] } = actuals;

@@ -58,8 +58,18 @@ import {
   freshContext,
   sessionUsage,
   statusReadings,
+  taskProgress,
   topicActuals,
 } from "./usage.mjs";
+import {
+  DIMENSIONS,
+  MEASURES,
+  parseUsageRequest,
+  UsageQueryError,
+  usageSlice,
+  usageTurnRows,
+  usageTurns,
+} from "./usageView.mjs";
 import {
   createProjects,
   defaultProjectsDir,
@@ -513,6 +523,17 @@ async function cachedEvents(store, session) {
   return events;
 }
 
+/** Every stored conversation of a project, with its events. */
+async function projectConversations(project) {
+  const all = [];
+  for (const meta of await project.conversations.sessions())
+    all.push({
+      meta,
+      events: await cachedEvents(project.conversations, meta.session),
+    });
+  return all;
+}
+
 async function cachedTopics(project) {
   const declarations = await project.history.list({
     name: TOPIC_TOOL,
@@ -563,17 +584,14 @@ async function terminalUsage() {
   const project = await projects.get(described.project).catch(() => undefined);
   if (!project) return { available: false, account };
   const now = described.endedAt ?? Date.now();
-  const all = [];
+  const all = await projectConversations(project);
   const active = [];
-  for (const meta of await project.conversations.sessions()) {
-    const conversation = {
-      meta,
-      events: await cachedEvents(project.conversations, meta.session),
-    };
-    all.push(conversation);
+  for (const conversation of all) {
     // The terminal session's conversations: written since it started. A
     // resumed one counts from its own start, by its id, across restarts.
-    const info = await stat(meta.transcript).catch(() => undefined);
+    const info = await stat(conversation.meta.transcript).catch(
+      () => undefined,
+    );
     if (info && info.mtimeMs >= described.startedAt) active.push(conversation);
   }
   const firsts = active
@@ -662,23 +680,46 @@ function sealUsage(project, ledger) {
   usageSeals.set(id, state);
   state.ledger = ledger;
   if (state.timer) return;
-  const seal = () => {
-    state.timer = null;
-    state.at = Date.now();
-    const sealed = project.usage.write({
-      project: project.manifest.path,
-      ledger: state.ledger,
-    });
-    state.ledger = null;
-    if (!sealed.ok)
-      console.warn(`usage store for ${id} not sealed: ${sealed.reason}`);
-  };
   const wait = state.at + USAGE_SEAL_MS - Date.now();
-  if (wait <= 0) seal();
+  if (wait <= 0) sealNow(project, state);
   else {
-    state.timer = setTimeout(seal, wait);
+    state.timer = setTimeout(() => sealNow(project, state), wait);
     state.timer.unref();
   }
+}
+
+function sealNow(project, state) {
+  clearTimeout(state.timer);
+  state.timer = null;
+  state.at = Date.now();
+  const sealed = project.usage.write({
+    project: project.manifest.path,
+    ledger: state.ledger,
+  });
+  state.ledger = null;
+  if (!sealed.ok)
+    console.warn(
+      `usage store for ${project.manifest.id} not sealed: ${sealed.reason}`,
+    );
+}
+
+/**
+ * A project's usage store and tasks, current: its use worked out again if
+ * a conversation grew or a declaration was made, and a seal still waiting
+ * on USAGE_SEAL_MS written now, for the usage view to read.
+ */
+async function currentUsage(project) {
+  const now = Date.now();
+  const { topics, declaredBy, filed, stamp } = await cachedTopics(project);
+  const actuals = cachedActuals(
+    project,
+    await projectConversations(project),
+    now,
+    { declaredBy, filed, stamp },
+  );
+  const state = usageSeals.get(project.manifest.id);
+  if (state?.timer) sealNow(project, state);
+  return { topics, actuals, now };
 }
 
 // Keystrokes, mouse reports and resizes reach the agent over one WebSocket
@@ -1688,6 +1729,12 @@ async function routeProjects(request, response, url) {
       void surveyIfStale(project);
       return sendJson(response, 200, manifest);
     }
+    const usageRoute =
+      /^\/api\/projects\/([0-9a-f]{16}|all)\/usage(?:\/(turns|turn))?$/.exec(
+        url.pathname,
+      );
+    if (usageRoute && request.method === "GET")
+      return await routeUsage(response, url, usageRoute[1], usageRoute[2]);
     const topicsRoute = /^\/api\/projects\/([0-9a-f]{16})\/topics$/.exec(
       url.pathname,
     );
@@ -1902,6 +1949,158 @@ async function projectTopics(project) {
     await projectTurns(project),
     history,
   );
+}
+
+/** A conversation's name in the usage view: its first request, agent and day. */
+function conversationLabel({ meta, events }) {
+  const first = events.find((event) => event.kind === "prompt");
+  const text = (first?.text ?? "").replace(/\s+/g, " ").trim();
+  const about = [meta.agent, first?.at?.slice(0, 10)].filter(Boolean);
+  return `${text.length > 70 ? `${text.slice(0, 70)}…` : text || meta.session}${about.length ? ` (${about.join(", ")})` : ""}`;
+}
+
+/**
+ * The usage view (usageView.mjs owns the queries): a slice of one project's
+ * calls, or every project's ("all"), with each task's estimate against
+ * actual; the turns the filtered calls were made in; or one turn's rows.
+ */
+async function routeUsage(response, url, which, part) {
+  const chosen =
+    which === "all"
+      ? await Promise.all(
+          (await projects.list()).map((manifest) => projects.get(manifest.id)),
+        )
+      : [await projects.get(which)];
+  if (chosen.some((project) => !project))
+    return sendJson(response, 404, { error: "Unknown project." });
+  let request;
+  try {
+    request = parseUsageRequest(url.searchParams);
+  } catch (cause) {
+    if (cause instanceof UsageQueryError)
+      return sendJson(response, 400, { error: cause.message });
+    throw cause;
+  }
+  const current = [];
+  for (const project of chosen.filter(Boolean))
+    current.push({ project, ...(await currentUsage(project)) });
+  const stores = current.map(({ project }) => ({
+    project: project.manifest.path,
+    store: project.usage,
+  }));
+  if (part === "turn") {
+    const [status, body] = usageTurnAnswer(current, url.searchParams);
+    return sendJson(response, status, body);
+  }
+  return sendJson(
+    response,
+    200,
+    part === "turns"
+      ? await usageTurnsAnswer(current, stores, request)
+      : await usageSliceAnswer(current, stores, request),
+  );
+}
+
+/** One turn's rows, from its own project's store: [status, body]. */
+function usageTurnAnswer(current, params) {
+  const conversation = params.get("conversation");
+  const turnText = params.get("turn");
+  const turnAt = turnText ? Number(turnText) : null;
+  if (!conversation || (turnAt !== null && !Number.isSafeInteger(turnAt)))
+    return [400, { error: "Expected ?conversation=<id>&turn=<ms>." }];
+  if (current.length !== 1)
+    return [400, { error: "A turn is read from its own project, not all." }];
+  try {
+    return [
+      200,
+      usageTurnRows(current[0].project.usage, { conversation, turnAt }),
+    ];
+  } catch (cause) {
+    return [502, { error: describeError(cause) }];
+  }
+}
+
+/** The turns the filtered calls were in, each with its request and its place in History. */
+async function usageTurnsAnswer(current, stores, request) {
+  const found = usageTurns(stores, request);
+  // session -> its turns (conversations.mjs's) by request time, the store's turn_at.
+  const known = new Map();
+  for (const { project } of current)
+    for (const turn of await projectTurns(project)) {
+      if (!known.has(turn.session)) known.set(turn.session, new Map());
+      known.get(turn.session).set(Date.parse(turn.at), {
+        project: project.manifest.id,
+        index: turn.index,
+        prompt: turn.prompt,
+      });
+    }
+  return {
+    ...found,
+    turns: found.turns.map((turn) => {
+      const named = known.get(turn.conversation)?.get(turn.turnAt);
+      return {
+        ...turn,
+        projectId: named?.project ?? null,
+        index: named?.index ?? null,
+        prompt: named?.prompt ?? null,
+      };
+    }),
+  };
+}
+
+/** The slice, named, with each task's estimate against actual. */
+async function usageSliceAnswer(current, stores, request) {
+  const titles = new Map();
+  const conversations = new Map();
+  for (const { project, topics } of current) {
+    for (const [id, topic] of topics ?? []) titles.set(id, topic.title);
+    for (const conversation of await projectConversations(project))
+      conversations.set(
+        conversation.meta.session,
+        conversationLabel(conversation),
+      );
+  }
+  const slice = usageSlice(stores, request, {
+    label: (dimension, value) =>
+      dimension === "topic"
+        ? titles.get(value)
+        : dimension === "conversation"
+          ? conversations.get(value)
+          : undefined,
+  });
+  // Estimate against actual, for the tasks the filters leave in.
+  const topicFilter = request.filters.topic;
+  const tasks = current
+    .flatMap(({ project, topics, actuals, now }) =>
+      taskProgress(topics, actuals, now).map((task) => ({
+        ...task,
+        project: project.manifest.path,
+      })),
+    )
+    .filter(
+      (task) =>
+        task.accuracy && (topicFilter === undefined || task.id === topicFilter),
+    )
+    .sort((a, b) => b.startedAt - a.startedAt);
+  return {
+    ...slice,
+    projects: current.map(({ project }) => ({
+      id: project.manifest.id,
+      path: project.manifest.path,
+    })),
+    tasks,
+    titles: Object.fromEntries(titles),
+    dimensions: Object.fromEntries(
+      Object.entries(DIMENSIONS).map(([name, { label }]) => [name, label]),
+    ),
+    measures: Object.fromEntries(
+      Object.entries(MEASURES).map(([name, { label, wasted }]) => [
+        name,
+        { label, wasted },
+      ]),
+    ),
+    asOf: Date.now(),
+  };
 }
 
 /** A turn as the History list shows it: request, calls and conclusion. */

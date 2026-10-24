@@ -24,6 +24,11 @@ export const TOPIC_TOOL = "record_topic";
 /** A turn's recorded identity: its session and the time of its request. */
 export const turnKey = (session, at) => `${session}\u0000${Date.parse(at)}`;
 
+const timeOf = (at) => {
+  const ms = Date.parse(at);
+  return Number.isFinite(ms) ? ms : null;
+};
+
 /**
  * A conversation's turns: each request and what followed it, a subagent's
  * events left out (they declare nothing for the conversation). A message you
@@ -87,12 +92,14 @@ export function attributeTurns(turns, { declaredBy, filed } = {}) {
 }
 
 /**
- * What was in force at each of a conversation's events, by position: a
- * subagent's event and a prompt take what was in force just before them.
+ * What was in force at each of a conversation's events, by position, and
+ * the turn each was in (its request's time, as turnKey has it): a subagent's
+ * event and a prompt take what was in force just before them; a request is
+ * in the turn it starts.
  * @param {{ session: string }} meta
  * @param {object[]} events
  * @param {{ declaredBy?: Map<string, { topic: string, status: string }>, filed?: Map<string, string> }} [options]
- * @returns {({ topic: string, phase: string | null } | null)[]}
+ * @returns {{ inForce: { topic: string, phase: string | null } | null, turn: number | null }[]}
  */
 export function attributeConversation(meta, events, options) {
   const held = new Map();
@@ -101,10 +108,15 @@ export function attributeConversation(meta, events, options) {
     options,
   ))
     for (const [position, event] of turn.events.entries())
-      held.set(event, inForce[position]);
-  let current = null;
+      held.set(event, { inForce: inForce[position], turn: timeOf(turn.at) });
+  let current = { inForce: null, turn: null };
   return events.map((event) => {
     if (held.has(event)) current = held.get(event);
+    else if (
+      !event.sidechain &&
+      (event.kind === "prompt" || event.kind === "interjection")
+    )
+      current = { inForce: current.inForce, turn: timeOf(event.at) };
     return current;
   });
 }

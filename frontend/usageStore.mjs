@@ -1,7 +1,9 @@
 // The usage store: one row per model call and per tool call a project's
 // agents made, and one per message of yours that turned the work (kind
-// message: a correction or added scope; interrupt: a stop), for slicing usage by agent, conversation, topic, phase, waste
-// and deviation (TODO › Agent usage, items 6 and 7).
+// message: a correction or added scope; interrupt: a stop), for slicing
+// usage by agent, conversation, topic, phase, waste and deviation
+// (TODO › Agent usage, items 6 and 7; usageView.mjs reads it). turn_at is
+// the row's turn: its request's time, as attribution.mjs's turnKey has it.
 //
 // rene owns it (not the telemetry journal): the rows name conversations,
 // topics and the evidence line each classification rests on. It is DuckDB
@@ -27,6 +29,7 @@ export const USAGE_SCHEMA = `create table calls (
   topic varchar,
   phase varchar,
   basis varchar,
+  turn_at bigint,
   model varchar,
   input_tokens bigint,
   cache_read_tokens bigint,
@@ -66,6 +69,7 @@ export const usageColumns = (row, project) => [
   row.topic ?? null,
   row.phase ?? null,
   row.basis ?? null,
+  whole(row.turn),
   row.model ?? null,
   whole(row.input),
   whole(row.cacheRead),

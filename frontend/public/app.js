@@ -28,6 +28,7 @@ import { initAgent } from "./agent.js";
 import { assessmentDocument, initProjects } from "./projects.js";
 import { refreshDoctor, showProviders } from "./doctor.js";
 import { showSkill } from "./skill.js";
+import { showUsage } from "./usageView.js";
 import { createForm, matchingArgs } from "./form.js";
 import { h, renderError } from "./render.js";
 import {
@@ -255,6 +256,7 @@ document.getElementById("open-agent").addEventListener("click", showAgentView);
 
 // Header views that replace both the tool and result panes.
 for (const [kind, show] of [
+  ["usage", (view) => showUsage(view, { getProject: activeProject, openTurn })],
   ["providers", showProviders],
   ["skill", showSkill],
 ]) {
@@ -651,6 +653,20 @@ function openEarlier(historyId) {
     (candidate) => candidate.historyId === historyId,
   );
   if (entry) void showCall(entry);
+}
+
+/** A whole conversation turn below the usage view, as History shows it. */
+async function openTurn({ project, session, index }) {
+  try {
+    showTurn(
+      await loadTurn({ project, turn: { session, index } }),
+      openEarlier,
+    );
+  } catch (cause) {
+    document
+      .getElementById("result-view")
+      .replaceChildren(renderError(undefined, cause.message));
+  }
 }
 
 async function showCall(entry) {

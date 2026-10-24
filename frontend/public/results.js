@@ -530,13 +530,18 @@ export function renderHistory(history, { onSelect, onCancel, shown }) {
           },
           `${open ? "▾" : "▸"} ${calls.length} call${calls.length === 1 ? "" : "s"}`,
         ),
-        open
-          ? h(
-              "ol",
-              { class: "h-nested" },
-              ...[...calls].sort((a, b) => a.startedAt - b.startedAt).map(item),
-            )
-          : null,
+        // append() writes a null as the text "null".
+        ...(open
+          ? [
+              h(
+                "ol",
+                { class: "h-nested" },
+                ...[...calls]
+                  .sort((a, b) => a.startedAt - b.startedAt)
+                  .map(item),
+              ),
+            ]
+          : []),
       );
       return row;
     }),

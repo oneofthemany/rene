@@ -2261,3 +2261,247 @@ progress {
   display: block;
   margin-top: 2px;
 }
+
+/* Usage view (usageView.js) */
+.usage-view {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  min-width: 0;
+}
+
+.usage-view h2,
+.usage-view h3 {
+  margin: 0;
+}
+
+.usage-view-body,
+.usage-view-drill {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.usage-view-controls,
+.usage-view-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: center;
+}
+
+.usage-view-control {
+  font-size: 0.9em;
+  color: var(--muted);
+}
+
+.usage-view-chip {
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  padding: 1px 10px;
+  background: var(--code-bg);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.usage-view-timeline {
+  margin: 0;
+}
+
+.usage-view-columns {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 96px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.usage-view-column {
+  flex: 1 1 0;
+  min-width: 2px;
+  max-width: 28px;
+  height: 100%;
+  display: flex;
+  flex-direction: column-reverse;
+}
+
+.usage-view-column .usage-seg {
+  flex: none;
+  width: 100%;
+}
+
+.usage-view-table {
+  overflow-x: auto;
+  font-size: 0.9em;
+}
+
+.usage-view-groups {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.usage-view-groups .usage-view-groups {
+  margin-left: 14px;
+  padding-left: 6px;
+  border-left: 1px solid var(--rule);
+}
+
+.usage-view-groups summary {
+  cursor: pointer;
+  display: block;
+  list-style: none;
+}
+
+.usage-view-groups summary::-webkit-details-marker {
+  display: none;
+}
+
+.usage-view-groups summary::before {
+  content: "▸";
+  position: absolute;
+  left: 4px;
+  top: 3px;
+  color: var(--muted);
+}
+
+.usage-view-groups details[open] > summary::before {
+  content: "▾";
+}
+
+.usage-view-groups summary > .usage-view-row {
+  padding-left: 0;
+}
+
+.usage-view-row {
+  display: inline-grid;
+  grid-template-columns: minmax(140px, 1fr) 100px repeat(7, 54px) 92px;
+  gap: 6px;
+  align-items: center;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 760px;
+  padding: 2px 0;
+  vertical-align: middle;
+}
+
+/* One indent for every row, with or without a disclosure marker. */
+.usage-view-groups li > .usage-view-row,
+.usage-view-groups summary,
+.usage-view-header {
+  position: relative;
+  padding-left: 18px;
+}
+
+.usage-view-header {
+  color: var(--muted);
+  font-size: 0.85em;
+}
+
+.usage-view-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-view-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-view-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.usage-view-bar {
+  display: flex;
+  height: 8px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--code-bg);
+}
+
+.usage-view-bar .usage-seg {
+  flex: none;
+}
+
+.usage-view-turns {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.usage-view-prompt {
+  font-weight: 600;
+}
+
+.usage-view-rows {
+  overflow-x: auto;
+  margin: 4px 0 8px;
+}
+
+.usage-view-calls {
+  border-collapse: collapse;
+  font-size: 0.85em;
+}
+
+.usage-view-calls th,
+.usage-view-calls td {
+  padding: 2px 8px;
+  border-bottom: 1px solid var(--rule);
+  text-align: left;
+  vertical-align: top;
+}
+
+.usage-view-calls tr.usage-view-wasted td:first-child {
+  box-shadow: inset 3px 0 var(--danger);
+}
+
+.usage-view-tasks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.usage-view-estimate {
+  display: grid;
+  grid-template-columns: 110px minmax(120px, 320px) 1fr;
+  gap: 8px;
+  align-items: center;
+  font-size: 0.9em;
+}
+
+.usage-view-range {
+  position: relative;
+  height: 10px;
+  border-radius: 5px;
+  background: var(--code-bg);
+}
+
+.usage-view-band {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--observed);
+  opacity: 0.35;
+  border-radius: 5px;
+}
+
+.usage-view-mark {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 3px;
+  margin-left: -1px;
+  background: var(--ink);
+}
+
+.usage-view-mark.usage-over {
+  background: var(--danger);
+}

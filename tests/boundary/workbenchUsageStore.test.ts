@@ -46,6 +46,52 @@ const { createUsageStore } = (await import(
   };
 };
 
+interface Measures {
+  model_calls: number;
+  tool_calls: number;
+  output: number;
+  wasted_model_calls: number;
+  deviations: number;
+  turns: number;
+}
+interface Group {
+  dimension: string;
+  value: string | null;
+  label: string;
+  measures: Measures;
+  children: Group[];
+}
+type Store = ReturnType<typeof createUsageStore>;
+const view = (await import(
+  new URL("../../frontend/usageView.mjs", import.meta.url).href
+)) as {
+  parseUsageRequest(params: URLSearchParams): object;
+  usageSlice(
+    stores: { project: string; store: Store }[],
+    request: object,
+    names?: { label(dimension: string, value: string): string | undefined },
+  ): {
+    total: Measures;
+    groups: Group[];
+    timeline: { bucket: string; points: ({ key: string } & Measures)[] };
+    unreadable: { project: string; reason: string }[];
+  };
+  usageTurns(
+    stores: { project: string; store: Store }[],
+    request: object,
+  ): {
+    turns: {
+      conversation: string;
+      turnAt: number | null;
+      measures: Measures;
+    }[];
+  };
+  usageTurnRows(
+    store: Store,
+    turn: { conversation: string; turnAt: number | null },
+  ): { rows: Record<string, unknown>[] };
+};
+
 const T0 = Date.parse("2026-10-24T09:00:00.000Z");
 const SECOND = 1000;
 const MINUTE = 60 * SECOND;
@@ -178,5 +224,136 @@ it("seals the ledger as Parquet and reads it back after a restart", async () => 
     });
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+it("gives each row the turn it was in: its request's time", () => {
+  const { ledger } = topicActuals({ conversations, now: T0 + 7 * MINUTE });
+  const turns = ledger.map(
+    (row) => [row.kind, (row as { turn?: number }).turn] as const,
+  );
+  // Your correction starts the second turn and the added scope the third:
+  // each message row is in the turn it starts.
+  expect(turns).toEqual([
+    ...Array.from({ length: 6 }, (_, index) => [
+      index % 2 ? "tool" : "model",
+      T0,
+    ]),
+    ["message", T0 + 5 * MINUTE],
+    ["model", T0 + 5 * MINUTE],
+    ["tool", T0 + 5 * MINUTE],
+    ["message", T0 + 6 * MINUTE],
+  ]);
+});
+
+it("slices the store by nested dimensions, over time, and drills to a turn's rows", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rene-usage-view-"));
+  const other = await mkdtemp(join(tmpdir(), "rene-usage-view-"));
+  try {
+    const { ledger } = topicActuals({ conversations, now: T0 + 7 * MINUTE });
+    const store = createUsageStore(directory);
+    store.write({ project: "/p", ledger });
+    // A second project's store: its own conversation, merged into the slice.
+    const second = createUsageStore(other);
+    second.write({
+      project: "/q",
+      ledger: ledger.map((row) => ({ ...row, conversation: "t" })),
+    });
+    const stores = [
+      { project: "/p", store },
+      { project: "/q", store: second },
+    ];
+    const request = view.parseUsageRequest(
+      new URLSearchParams({ by: "project,waste", measure: "model_calls" }),
+    );
+    const slice = view.usageSlice(stores, request);
+    expect(slice.unreadable).toEqual([]);
+    expect(slice.total).toMatchObject({
+      model_calls: 8,
+      tool_calls: 8,
+      output: 160,
+      wasted_model_calls: 6,
+      deviations: 6,
+      turns: 6,
+    });
+    expect(
+      slice.groups.map((group) => [
+        group.value,
+        group.measures.model_calls,
+        group.children.map((child) => [
+          child.label,
+          child.measures.model_calls,
+          child.measures.tool_calls,
+        ]),
+      ]),
+    ).toEqual([
+      [
+        "/p",
+        4,
+        [
+          ["corrected", 3, 1],
+          ["Not wasted", 1, 1],
+          ["failed", 0, 1],
+          ["repeated", 0, 1],
+        ],
+      ],
+      ["/q", 4, expect.any(Array)],
+    ]);
+    // A period of minutes is shown by the hour, in the page's time zone.
+    expect(slice.timeline.bucket).toBe("hour");
+    expect(
+      view
+        .usageSlice(
+          stores,
+          view.parseUsageRequest(new URLSearchParams({ by: "", tz: "120" })),
+        )
+        .timeline.points.map((point) => [point.key, point.model_calls]),
+    ).toEqual([["2026-10-24 11:00", 8]]);
+    // Filters: a missing value is null; a name comes from the bridge.
+    const unwasted = view.usageSlice(
+      stores,
+      view.parseUsageRequest(
+        new URLSearchParams({
+          by: "topic",
+          filters: JSON.stringify({ project: "/p", waste: null }),
+        }),
+      ),
+      { label: () => "never asked: every topic is null" },
+    );
+    expect(
+      unwasted.groups.map((group) => [group.label, group.measures.model_calls]),
+    ).toEqual([["In no task", 1]]);
+    // The turns the filtered calls were in, newest first, then one's rows.
+    const turns = view.usageTurns(
+      stores,
+      view.parseUsageRequest(
+        new URLSearchParams({ filters: JSON.stringify({ project: "/p" }) }),
+      ),
+    );
+    expect(
+      turns.turns.map((turn) => [turn.turnAt, turn.measures.model_calls]),
+    ).toEqual([
+      [T0 + 6 * MINUTE, 0],
+      [T0 + 5 * MINUTE, 1],
+      [T0, 3],
+    ]);
+    const rows = view.usageTurnRows(store, {
+      conversation: "s",
+      turnAt: T0,
+    }).rows;
+    expect(rows.map((row) => [row.kind, row.tool, row.waste_reason])).toEqual([
+      ["model", null, "corrected"],
+      ["tool", "Read", "corrected"],
+      ["model", null, "corrected"],
+      ["tool", "Read", "repeated"],
+      ["model", null, "corrected"],
+      ["tool", "Bash", "failed"],
+    ]);
+    expect(() =>
+      view.parseUsageRequest(new URLSearchParams({ by: "topic; drop" })),
+    ).toThrow("Unknown dimension");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+    await rm(other, { recursive: true, force: true });
   }
 });
