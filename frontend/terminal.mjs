@@ -176,6 +176,9 @@ const shellQuote = (text) => `'${text.replaceAll("'", "'\\''")}'`;
 /** Where a Claude Code session's status line keeps the plan's live limits. */
 export const claudeStatusFile = (directory) =>
   join(directory, "claude-status.json");
+/** Each change in those limits, one JSON line apiece (statusLine.mjs). */
+export const claudeStatusHistory = (directory) =>
+  join(directory, "claude-status-history.jsonl");
 
 /** The user's own status line command, kept running under ours. */
 async function userStatusLine(env = process.env) {
@@ -195,10 +198,11 @@ async function userStatusLine(env = process.env) {
  * Claude Code's status line for the session (statusLine.mjs): it records the
  * plan's live rate limits Claude Code hands it after each reply.
  */
-const statusLineSettings = (file, own) => {
+const statusLineSettings = (directory, own) => {
   const recorder = fileURLToPath(new URL("./statusLine.mjs", import.meta.url));
   const variables = [
-    `REA_STATUS_FILE=${shellQuote(file)}`,
+    `REA_STATUS_FILE=${shellQuote(claudeStatusFile(directory))}`,
+    `REA_STATUS_HISTORY=${shellQuote(claudeStatusHistory(directory))}`,
     ...(own ? [`REA_USER_STATUSLINE=${shellQuote(own)}`] : []),
   ];
   return {
@@ -241,10 +245,7 @@ const SESSION_AGENTS = [
         `${JSON.stringify(
           {
             ...topicGateSettings(gateState),
-            ...statusLineSettings(
-              claudeStatusFile(directory),
-              await userStatusLine(env),
-            ),
+            ...statusLineSettings(directory, await userStatusLine(env)),
           },
           null,
           2,

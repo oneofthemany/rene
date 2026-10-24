@@ -52,7 +52,13 @@ import {
   createUsageLedger,
   readClaudePlan,
 } from "../dist/toolbox/AgentAccountUsage.js";
-import { accountUsage, sessionUsage, topicActuals } from "./usage.mjs";
+import {
+  accountUsage,
+  budgetOf,
+  sessionUsage,
+  statusReadings,
+  topicActuals,
+} from "./usage.mjs";
 import {
   createProjects,
   defaultProjectsDir,
@@ -64,6 +70,7 @@ import {
   agentDirectory,
   agentInstructions,
   claudeStatusFile,
+  claudeStatusHistory,
   createTerminal,
   TerminalError,
 } from "./terminal.mjs";
@@ -579,12 +586,26 @@ async function terminalUsage() {
     topics: await cachedTopics(project),
     actuals: cachedActuals(project, all, now),
   });
+  // Each change in the live limits the status line recorded, for the pace.
+  const readings = statusReadings(
+    await readFile(claudeStatusHistory(options["agent-dir"]), "utf8").catch(
+      () => "",
+    ),
+  );
   return {
     available: true,
     account,
     agent: described.label,
     agentRunning: described.running,
     ...usage,
+    budget: budgetOf({
+      account,
+      readings,
+      ledger: usageLedger,
+      progress: usage.progress,
+      context: usage.tokens.context,
+      now: Date.now(),
+    }),
   };
 }
 

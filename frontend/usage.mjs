@@ -1109,3 +1109,291 @@ export function accountUsage({ plan, live, ledger, now }) {
       "Plan figures are the services' own and count use on every device and app: Claude Code's are live, from the rate limits it hands a workbench session's status line after each reply, or else its last fetch; Copilot CLI's come with each of its model calls. Local figures count this machine's transcripts only. Between figures, where a window stands is an estimate (the last figure plus this machine's tokens since, at the tokens per percent this machine used before it), shown only once it differs; when it fills assumes the last half hour's pace.",
   };
 }
+
+// ---------------------------------------------------------------------------
+// Budget: what the open tasks would take of each plan window
+
+// A fresh conversation's context per call (measured on 23 Oct: about 60k).
+const FRESH_CONTEXT = 60_000;
+// Status line readings this recent measure what a percent costs.
+const CALIBRATION_MS = 7 * DAY;
+// Readings come in whole percents: fewer points than this are too coarse.
+const MIN_POINTS = 5;
+// The weekly pace: its points over the last day of readings.
+const WEEKLY_PACE_MS = DAY;
+
+/** The status line's readings (statusLine.mjs's history), oldest first. */
+export function statusReadings(text) {
+  const window = (entry) =>
+    typeof entry?.used_percentage === "number"
+      ? { percent: entry.used_percentage, resets: epochOrDate(entry.resets_at) }
+      : null;
+  return text
+    .split("\n")
+    .flatMap((line) => {
+      try {
+        const record = JSON.parse(line);
+        if (typeof record?.at !== "number") return [];
+        return [
+          {
+            at: record.at,
+            session: window(record.rate_limits?.five_hour),
+            weekly: window(record.rate_limits?.seven_day),
+          },
+        ];
+      } catch {
+        return [];
+      }
+    })
+    .sort((a, b) => a.at - b.at);
+}
+
+/**
+ * What a percent of each window costs in this machine's tokens and calls,
+ * summed over consecutive readings inside one window (a reset between two
+ * readings says nothing). Falls back to each window's use so far.
+ */
+function calibrate(readings, windows, ledger, now) {
+  const sums = {
+    session: { points: 0, tokens: 0, calls: 0 },
+    weekly: { points: 0, tokens: 0 },
+  };
+  const recent = readings.filter((r) => r.at >= now - CALIBRATION_MS);
+  for (let index = 1; index < recent.length; index += 1) {
+    const [a, b] = [recent[index - 1], recent[index]];
+    const used = camel(ledger.totals("claude-code", a.at, b.at));
+    for (const group of ["session", "weekly"]) {
+      if (!a[group] || !b[group] || a[group].resets !== b[group].resets)
+        continue;
+      const sum = sums[group];
+      sum.points += Math.max(0, b[group].percent - a[group].percent);
+      sum.tokens += tokensOf(used);
+      if (group === "session") sum.calls += used.calls;
+    }
+  }
+  const perPercent = {};
+  for (const group of ["session", "weekly"]) {
+    const sum = sums[group];
+    const window = windows.find((entry) => entry.group === group);
+    if (sum.points >= MIN_POINTS && sum.tokens > 0)
+      perPercent[group] = {
+        tokens: sum.tokens / sum.points,
+        calls: sum.calls ? sum.calls / sum.points : null,
+        points: sum.points,
+        source: "readings",
+      };
+    else if (window?.local && window.percent >= MIN_POINTS)
+      perPercent[group] = {
+        tokens: tokensOf(window.local) / window.percent,
+        calls: window.local.calls / window.percent,
+        points: window.percent,
+        source: "window",
+      };
+    else perPercent[group] = null;
+  }
+  return perPercent;
+}
+
+/** Weekly points an hour: over the last day of readings, or the window so far. */
+function weeklyPace(readings, weekly, now) {
+  if (!weekly?.resetsAt) return null;
+  const inWindow = readings.filter(
+    (r) => r.weekly?.resets === weekly.resetsAt && r.at >= now - WEEKLY_PACE_MS,
+  );
+  const [first, last] = [inWindow[0], inWindow.at(-1)];
+  if (first && last && last.at - first.at >= HOUR)
+    return {
+      perHour:
+        ((last.weekly.percent - first.weekly.percent) / (last.at - first.at)) *
+        HOUR,
+      source: "day",
+    };
+  const elapsed = now - (weekly.resetsAt - WINDOW_MS.weekly);
+  return elapsed >= HOUR
+    ? { perHour: (weekly.percent / elapsed) * HOUR, source: "window" }
+    : null;
+}
+
+/** What is left of a task's estimate: its range less what it has used. */
+function remainingOf(task) {
+  const measures = task.accuracy?.measures ?? [];
+  const latest = task.reestimated;
+  const left = (name) => {
+    const measure = measures.find((entry) => entry.measure === name);
+    const range = latest?.[name] ?? measure;
+    if (!range) return null;
+    const used = measure?.actual ?? 0;
+    return {
+      low: Math.max(0, range.low - used),
+      high: Math.max(0, range.high - used),
+    };
+  };
+  return {
+    calls: left("model_calls"),
+    output: left("output_tokens"),
+    context: left("context_tokens"),
+  };
+}
+
+/** A task's tokens left, at a context per call, or else its context estimate. */
+function tokensLeft(remaining, perCall) {
+  const bound = (end) => {
+    const read =
+      remaining.calls && perCall
+        ? remaining.calls[end] * perCall
+        : remaining.context?.[end];
+    if (read === undefined) return null;
+    return read + (remaining.output?.[end] ?? 0);
+  };
+  const low = bound("low");
+  const high = bound("high");
+  return low === null || high === null ? null : { low, high };
+}
+
+/** A cost in tokens as each window's percent. */
+function percentCost(tokens, perPercent) {
+  if (!tokens) return null;
+  const cost = {};
+  for (const group of ["session", "weekly"]) {
+    const rate = perPercent[group]?.tokens;
+    cost[group] = rate
+      ? { low: tokens.low / rate, high: tokens.high / rate }
+      : null;
+  }
+  return cost.session || cost.weekly ? cost : null;
+}
+
+/**
+ * Whether a cost fits what is left of every window it is known for, the
+ * window it uses most of (binding), and when it could start if it doesn't.
+ */
+function fitOf(cost, windows) {
+  if (!cost) return null;
+  let binding = null;
+  let worst = -1;
+  let waitsUntil = null;
+  for (const window of windows) {
+    const share = cost[window.group];
+    if (!share) continue;
+    const used = window.left > 0 ? share.high / window.left : Infinity;
+    if (used > worst) [worst, binding] = [used, window.group];
+    if (share.high > window.left)
+      waitsUntil = Math.max(waitsUntil ?? 0, window.resetsAt ?? 0) || null;
+  }
+  return { fits: worst <= 1, binding, waitsUntil };
+}
+
+function taskBudget(task, current, perPercent, windows, context) {
+  const remaining = remainingOf(task);
+  const now = percentCost(tokensLeft(remaining, context), perPercent);
+  const fresh =
+    context && context > FRESH_CONTEXT && remaining.calls
+      ? percentCost(tokensLeft(remaining, FRESH_CONTEXT), perPercent)
+      : null;
+  const fitNow = fitOf(now, windows);
+  const fitFresh = fitOf(fresh, windows);
+  const verdict = !fitNow
+    ? "unknown"
+    : fitNow.fits
+      ? "now"
+      : fitFresh?.fits
+        ? "fresh"
+        : "reset";
+  const callsMeasure = task.accuracy?.measures.find(
+    (entry) => entry.measure === "model_calls",
+  );
+  return {
+    id: task.id,
+    title: task.title,
+    current: task.id === current,
+    pastEstimate: Boolean(callsMeasure?.over),
+    remaining,
+    cost: { now, fresh },
+    verdict,
+    binding: fitNow?.binding ?? null,
+    waitsUntil: verdict === "reset" ? (fitFresh ?? fitNow).waitsUntil : null,
+  };
+}
+
+/**
+ * What the session's open tasks would take of Claude's plan windows: each
+ * task's estimate less what it has used, in both windows' percents at what
+ * a percent has cost this machine, and whether it fits now, fits in a fresh
+ * conversation, or waits for a reset; with when the weekly window runs out
+ * at the recent pace.
+ * @param {object} input
+ * @param {object} input.account accountUsage's result
+ * @param {Array} input.readings statusReadings's result
+ * @param {object} input.ledger this machine's usage (createUsageLedger)
+ * @param {object} input.progress sessionUsage's progress
+ * @param {number | null} input.context the conversation's context per call now
+ * @param {number} input.now
+ */
+export function budgetOf({
+  account,
+  readings,
+  ledger,
+  progress,
+  context,
+  now,
+}) {
+  const windows = (account.claude.plan?.windows ?? [])
+    .filter((window) => window.group in WINDOW_MS)
+    .map((window) => {
+      const percent = window.rolledOver
+        ? 0
+        : (window.estimate?.percent ?? window.percent);
+      return {
+        group: window.group,
+        percent,
+        left: Math.max(0, 100 - percent),
+        resetsAt: window.rolledOver ? null : window.resetsAt,
+        local: window.local,
+      };
+    });
+  const perPercent = calibrate(readings, windows, ledger, now);
+  const weekly = windows.find((window) => window.group === "weekly");
+  const pace = weeklyPace(readings, weekly, now);
+  const untilOut =
+    pace?.perHour > 0 && weekly ? (weekly.left / pace.perHour) * HOUR : null;
+  const weeklyPerSession =
+    perPercent.session && perPercent.weekly
+      ? perPercent.session.tokens / perPercent.weekly.tokens
+      : null;
+  const tasks = (progress?.topics ?? [])
+    .filter(
+      (task) =>
+        task.status !== "done" && task.status !== "abandoned" && task.accuracy,
+    )
+    .map((task) =>
+      taskBudget(task, progress.current, perPercent, windows, context),
+    )
+    .sort((a, b) => Number(b.current) - Number(a.current));
+  const big = tasks.find((task) => (task.remaining.calls?.high ?? 0) >= 20);
+  return {
+    windows: windows.map(({ local: _local, ...window }) => window),
+    perPercent,
+    weeklyPerSession,
+    weekly: weekly
+      ? {
+          pace,
+          runsOutAt:
+            untilOut !== null && now + untilOut < (weekly.resetsAt ?? 0)
+              ? now + untilOut
+              : null,
+          sessionsLeft: weeklyPerSession
+            ? weekly.left / (100 * weeklyPerSession)
+            : null,
+        }
+      : null,
+    context,
+    freshContext: FRESH_CONTEXT,
+    tasks,
+    advice:
+      big && context > 2 * FRESH_CONTEXT
+        ? `Start big tasks in a fresh conversation: each call here reads about ${Math.round(context / 1000)}k tokens of context, against about ${FRESH_CONTEXT / 1000}k in a fresh one.`
+        : null,
+    method:
+      "A task's cost is its latest estimate less what it has used: calls left times this conversation's context per call (or its context estimate), plus output left, as tokens. A percent's cost is this machine's tokens between the status line's readings over the last week, divided by the points each window rose; with fewer than 5 points, the window's use so far. The plan's figures count every device and app, so use elsewhere makes a percent look cheaper. A task fits when the top of its range fits what is left of every window; a fresh conversation assumes 60k tokens of context per call. The weekly window runs out at its pace over the last day of readings, or its average so far.",
+  };
+}

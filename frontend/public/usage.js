@@ -624,6 +624,117 @@ function account(summary, session) {
     : undefined;
 }
 
+const VERDICTS = {
+  now: "Fits now",
+  fresh: "Fits in a fresh conversation",
+  reset: "Waits for a reset",
+  unknown: "Not known yet",
+};
+const points = (value) =>
+  value < 1 ? value.toFixed(1) : String(Math.round(value));
+const pointsRange = (range) =>
+  range ? `${points(range.low)}–${points(range.high)}%` : "–";
+
+/** What a percent of each window has cost, and the weekly window's pace. */
+function budgetBasis(budget) {
+  const { perPercent, weekly } = budget;
+  const source = (entry) =>
+    entry.source === "readings"
+      ? `from ${points(entry.points)} points of status line readings`
+      : "from this window so far";
+  const parts = [];
+  if (perPercent.session)
+    parts.push(
+      `A session percent costs about ${tokens(perPercent.session.tokens)} tokens${perPercent.session.calls ? `, ${points(perPercent.session.calls)} calls` : ""} (${source(perPercent.session)})`,
+    );
+  else parts.push("Too few session readings yet to price a percent");
+  if (budget.weeklyPerSession)
+    parts.push(
+      `a session point costs ${points(budget.weeklyPerSession)} weekly points (${source(perPercent.weekly)})`,
+    );
+  const lines = [parts.join("; ") + "."];
+  if (weekly?.pace)
+    lines.push(
+      [
+        `Weekly pace ${points(weekly.pace.perHour)} points an hour ${weekly.pace.source === "day" ? "over the last day" : "on average this week"}`,
+        weekly.runsOutAt
+          ? `runs out by ${when(weekly.runsOutAt)}, before its reset`
+          : "lasts to its reset",
+        weekly.sessionsLeft !== null
+          ? `about ${points(weekly.sessionsLeft)} full sessions left`
+          : undefined,
+      ]
+        .filter(Boolean)
+        .join(" · ") + ".",
+    );
+  return lines;
+}
+
+function budgetTask(entry, budget) {
+  const now = entry.cost.now;
+  const cost = now
+    ? `session ${pointsRange(now.session)} · weekly ${pointsRange(now.weekly)}${entry.binding ? ` · ${WINDOW_LABELS[entry.binding] ?? entry.binding} binds` : ""}`
+    : entry.remaining.calls || entry.remaining.context
+      ? "Can't price it until a percent's cost is measured."
+      : "No calls or context in its estimate to price.";
+  const notes = [
+    entry.pastEstimate
+      ? "Past its estimate: nothing left of it to price; re-estimate it."
+      : undefined,
+    entry.verdict === "fresh" && entry.cost.fresh
+      ? `In a fresh conversation (${tokens(budget.freshContext)} context a call): session ${pointsRange(entry.cost.fresh.session)} · weekly ${pointsRange(entry.cost.fresh.weekly)}.`
+      : undefined,
+    entry.waitsUntil ? `Fits after ${when(entry.waitsUntil)}.` : undefined,
+  ].filter(Boolean);
+  return h(
+    "div",
+    { class: "usage-plan-row usage-budget-task" },
+    h(
+      "span",
+      { class: "usage-label" },
+      entry.current ? "Current task" : "Open task",
+    ),
+    h("strong", {}, entry.title),
+    h(
+      "span",
+      { class: `usage-budget-verdict usage-budget-${entry.verdict}` },
+      VERDICTS[entry.verdict],
+    ),
+    h(
+      "span",
+      { class: "usage-detail" },
+      [`left of its estimate: ${cost}`, ...notes].join(" "),
+    ),
+  );
+}
+
+/**
+ * What the open tasks would take of each plan window, whether each fits now,
+ * in a fresh conversation, or after a reset, and the weekly window's pace.
+ */
+function budgetPanel(budget) {
+  if (!budget || budget.windows.length === 0) return undefined;
+  return h(
+    "div",
+    { class: "usage-budget", title: budget.method },
+    h("div", { class: "usage-label" }, "Budget"),
+    ...budget.tasks.map((entry) => budgetTask(entry, budget)),
+    budget.tasks.length
+      ? undefined
+      : h(
+          "p",
+          { class: "hint" },
+          "No open task with an estimate: declare one with estimate on record_topic.",
+        ),
+    ...budgetBasis(budget).map((line) =>
+      h("p", { class: "usage-detail" }, line),
+    ),
+    budget.advice
+      ? h("p", { class: "usage-advice" }, budget.advice)
+      : undefined,
+  );
+}
+
 function render(usage) {
   if (!usage?.available)
     return [
@@ -693,6 +804,7 @@ function render(usage) {
     ),
     timeBar(time),
     task(usage.progress),
+    budgetPanel(usage.budget),
     breakdown(usage),
   ];
 }

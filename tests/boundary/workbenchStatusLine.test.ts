@@ -64,3 +64,21 @@ it("shows the user's own status line on the same input", () => {
   });
   expect(result.stdout.trim()).toBe(String(Buffer.byteLength(input)));
 });
+
+it("keeps each changed reading in the history, once", async () => {
+  const history = join(folder, "claude-status-history.jsonl");
+  const env = {
+    REA_STATUS_FILE: join(folder, "claude-status.json"),
+    REA_STATUS_HISTORY: history,
+  };
+  run(env);
+  run(env);
+  const lines = (await readFile(history, "utf8")).trim().split("\n");
+  expect(lines).toHaveLength(1);
+  expect(JSON.parse(lines[0] ?? "")).toMatchObject({
+    rate_limits: {
+      five_hour: { used_percentage: 61.4, resets_at: 1792759800 },
+      seven_day: { used_percentage: 50 },
+    },
+  });
+});

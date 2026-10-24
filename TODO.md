@@ -123,8 +123,23 @@ In order (a task needs those above it it names):
    name with the tools whose names share most words with it. A tool's own
    invalid_input error (old_text not found, a relative path) gets no hint:
    its message names the value. Used about 50 calls against 15–25 budgeted.
-4. **Budget panel in the usage bar**: for the current task and the next
-   ones, the estimate as a share of the window at the measured calls per
+4. **Started: budget panel in the usage bar.** Built (23 Oct): the status
+   line keeps each changed reading in `claude-status-history.jsonl`
+   (`REA_STATUS_HISTORY`, trimmed to 8 days past 1 MiB); `budgetOf` and
+   `statusReadings` in `frontend/usage.mjs` measure tokens and calls per
+   percent of each window from those readings (or the window so far, under
+   5 points), weekly points per session point, the weekly pace (last day,
+   or the week's average) with when it runs out and full sessions left,
+   and price each open task's estimate left (latest estimate less what it
+   used) at this conversation's context and at a fresh one's (60k a call),
+   as fits now, fits fresh, or waits for a reset (when, binding window).
+   `budgetPanel` in `frontend/public/usage.js` shows it; tests in
+   `workbenchUsage` and `workbenchStatusLine`. Left: not yet seen in a
+   browser; readings only accumulate once the workbench restarts a Claude
+   Code session with the new status line; "next ones" are this session's
+   open topics until item 8 brings TODO tasks; the 60k fresh context is
+   assumed, not measured per project. Original scope: for the current task
+   and the next ones, the estimate as a share of the window at the measured calls per
    percent and the live figure, and whether it fits now, fits in a fresh
    conversation, or waits for the reset. Needs the estimate fields and live
    limits (done). 25–40 calls (2–8%).

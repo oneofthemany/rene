@@ -647,3 +647,125 @@ it("takes the plan's live limits from the status line over Claude Code's older c
   expect(stale.claude.plan).toMatchObject({ live: false });
   expect(stale.claude.plan.windows[0].percent).toBe(54);
 });
+
+it("prices open tasks in both plan windows from the status line's readings", () => {
+  const { budgetOf, statusReadings } = usageModule;
+  const sessionReset = T0 + 200 * MINUTE;
+  const weeklyReset = T0 + 5 * 24 * 60 * MINUTE;
+  // 100k tokens and one call a minute on this machine.
+  const ledger = {
+    totals: (_agent: string, from: number, to: number) => ({
+      calls: (to - from) / MINUTE,
+      input: ((to - from) / MINUTE) * 100_000,
+      cache_read: 0,
+      cache_write: 0,
+      output: 0,
+      premium_requests: 0,
+    }),
+  };
+  // Session 75 -> 85 and weekly 40 -> 45 over 50 minutes, and a line that
+  // isn't JSON.
+  const history = [
+    ...[0, 1, 2, 3, 4, 5].map((step) =>
+      JSON.stringify({
+        at: T0 + step * 10 * MINUTE,
+        rate_limits: {
+          five_hour: {
+            used_percentage: 75 + 2 * step,
+            resets_at: sessionReset / 1000,
+          },
+          seven_day: {
+            used_percentage: 40 + step,
+            resets_at: weeklyReset / 1000,
+          },
+        },
+      }),
+    ),
+    "not json",
+  ].join("\n");
+  const readings = statusReadings(history);
+  expect(readings).toHaveLength(6);
+  const windows = [
+    { group: "session", percent: 85, resetsAt: sessionReset },
+    { group: "weekly", percent: 45, resetsAt: weeklyReset },
+  ].map((window) => ({
+    ...window,
+    left: 100 - window.percent,
+    rolledOver: false,
+    estimate: null,
+    local: null,
+  }));
+  const measures = (
+    calls: [number, number],
+    output: [number, number],
+    used = 0,
+  ) => [
+    {
+      measure: "model_calls",
+      low: calls[0],
+      high: calls[1],
+      actual: used,
+      over: used > calls[1],
+    },
+    { measure: "output_tokens", low: output[0], high: output[1], actual: 0 },
+  ];
+  const progress = {
+    current: "a",
+    topics: [
+      {
+        id: "b",
+        title: "Huge",
+        status: "open",
+        accuracy: { measures: measures([200, 300], [0, 0]) },
+      },
+      {
+        id: "a",
+        title: "Big",
+        status: "open",
+        accuracy: { measures: measures([40, 60], [5000, 15000], 10) },
+      },
+      {
+        id: "c",
+        title: "Closed",
+        status: "done",
+        accuracy: { measures: measures([1, 2], [0, 0]) },
+      },
+    ],
+  };
+  const budget = budgetOf({
+    account: { claude: { plan: { windows } } },
+    readings,
+    ledger,
+    progress,
+    context: 200_000,
+    now: T0 + 50 * MINUTE,
+  });
+  // 5M tokens over 10 session points and 5 weekly points.
+  expect(budget.perPercent.session).toMatchObject({
+    tokens: 500_000,
+    calls: 5,
+    source: "readings",
+  });
+  expect(budget.perPercent.weekly.tokens).toBe(1_000_000);
+  expect(budget.weeklyPerSession).toBe(0.5);
+  expect(budget.weekly.sessionsLeft).toBeCloseTo(1.1);
+  expect(budget.weekly.pace.source).toBe("window");
+  expect(budget.tasks.map((task: { id: string }) => task.id)).toEqual([
+    "a",
+    "b",
+  ]);
+  const [big, huge] = budget.tasks;
+  // 30-50 calls left at 200k a call: 12-20% of the session, 15% left.
+  expect(big.cost.now.session.low).toBeCloseTo(12.01);
+  expect(big.cost.now.session.high).toBeCloseTo(20.03);
+  expect(big).toMatchObject({
+    current: true,
+    verdict: "fresh",
+    binding: "session",
+    waitsUntil: null,
+  });
+  expect(big.cost.fresh.session.high).toBeCloseTo(6.03);
+  // Too big even fresh: waits for the session window to reset.
+  expect(huge).toMatchObject({ verdict: "reset", waitsUntil: sessionReset });
+  expect(budget.advice).toMatch(/fresh conversation/);
+});

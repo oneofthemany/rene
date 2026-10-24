@@ -1695,6 +1695,44 @@ progress {
   font-size: 12px;
 }
 
+.usage-budget {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--rule);
+}
+
+.usage-budget p {
+  margin: 4px 0 0;
+}
+
+.usage-budget-verdict {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 0 6px;
+  border-radius: 3px;
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+
+.usage-budget-now {
+  color: var(--observed);
+}
+
+.usage-budget-fresh {
+  color: var(--accent);
+}
+
+.usage-budget-reset {
+  color: var(--danger);
+}
+
+.usage-budget-unknown {
+  color: var(--muted, inherit);
+}
+
+.usage-advice {
+  font-weight: 600;
+}
+
 .usage-estimate {
   margin-top: 2px;
 }
