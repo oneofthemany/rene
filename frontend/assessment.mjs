@@ -533,8 +533,12 @@ const template = (name, block) =>
 // gate does, when a session starts). The assessment stays the full record.
 export const BRIEFING_FILE = join(".rene", "briefing.md");
 const BRIEF_SECTION_CHARS = { Target: 1_500, Rules: 6_000 };
-const BRIEF_FILES = 10;
-const BRIEF_SYMBOLS = 8;
+// Claude Code hands a hook's context over inline only up to 10,000
+// characters (more goes to a file the agent must read): the whole session
+// briefing (sessionBriefing.mjs) is kept under that.
+const BRIEF_FILES = 6;
+const BRIEF_SYMBOLS = 4;
+const BRIEF_TOPICS_PER_THREAD = 4;
 
 /** A section of the assessment's own (not generated) text, by its heading. */
 function sectionText(markdown, heading, limit) {
@@ -561,12 +565,18 @@ function openTopicLines(tree) {
   const holdsOpen = (node) =>
     open(node) || node.children.some((child) => holdsOpen(child));
   let closed = 0;
+  const newest = (a, b) =>
+    Date.parse(b.declared_at ?? "") - Date.parse(a.declared_at ?? "");
   const walk = (node, depth) => {
-    for (const child of node.children) {
-      if (!holdsOpen(child)) {
-        closed += 1;
-        continue;
-      }
+    const openChildren = node.children.filter((child) => holdsOpen(child));
+    closed += node.children.length - openChildren.length;
+    // The most recently declared open topics; the rest are counted.
+    const shown = openChildren.sort(newest).slice(0, BRIEF_TOPICS_PER_THREAD);
+    if (openChildren.length > shown.length)
+      lines.push(
+        `${"  ".repeat(depth)}- and ${openChildren.length - shown.length} older open topics (${ASSESSMENT_FILE}'s Topics)`,
+      );
+    for (const child of shown) {
       const phase = child.phases?.at(-1)?.name;
       lines.push(
         `${"  ".repeat(depth)}- **${child.title}** — ${child.kind}, ${child.status}${phase ? `, phase ${phase}` : ""} (\`${child.topic_id}\`)`,

@@ -155,7 +155,26 @@ In order (a task needs those above it it names):
    calls per percent measured 2.3 at a 450k context against an expected
    ~20 at 60k. Needs the live figures kept over time (keep each status
    line reading, not only the latest).
-5. **One owner for attribution.** `frontend/topics.mjs` files a turn under
+5. **Done (24 Oct): one owner for attribution.** `frontend/attribution.mjs`
+   owns splitting a conversation into turns (`splitTurns`, which
+   `conversationTurns` uses), the turn identity (`turnKey`) and which topic
+   and phase each event was for (`attributeTurns`, `attributeConversation`).
+   Every call is allocated, with its basis: declared, named (a later
+   declaration named the turn) or carried (the turn declared nothing, so it
+   takes the conversation's last topic, unless that topic was closed done or
+   abandoned); calls before any declaration, or after a closed topic, are
+   unattributed and counted apart ("In no task"), never dropped or guessed.
+   A message sent mid-turn (Copilot's steering, Claude Code's queued
+   message) starts a turn of its own, so its work isn't bundled into the
+   request before (Copilot conversation babf7ea9 had 5 requests in one
+   turn). History files carried turns, and turns with no rene call, under
+   their topic marked `basis: "carried"`; loose turns are only those in no
+   topic. `sessionUsage` uses it (its own `declarationOf` and topic loop
+   removed; `declaredBy`, now topic and status, and `filed` come from
+   `currentTopics` through `cachedTopics`); working time is split across the
+   topics in force between events; the bar shows a task's calls by basis
+   ("Calls counted"). Tests in `workbenchTopics`, `workbenchUsage` and
+   `workbenchConversations`. Original item: `frontend/topics.mjs` files a turn under
    the last topic it declares; `frontend/usage.mjs` counts each call under
    the topic and phase in force. Make one module own "which topic and phase
    was this call for", and have History use it (the Turn attribution and
@@ -191,7 +210,11 @@ In order (a task needs those above it it names):
 7. **Usage view**: charts sliced by agent, project, conversation › topic ›
    phase, waste reason, deviation cause and time; estimate against actual;
    drill-down to the turn and call. Needs 6. 60–90 calls (3–18%).
-8. **Tasks from TODO.md and `docs/plans/*.md`**: each item a task with a
+8. **Tasks from TODO.md and `docs/plans/*.md`** (a first form exists: the
+   session briefing lists TODO.md's open items, id = section and number or
+   lead, from `todoItems` in `frontend/sessionBriefing.mjs`; replace it with
+   the doc layer's ids when this lands, and link each item to its topic):
+   each item a task with a
    stable id (file and heading, from CodeGraph's doc layer), its estimate
    and its topic. Needs 4; overlaps `docs/plans/graph.md` steps 3–4 (doc
    sections in the graph). 40–70 calls (2–14%).

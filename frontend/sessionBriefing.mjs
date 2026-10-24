@@ -11,7 +11,14 @@ import { dirname, join } from "node:path";
 
 const BRIEFING = join(".rene", "briefing.md");
 const TODO = "TODO.md";
+// Claude Code hands a hook's context over inline only up to 10,000
+// characters; more is saved to a file the agent must read first (seen on
+// 24 Oct: a 15.3 KB briefing). The briefing keeps under it: the project part
+// is cut at PROJECT_CHARS, and TODO items fill what is left.
+const SESSION_CHARS = 9_500;
+const PROJECT_CHARS = 5_000;
 const LEAD_CHARS = 90;
+const NUMBERED_CHARS = 50;
 
 /** The way every session works, for Claude Code and Copilot CLI alike. */
 export const SESSION_PROCESS = [
@@ -129,20 +136,20 @@ const todoLines = (markdown) => {
     (item) => item.status !== "done" && !item.title.endsWith(":"),
   );
   if (!open.length) return ["_No open items in TODO.md._"];
+  const shown = (item, chars) =>
+    `${item.title.length > chars ? `${item.title.slice(0, chars)}…` : item.title}${item.status === "started" ? " (started)" : ""}`;
   const lines = [];
-  let section;
-  for (const item of open) {
-    if (item.section !== section) {
-      section = item.section;
-      lines.push(`${TODO} › ${section}:`);
-    }
-    const title =
-      item.title.length > LEAD_CHARS
-        ? `${item.title.slice(0, LEAD_CHARS)}…`
-        : item.title;
-    lines.push(
-      `- ${item.number ? `${item.number}. ` : ""}${title}${item.status === "started" ? " (started)" : ""}`,
-    );
+  for (const section of new Set(open.map((item) => item.section))) {
+    const items = open.filter((item) => item.section === section);
+    lines.push(`${TODO} › ${section}:`);
+    // A numbered list reads as one line: "6. Usage store; 7. Usage view".
+    const numbered = items.filter((item) => item.number !== null);
+    if (numbered.length)
+      lines.push(
+        `- ${numbered.map((item) => `${item.number}. ${shown(item, NUMBERED_CHARS)}`).join("; ")}`,
+      );
+    for (const item of items.filter((entry) => entry.number === null))
+      lines.push(`- ${shown(item, LEAD_CHARS)}`);
   }
   return lines;
 };
@@ -200,7 +207,13 @@ export async function sessionBriefing(cwd, statusFile) {
   } catch {
     parsedStatus = undefined;
   }
-  return [
+  const project =
+    briefing === undefined
+      ? `_No ${BRIEFING} yet: the workbench writes it with the assessment; read .rene/assessment.md's Rules and Topics instead._`
+      : briefing.length > PROJECT_CHARS
+        ? `${briefing.slice(0, PROJECT_CHARS)}…\n_(cut to fit: the rest is in ${BRIEFING})_`
+        : briefing;
+  const head = [
     SESSION_PROCESS,
     "",
     "## Step 1: budget",
@@ -208,12 +221,23 @@ export async function sessionBriefing(cwd, statusFile) {
     "",
     "## Step 2: the project",
     folder ? `Project folder: ${folder}` : "Project folder: unknown.",
-    briefing ??
-      `_No ${BRIEFING} yet: the workbench writes it with the assessment; read .rene/assessment.md's Rules and Topics instead._`,
+    project,
     "",
     "## Step 3: open items in TODO.md",
-    ...todoLines(todo),
-    "",
-    ...toolFormLines(),
   ].join("\n");
+  const tail = ["", ...toolFormLines()].join("\n");
+  // TODO items fill what the budget leaves; the rest are counted.
+  const items = todoLines(todo);
+  let room = SESSION_CHARS - head.length - tail.length - 80;
+  const kept = [];
+  for (const line of items) {
+    if (line.length + 1 > room) break;
+    kept.push(line);
+    room -= line.length + 1;
+  }
+  if (kept.length < items.length)
+    kept.push(
+      `- and ${items.length - kept.length} more lines of open items: read ${TODO}.`,
+    );
+  return [head, ...kept, tail].join("\n");
 }

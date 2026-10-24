@@ -152,10 +152,26 @@ describe("session briefing", () => {
     expect(text).toContain("5-hour window 9% used");
     expect(text).toContain("weekly 69% used");
     expect(text).toContain("`f-bar`");
-    expect(text).toContain("- 6. Usage store");
-    expect(text).toContain("- 4. budget panel in the usage bar. (started)");
+    // A numbered list reads as one line.
+    expect(text).toContain(
+      "- 4. budget panel in the usage bar. (started); 6. Usage store",
+    );
     expect(text).not.toContain("Trim the copy");
     expect(text).not.toContain("Baseline");
+    // Kept under the 10,000 characters Claude Code hands over inline: a
+    // long TODO.md is cut, and what was left out is counted.
+    await writeFile(
+      join(folder, "TODO.md"),
+      Array.from(
+        { length: 400 },
+        (_, index) => `- **Open item ${String(index)} with a longish title.**`,
+      ).join("\n"),
+    );
+    const long = await briefingModule.sessionBriefing(folder, statusFile);
+    expect(long.length).toBeLessThan(10_000);
+    expect(long).toMatch(
+      /- and \d+ more lines of open items: read TODO\.md\./u,
+    );
     // A part it can't read is named, not dropped.
     const bare = await briefingModule.sessionBriefing(join(folder, "src"));
     expect(bare).toContain("Live limits: unknown");
