@@ -3,18 +3,20 @@
 // session works, step by step, and what steps 1 to 3 need, so they cost no
 // calls: the plan's live limits, the project's briefing (assessment.mjs
 // writes it with the assessment: target, rules, layout, open topics) and the
-// open items in TODO.md. Every part is read when the session starts; a part
+// open tasks in TODO.md and docs/plans (tasks.mjs). Every part is read when the session starts; a part
 // that can't be read is named as missing rather than left out silently.
 
 import { readFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
+
+import { projectTasks } from "./tasks.mjs";
 
 const BRIEFING = join(".rene", "briefing.md");
 const TODO = "TODO.md";
 // Claude Code hands a hook's context over inline only up to 10,000
 // characters; more is saved to a file the agent must read first (seen on
 // 24 Oct: a 15.3 KB briefing). The briefing keeps under it: the project part
-// is cut at PROJECT_CHARS, and TODO items fill what is left.
+// is cut at PROJECT_CHARS, and tasks fill what is left.
 const SESSION_CHARS = 9_500;
 const PROJECT_CHARS = 5_000;
 const LEAD_CHARS = 90;
@@ -25,9 +27,9 @@ export const SESSION_PROCESS = [
   "How this session works:",
   "1. Budget: read the plan's live limits below (the 5-hour and weekly windows) and your context's size.",
   "2. Orient on the project: its target, rules, layout and open topics, below (the full record is .rene/assessment.md).",
-  "3. Orient on the open items in TODO.md, below, each with its id.",
-  "4. Understand the request: match it to a TODO item or an open topic, and see whether another agent worked on it (list_agent_conversations, read_agent_conversation); ask the user only if it is still unclear.",
-  "5. Declare with `rene call record_topic`: continue the matching topic with its topic_id, or declare a new one under the thread it belongs to, with `estimate` and `plan`; then say whether it fits what is left now, fits better in a fresh conversation, or should wait for a reset, and tell the user before starting if it doesn't fit.",
+  "3. Orient on the open tasks in TODO.md and docs/plans, below, each with its id.",
+  "4. Understand the request: match it to a task or an open topic, and see whether another agent worked on it (list_agent_conversations, read_agent_conversation); ask the user only if it is still unclear.",
+  "5. Declare with `rene call record_topic`: continue the matching topic with its topic_id, or declare a new one under the thread it belongs to, with `estimate`, `plan` and the `task` it works on; then say whether it fits what is left now, fits better in a fresh conversation, or should wait for a reset, and tell the user before starting if it doesn't fit.",
   "6. Act in phases: declare each phase as it starts, and look at the budget again between phases.",
   "7. Close out: verify (tests, checks), declare the topic done or abandoned with a summary, update the TODO item and the assessment's Findings, report the estimate against what was used, and say what is ready for the user to commit.",
   "Steps 1 to 4 may read before a declaration: read_file, search_text, find_files, list_agent_conversations and read_agent_conversation, and `rene tools search|describe`. Anything else waits for step 5.",
@@ -42,6 +44,7 @@ export const TOOL_FORMS = [
       title: "…",
       kind: "feature",
       parent_id: "<its thread's id>",
+      task: "<the task's id, if it works on one>",
       plan: ["…", "…"],
       phase: "…",
       estimate: {
@@ -98,50 +101,23 @@ const toolFormLines = () => [
   ...TOOL_FORMS.map(([tool, args]) => `- ${tool} ${JSON.stringify(args)}`),
 ];
 
-/**
- * TODO.md's items: each bold-led item (`1. **…**` or `- **…**`) at the start
- * of a line, under its `## ` section. An item reads as done when its lead, or
- * the words just after it, start with "Done"; as started when they start with
- * "Started". Its id is its section and number, or its section and lead.
- */
-export function todoItems(markdown) {
-  const items = [];
-  let section = "";
-  for (const line of markdown.split("\n")) {
-    const heading = /^##\s+(.+?)\s*$/u.exec(line);
-    if (heading) {
-      section = heading[1];
-      continue;
-    }
-    const item = /^(?:(\d+)\.|-)\s+\*\*(.+?)\*\*:?\s*(.*)$/u.exec(line);
-    if (!item) continue;
-    const [, number, lead, after] = item;
-    const state = /^(done|started)\b/iu.exec(lead) ?? /^(done)\b/iu.exec(after);
-    const title = lead.replace(/^(done|started)\b[^:]*:\s*/iu, "");
-    items.push({
-      id: `${TODO} › ${section} › ${number ? `${number}.` : title.slice(0, 40)}`,
-      section,
-      number: number ? Number(number) : null,
-      title,
-      status: state ? state[1].toLowerCase() : "open",
-    });
-  }
-  return items;
-}
-
-const todoLines = (markdown) => {
-  if (markdown === undefined) return ["_No TODO.md in this project._"];
-  // A lead ending in a colon labels a note ("Baseline (SQLite):"), not a task.
-  const open = todoItems(markdown).filter(
-    (item) => item.status !== "done" && !item.title.endsWith(":"),
+/** The open tasks (tasks.mjs), by the section their ids start with. */
+const taskLines = (found) => {
+  if (found.unavailable) return [`_Tasks unavailable: ${found.unavailable}_`];
+  if (!found.files.includes(TODO) && !found.tasks.length)
+    return ["_No TODO.md or docs/plans in this project._"];
+  const open = found.tasks.filter(
+    (item) => item.status !== "done" && !item.note,
   );
-  if (!open.length) return ["_No open items in TODO.md._"];
+  if (!open.length) return ["_No open tasks._"];
   const shown = (item, chars) =>
-    `${item.title.length > chars ? `${item.title.slice(0, chars)}…` : item.title}${item.status === "started" ? " (started)" : ""}`;
-  const lines = [];
-  for (const section of new Set(open.map((item) => item.section))) {
-    const items = open.filter((item) => item.section === section);
-    lines.push(`${TODO} › ${section}:`);
+    `${item.title.length > chars ? `${item.title.slice(0, chars)}…` : item.title}${item.status === "started" ? " (started)" : ""}${item.stable ? ` [${item.id}]` : ""}`;
+  const lines = [
+    "A task's id is the one in brackets, which it keeps when moved or renumbered; without one, its section, then ` › ` and its number or lead (`TODO.md#Now › A long-running process tool.`), which renumbering changes. Name it as record_topic's `task`; give a task you work on its own id by adding `<!-- task: short-name -->` to its text.",
+  ];
+  for (const section of new Set(open.map((item) => item.under))) {
+    const items = open.filter((item) => item.under === section);
+    lines.push(`${section}:`);
     // A numbered list reads as one line: "6. Usage store; 7. Usage view".
     const numbered = items.filter((item) => item.number !== null);
     if (numbered.length)
@@ -196,9 +172,11 @@ export async function sessionBriefing(cwd, statusFile) {
   const folder = cwd ? await projectFolder(cwd) : undefined;
   const read = (path) =>
     path ? readFile(path, "utf8").catch(() => undefined) : undefined;
-  const [briefing, todo, status] = await Promise.all([
+  const [briefing, found, status] = await Promise.all([
     folder ? read(join(folder, BRIEFING)) : undefined,
-    folder ? read(join(folder, TODO)) : undefined,
+    folder
+      ? projectTasks(folder)
+      : { tasks: [], files: [], missing: [], unavailable: null },
     read(statusFile),
   ]);
   let parsedStatus;
@@ -223,11 +201,11 @@ export async function sessionBriefing(cwd, statusFile) {
     folder ? `Project folder: ${folder}` : "Project folder: unknown.",
     project,
     "",
-    "## Step 3: open items in TODO.md",
+    "## Step 3: open tasks in TODO.md and docs/plans",
   ].join("\n");
   const tail = ["", ...toolFormLines()].join("\n");
-  // TODO items fill what the budget leaves; the rest are counted.
-  const items = todoLines(todo);
+  // Tasks fill what the budget leaves; the rest are counted.
+  const items = taskLines(found);
   let room = SESSION_CHARS - head.length - tail.length - 80;
   const kept = [];
   for (const line of items) {
@@ -237,7 +215,7 @@ export async function sessionBriefing(cwd, statusFile) {
   }
   if (kept.length < items.length)
     kept.push(
-      `- and ${items.length - kept.length} more lines of open items: read ${TODO}.`,
+      `- and ${items.length - kept.length} more lines of open tasks: read ${TODO} and docs/plans.`,
     );
   return [head, ...kept, tail].join("\n");
 }

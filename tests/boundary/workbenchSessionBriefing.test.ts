@@ -20,13 +20,23 @@ const briefingModule = (await import(
 )) as {
   SESSION_PROCESS: string;
   TOOL_FORMS: [string, Record<string, unknown>][];
-  todoItems(markdown: string): {
-    id: string;
-    number: number | null;
-    title: string;
-    status: string;
-  }[];
   sessionBriefing(cwd: string, statusFile?: string): Promise<string>;
+};
+interface Task {
+  id: string;
+  stable: boolean;
+  under: string;
+  section: string;
+  number: number | null;
+  title: string;
+  status: string;
+  note: boolean;
+  estimate: { model_calls: { low: number; high: number } } | null;
+  topic?: { id: string; status: string } | null;
+}
+const tasksModule = (await import(new URL("tasks.mjs", frontend).href)) as {
+  tasksOf(file: string, markdown: string): Task[];
+  linkTasks(tasks: Task[], topics: Iterable<Record<string, unknown>>): Task[];
 };
 const { writeAssessment } = (await import(
   new URL("assessment.mjs", frontend).href
@@ -67,7 +77,8 @@ const TODO = [
   "",
   "1. **Done: a window starting mid-turn drops that turn** (`turnsOf`).",
   "4. **Started: budget panel in the usage bar.** Built.",
-  "6. **Usage store**: one row per model call.",
+  "6. **Usage store**: one row per model call. <!-- task: usage-store -->",
+  "   Needs 5. 60–100 calls (3–20%).",
   "",
   "## CodeGraph",
   "",
@@ -117,17 +128,96 @@ async function project() {
 }
 
 describe("session briefing", () => {
-  it("lists TODO.md's items with ids and status, notes left out of the open list", () => {
-    const items = briefingModule.todoItems(TODO);
-    expect(items.map(({ id, status }) => [id, status])).toEqual([
-      ["TODO.md › Now › Trim the copy.", "done"],
-      ["TODO.md › Now › A long-running process tool.", "open"],
-      ["TODO.md › Agent usage and budget › 1.", "done"],
-      ["TODO.md › Agent usage and budget › 4.", "started"],
-      ["TODO.md › Agent usage and budget › 6.", "open"],
-      ["TODO.md › CodeGraph › Baseline (SQLite):", "open"],
+  it("lists TODO.md's items with ids from the graph's sections, status and estimates", () => {
+    const items = tasksModule.tasksOf("TODO.md", TODO);
+    expect(items.map(({ id, status, note }) => [id, status, note])).toEqual([
+      ["TODO.md#Now › Trim the copy.", "done", false],
+      ["TODO.md#Now › A long-running process tool.", "open", false],
+      ["TODO.md#Agent usage and budget › 1.", "done", false],
+      ["TODO.md#Agent usage and budget › 4.", "started", false],
+      ["usage-store", "open", false],
+      ["TODO.md#CodeGraph › Baseline (SQLite):", "open", true],
     ]);
     expect(items[3]?.title).toBe("budget panel in the usage bar.");
+    expect(items[4]).toMatchObject({
+      stable: true,
+      under: "TODO.md#Agent usage and budget",
+      section: "TODO.md#Agent usage and budget",
+      number: 6,
+      // From the item's own text, not the next item's.
+      estimate: { model_calls: { low: 60, high: 100 } },
+    });
+    expect(items[3]?.estimate).toBeNull();
+  });
+
+  it("keeps a task's own id when items are renumbered, and links it to its topic", () => {
+    const before = tasksModule.tasksOf("TODO.md", TODO);
+    const renumbered = tasksModule.tasksOf(
+      "TODO.md",
+      TODO.replace(
+        "6. **Usage store**",
+        "2. **New first**: x.\n7. **Usage store**",
+      ),
+    );
+    const store = (tasks: Task[]) =>
+      tasks.find((task) => task.title === "Usage store");
+    expect(store(renumbered)?.id).toBe(store(before)?.id);
+    expect(store(renumbered)?.number).toBe(7);
+    // Without its own id, the number is the id, and renumbering changes it.
+    expect(store(renumbered)?.stable).toBe(true);
+    expect(renumbered.find((task) => task.number === 2)?.stable).toBe(false);
+
+    const linked = tasksModule.linkTasks(before, [
+      {
+        topic_id: "old",
+        task: "usage-store",
+        status: "done",
+        declared_at: "2026-10-24T10:00:00Z",
+      },
+      {
+        topic_id: "now",
+        task: "usage-store",
+        status: "open",
+        declared_at: "2026-10-23T10:00:00Z",
+      },
+      {
+        topic_id: "later",
+        task: "usage-store",
+        status: "done",
+        declared_at: "2026-10-24T12:00:00Z",
+      },
+    ]);
+    // An open topic over a closed one, however recent.
+    expect(store(linked)?.topic).toMatchObject({ id: "now", status: "open" });
+    expect(linked[0]?.topic).toBeNull();
+  });
+
+  it("reads a plan's numbered headings as its steps", () => {
+    const plan = [
+      "# Plan",
+      "## What gets built",
+      "### 1. Docs in the graph — built",
+      "Done.",
+      "### 2. Subsystems <!-- task: subsystems -->",
+      "About 30–50 calls.",
+      "#### Detail",
+      "Not its estimate: 1–2 calls.",
+      "## Costs",
+      "- **Divergence.** Not a task.",
+    ].join("\n");
+    const steps = tasksModule.tasksOf("docs/plans/p.md", plan);
+    expect(steps.map(({ id, status, title }) => [id, status, title])).toEqual([
+      [
+        "docs/plans/p.md#Plan#What gets built › 1.",
+        "done",
+        "Docs in the graph",
+      ],
+      ["subsystems", "open", "Subsystems"],
+    ]);
+    expect(steps[1]).toMatchObject({
+      under: "docs/plans/p.md#Plan#What gets built",
+      estimate: { model_calls: { low: 30, high: 50 } },
+    });
   });
 
   it("hands a starting session the process, limits, open topics and open items", async () => {
@@ -154,8 +244,9 @@ describe("session briefing", () => {
     expect(text).toContain("`f-bar`");
     // A numbered list reads as one line.
     expect(text).toContain(
-      "- 4. budget panel in the usage bar. (started); 6. Usage store",
+      "- 4. budget panel in the usage bar. (started); 6. Usage store [usage-store]",
     );
+    expect(text).toContain("TODO.md#Agent usage and budget:");
     expect(text).not.toContain("Trim the copy");
     expect(text).not.toContain("Baseline");
     // Kept under the 10,000 characters Claude Code hands over inline: a
@@ -170,7 +261,7 @@ describe("session briefing", () => {
     const long = await briefingModule.sessionBriefing(folder, statusFile);
     expect(long.length).toBeLessThan(10_000);
     expect(long).toMatch(
-      /- and \d+ more lines of open items: read TODO\.md\./u,
+      /- and \d+ more lines of open tasks: read TODO\.md and docs\/plans\./u,
     );
     // A part it can't read is named, not dropped.
     const bare = await briefingModule.sessionBriefing(join(folder, "src"));

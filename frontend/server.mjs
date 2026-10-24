@@ -47,6 +47,7 @@ import {
   followConversations,
 } from "./conversations.mjs";
 import { createHistory } from "./history.mjs";
+import { linkTasks, projectTasks } from "./tasks.mjs";
 import { currentTopics, TOPIC_TOOL, topicTree } from "./topics.mjs";
 import {
   createUsageLedger,
@@ -631,6 +632,10 @@ async function terminalUsage() {
       readings,
       ledger: usageLedger,
       progress: usage.progress,
+      tasks: linkTasks(
+        (await projectTasks(project.manifest.path)).tasks,
+        topics.values(),
+      ),
       context: usage.tokens.context,
       fresh: freshContext(all),
       now: Date.now(),

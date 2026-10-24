@@ -783,6 +783,42 @@ it("gives the weekly pace while working and over the window, each with when it r
   });
 });
 
+// The task list (tasks.mjs): priced by its own estimate unless a topic priced
+// above works on it; done, notes and unestimated ones left out.
+const listed = (
+  id: string,
+  status: string,
+  calls: number[] | null,
+  topic: string | null = null,
+) => ({
+  id,
+  title: id,
+  status,
+  note: false,
+  estimate: calls ? { model_calls: { low: calls[0], high: calls[1] } } : null,
+  topic: topic ? { id: topic, title: id, status: "open" } : null,
+});
+const TASK_LIST = [
+  listed("usage-big", "open", [40, 60], "a"),
+  listed("usage-done", "done", [1, 2]),
+  listed("usage-vague", "open", null),
+  listed("usage-next", "open", [10, 20]),
+];
+
+function expectNextTasks(budget: {
+  next: { cost: { now: { session: { high: number } } } }[];
+}) {
+  // 10-20 calls at 200k a call, no output estimated: 4-8% of the session.
+  expect(budget.next).toHaveLength(1);
+  expect(budget.next[0]).toMatchObject({
+    id: "usage-next",
+    task: "usage-next",
+    current: false,
+    remaining: { calls: { low: 10, high: 20 } },
+  });
+  expect(budget.next[0]?.cost.now.session.high).toBeCloseTo(8);
+}
+
 it("prices open tasks in both plan windows from the status line's readings", () => {
   const { budgetOf, statusReadings } = usageModule;
   const sessionReset = T0 + 200 * MINUTE;
@@ -872,9 +908,11 @@ it("prices open tasks in both plan windows from the status line's readings", () 
     readings,
     ledger,
     progress,
+    tasks: TASK_LIST,
     context: 200_000,
     now: T0 + 50 * MINUTE,
   });
+  expectNextTasks(budget);
   // 5M tokens over 10 session points and 5 weekly points.
   expect(budget.perPercent.session).toMatchObject({
     tokens: 500_000,

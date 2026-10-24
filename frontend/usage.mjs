@@ -1288,6 +1288,8 @@ export function accountUsage({ plan, live, ledger, now }) {
 // A fresh conversation's context per call when this project has too few
 // conversations to measure it (measured here on 23 Oct: about 60k).
 const FRESH_CONTEXT = 60_000;
+// The task list's open tasks the budget prices beside the open topics.
+const NEXT_TASKS = 5;
 // A fresh conversation's context: each one's mean over its first calls, the
 // median over this project's most recent conversations with enough calls.
 const FRESH_CALLS = 20;
@@ -1548,6 +1550,8 @@ function taskBudget(task, current, perPercent, windows, context, perCall) {
  * @param {Array} input.readings statusReadings's result
  * @param {object} input.ledger this machine's usage (createUsageLedger)
  * @param {object} input.progress sessionUsage's progress
+ * @param {object[]} [input.tasks] the project's tasks with their topics
+ *   (tasks.mjs projectTasks, then linkTasks), in their files' order
  * @param {number | null} input.context the conversation's context per call now
  * @param {{ perCall: number, conversations: number } | null} input.fresh
  *   a fresh conversation's context per call here (freshContext)
@@ -1558,6 +1562,7 @@ export function budgetOf({
   readings,
   ledger,
   progress,
+  tasks: planned,
   context,
   fresh,
   now,
@@ -1598,7 +1603,33 @@ export function budgetOf({
       taskBudget(task, progress.current, perPercent, windows, context, perCall),
     )
     .sort((a, b) => Number(b.current) - Number(a.current));
-  const big = tasks.find((task) => (task.remaining.calls?.high ?? 0) >= 20);
+  // The next tasks TODO.md and the plans list, by the estimate their text
+  // gives, unless a topic priced above already works on them.
+  const priced = new Set(tasks.map((task) => task.id));
+  const next = (planned ?? [])
+    .filter(
+      (task) =>
+        task.status !== "done" &&
+        !task.note &&
+        task.estimate &&
+        !(task.topic && priced.has(task.topic.id)),
+    )
+    .slice(0, NEXT_TASKS)
+    .map((task) => ({
+      ...taskBudget(
+        { id: task.id, title: task.title, reestimated: task.estimate },
+        progress?.current,
+        perPercent,
+        windows,
+        context,
+        perCall,
+      ),
+      task: task.id,
+      topic: task.topic,
+    }));
+  const big = [...tasks, ...next].find(
+    (task) => (task.remaining.calls?.high ?? 0) >= 20,
+  );
   return {
     windows: windows.map(({ local: _local, ...window }) => window),
     perPercent,
@@ -1619,6 +1650,7 @@ export function budgetOf({
       ? { perCall, conversations: fresh.conversations, source: "measured" }
       : { perCall, conversations: 0, source: "assumed" },
     tasks,
+    next,
     advice:
       big && context > 2 * perCall
         ? `Start big tasks in a fresh conversation: each call here reads about ${Math.round(context / 1000)}k tokens of context, against about ${Math.round(perCall / 1000)}k in a fresh one.`

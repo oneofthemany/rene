@@ -720,6 +720,9 @@ function budgetTask(entry, budget) {
       ? `In a fresh conversation (${tokens(budget.fresh.perCall)} context a call, ${budget.fresh.source === "measured" ? `measured over this project's last ${budget.fresh.conversations} conversations` : "assumed: too few conversations here to measure"}): session ${pointsRange(entry.cost.fresh.session)} · weekly ${pointsRange(entry.cost.fresh.weekly)}.`
       : undefined,
     entry.waitsUntil ? `Fits after ${when(entry.waitsUntil)}.` : undefined,
+    entry.topic
+      ? `Topic “${entry.topic.title}” (${entry.topic.status}) works on it.`
+      : undefined,
   ].filter(Boolean);
   return h(
     "div",
@@ -727,9 +730,9 @@ function budgetTask(entry, budget) {
     h(
       "span",
       { class: "usage-label" },
-      entry.current ? "Current task" : "Open task",
+      entry.task ? "Next task" : entry.current ? "Current task" : "Open task",
     ),
-    h("strong", {}, entry.title),
+    h("strong", entry.task ? { title: entry.task } : {}, entry.title),
     h(
       "span",
       { class: `usage-budget-verdict usage-budget-${entry.verdict}` },
@@ -738,7 +741,10 @@ function budgetTask(entry, budget) {
     h(
       "span",
       { class: "usage-detail" },
-      [`left of its estimate: ${cost}`, ...notes].join(" "),
+      [
+        `${entry.task ? "its estimate in the task list" : "left of its estimate"}: ${cost}`,
+        ...notes,
+      ].join(" "),
     ),
   );
 }
@@ -754,7 +760,8 @@ function budgetPanel(budget) {
     { class: "usage-budget", title: budget.method },
     h("div", { class: "usage-label" }, "Budget"),
     ...budget.tasks.map((entry) => budgetTask(entry, budget)),
-    budget.tasks.length
+    ...(budget.next ?? []).map((entry) => budgetTask(entry, budget)),
+    budget.tasks.length || budget.next?.length
       ? undefined
       : h(
           "p",

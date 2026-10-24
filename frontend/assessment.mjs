@@ -579,7 +579,7 @@ function openTopicLines(tree) {
     for (const child of shown) {
       const phase = child.phases?.at(-1)?.name;
       lines.push(
-        `${"  ".repeat(depth)}- **${child.title}** — ${child.kind}, ${child.status}${phase ? `, phase ${phase}` : ""} (\`${child.topic_id}\`)`,
+        `${"  ".repeat(depth)}- **${child.title}** — ${child.kind}, ${child.status}${phase ? `, phase ${phase}` : ""}${child.task ? `, task \`${child.task}\`` : ""} (\`${child.topic_id}\`)`,
       );
       walk(child, depth + 1);
     }

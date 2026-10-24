@@ -7,7 +7,7 @@
   `pack-npm.sh`, `npm-shim.js`, `local-install.sh`), the docs site (`site/`)
   and the hosted telemetry backends (`telemetry-worker/`,
   `telemetry-dashboard/`).
-- **CodeGraph's viewer for all of rene (paused, plan agreed).** The viewer
+- **CodeGraph's viewer for all of rene (paused, plan agreed).** <!-- task: now-codegraph-viewer --> The viewer
   (`packages/codegraph/ui`, Svelte + @xyflow) reads through a `GraphAdapter`
   seam (`ui/src/lib/adapter.ts`, 13 read methods, `Wire*` shapes in
   `wire.ts`) with views for map, entry points, dead code, screens, steps and
@@ -21,7 +21,7 @@
      workbench, fed by CodeGraph first.
   3. The other producers (application graphs, native investigation graph,
      call paths) projected to the contract.
-- **Telemetry for all of rene, into the journal (placeholder).** Every part
+- **Telemetry for all of rene, into the journal (placeholder).** <!-- task: now-telemetry --> Every part
   of rene reports to the user's telemetry journal (sherloQ,
   `http://127.0.0.1:5007`), never off the machine. CodeGraph already does:
   `POST /ingest/codegraph`, one record per event. To design before code:
@@ -37,44 +37,44 @@
     (e.g. `REA_TELEMETRY_ENDPOINT`), and should rene's own CodeGraph
     processes stop forcing CodeGraph telemetry off? Who enables each new
     topic in the journal (it holds unknown topics until enabled)?
-- **rene tools for the remaining built-ins.** The topic gate refuses Claude
+- **rene tools for the remaining built-ins.** <!-- task: now-builtin-replacements --> The topic gate refuses Claude
   Code's Bash, Read, Write, Edit, Grep and Glob; still allowed until rene
   has a replacement: Read for images and PDFs (the `read_file` item below),
   WebFetch (`fetch_url`), NotebookEdit (`edit_notebook`) and WebSearch
   (`web_search`, backed by SearXNG in the container: needs a Containerfile
   change and a rebuild). Add each built-in to `RENE_REPLACEMENTS` in
   `frontend/topicGate.mjs` as its tool lands.
-- **A long-running process tool.** Nothing in rene keeps a server up across
+- **A long-running process tool.** <!-- task: now-long-running-process-tool --> Nothing in rene keeps a server up across
   calls (start, read output, stop, owned by rene). Needed to drive a web UI
   with the browser tools, e.g. CodeGraph's viewer.
-- **Assessment summary from queries.** `summarize` (the Tools used table and
+- **Assessment summary from queries.** <!-- task: now-assessment-summary-queries --> `summarize` (the Tools used table and
   pathways) and the topic tree still read every summary. The store now has
   one aggregate, `usage` (calls and last start per tool, used by the
   sidebar); the Tools used table can read it, and pathways need their own.
-- **Browser scenarios can't move the mouse.** `capture_browser_scenario`
+- **Browser scenarios can't move the mouse.** <!-- task: now-browser-scenarios-cant-move --> `capture_browser_scenario`
   has click, fill, press, select and wait actions but no hover or mouse
   move, so a bug that follows the pointer (the agent terminal's mouse
   reports) can only be driven with clicks and keys. Add a `move`/`hover`
   action.
-- **Browser results too big for an agent.** `capture_browser_scenario` with
+- **Browser results too big for an agent.** <!-- task: now-browser-results-too-big --> `capture_browser_scenario` with
   network capture (80–170 KB) and `inspect_web_page` with accessibility text
   (260 KB) exceed what an agent can take inline, so every check went through
   a saved file and a script. Return a summary (step outcomes, request counts
   by method and path, WebSocket counts, errors) with the full Evidence kept
   for paging.
-- **`read_file` can't show an image.** A PNG comes back as "binary" with a
+- **`read_file` can't show an image.** <!-- task: now-read-file-cant-show --> A PNG comes back as "binary" with a
   digest, so checking a screenshot (e.g. a workbench capture) needs Claude
   Code's own Read. Return image files as MCP image content.
-- **Turn attribution.** `frontend/topics.mjs` files a turn under the last
+- **Turn attribution.** <!-- task: now-turn-attribution --> `frontend/topics.mjs` files a turn under the last
   topic it declares. File calls under the topic in force when they were
   made, and list a turn under every topic it declared.
   `tests/boundary/workbenchTopics.test.ts` pins today's last-declared rule;
   change it with the fix.
-- **Feed Evidence links.** Pathways and Evidence links stay empty because no
+- **Feed Evidence links.** <!-- task: now-feed-evidence-links --> Pathways and Evidence links stay empty because no
   call names Evidence. Add an `evidence` field to `record_topic` so a
   topic's conclusion cites the Evidence it rests on.
 
-- **Measure the source-graph instruction.** Agents are now told to ask the
+- **Measure the source-graph instruction.** <!-- task: now-measure-source-graph-instruction --> Agents are now told to ask the
   source graph first. Compare tool calls, tokens and time on one real code
   question with and without it.
 
@@ -101,7 +101,7 @@ In order (a task needs those above it it names):
    `frontend/usage.mjs`). A prompted turn was already kept; a turn a
    background task woke (no prompt) was still dropped, and now counts from
    the window's start.
-2. **Compact `rene call` output.** First step done: `rene call` leaves out
+2. **Compact `rene call` output.** <!-- task: usage-compact-output --> First step done: `rene call` leaves out
    `parameters`, `provider`, `predicate_type` and null or empty fields
    (`compactResultText` in `src/toolCli.ts`); `--full` prints the whole
    envelope, and history records it whole either way. Measured on 23 Oct in
@@ -247,29 +247,46 @@ In order (a task needs those above it it names):
    item: charts sliced by agent, project, conversation › topic › phase,
    waste reason, deviation cause and time; estimate against actual;
    drill-down to the turn and call. Needs 6. 60–90 calls (3–18%).
-8. **Tasks from TODO.md and `docs/plans/*.md`** (a first form exists: the
-   session briefing lists TODO.md's open items, id = section and number or
-   lead, from `todoItems` in `frontend/sessionBriefing.mjs`; replace it with
-   the doc layer's ids when this lands, and link each item to its topic):
-   each item a task with a
-   stable id (file and heading, from CodeGraph's doc layer), its estimate
-   and its topic. Needs 4; overlaps `docs/plans/graph.md` steps 3–4 (doc
-   sections in the graph). 40–70 calls (2–14%).
-9. **Impact, overlap and prerequisites per task**: what each item would
+8. **Done (24 Oct): tasks from TODO.md and `docs/plans/*.md`.** <!-- task: usage-tasks -->
+   `frontend/tasks.mjs` owns them (`todoItems` removed): TODO.md's
+   bold-led items and every plan's numbered headings (`### 3. Subsystems`,
+   done when "— built" or struck through), each with its status, the
+   estimate its text gives ("40–70 calls") and its section, read through
+   CodeGraph's own `MarkdownExtractor` so it is the `section` node the graph
+   indexes (`TODO.md#Agent usage and budget`). A task's id is its own
+   marker, `<!-- task: … -->` (this one's is above), which survives renumbering,
+   moving and retitling (`stable`); without one, its section and number or
+   lead, which renumbering changes. `record_topic` takes `task` (kept per
+   topic by `currentTopics`); `linkTasks` gives each task its topic (open
+   over closed, then latest). The session briefing lists open tasks by
+   section with marker ids in brackets, and the briefing's Open topics name
+   each topic's task; the budget panel prices the next 5 open estimated
+   tasks no priced topic works on (`budgetOf`'s `next`, "Next task").
+   Tests in `workbenchSessionBriefing` and `workbenchUsage`. Every open
+   task has its own id (70 added on 24 Oct from section and lead; a plan's
+   goes on the line under its heading, so the graph's section name stays
+   clean); a new item gets one when it is written. Seen live: a
+   declaration's `task` comes back through the history into the
+   regenerated briefing ("task `usage-tasks`"). Left: the budget panel's
+   Next task rows not yet seen in a browser (the bridge's usage route needs
+   its per-run token); for item 9, the graph's `documents` links are per
+   section, so two items in one section can't yet be told apart. Original scope: each item
+   a task with a stable id, its estimate and its topic. 40–70 calls (2–14%).
+9. **Impact, overlap and prerequisites per task**: <!-- task: usage-impact --> what each item would
    change (its named files and symbols, through `documents` links and
    `analyze_source_impact`), which items touch the same symbols, and which
    need another's work first (stated: "after", "needs"; or derived: it
    changes what another creates). Order the list by them. Needs 8;
    overlaps the roadmap's Link topics to code. 50–90 calls (3–18%).
-10. **Feed estimate accuracy back**: at session start, the agent's own bias
+10. **Feed estimate accuracy back**: <!-- task: usage-accuracy-feedback --> at session start, the agent's own bias
     in this project ("time estimates ran 3x high") and its recent misses
     ("search_text takes root and query; jq isn't installed"). Needs 6.
     20–30 calls (1–6%).
-11. **Limit-reset availability**: Claude Code asks the usage API for
+11. **Limit-reset availability**: <!-- task: usage-limit-reset --> Claude Code asks the usage API for
     resets only at a limit or for `/limit-reset`. Asking it from the
     workbench means calling Anthropic's API with the user's login: needs
     the user's decision first.
-12. **Show the usage bar as pictures, not only text**
+12. **Show the usage bar as pictures, not only text** <!-- task: usage-pictures -->
     (`frontend/public/usage.js`). Today every figure is a line of text
     ("Model calls 256 of 100–160 over", the waste table), so you have to read
     it all to see what's off. Present the same data visually, **without
@@ -299,17 +316,17 @@ In order (a task needs those above it it names):
 
 Finish these before the move off MCP is called done.
 
-- **Older lint warnings in files the move touches** (all present at
+- **Older lint warnings in files the move touches** <!-- task: cli-older-lint-warnings-files --> (all present at
   `15cd20fda`): `frontend/server.mjs` is 1722 lines (limit 500) and
   `routeApi` (22), `callTool` (21) and `routeProjects` (30) are over the
   complexity limit of 20; `createTerminal` in `frontend/terminal.mjs` is 114
   lines (limit 100); `claudeEvents` in `src/toolbox/AgentConversations.ts`
   has complexity 26 (was 28).
-- **Run the cli toolkit in a live workbench session.** Tested against the
+- **Run the cli toolkit in a live workbench session.** <!-- task: cli-run-cli-toolkit-live --> Tested against the
   host rea only: the session daemon behind the container launcher
   (`frontend/container/rea`, through `podman exec -i`) is unverified, in
   particular that closing its stdin on the host ends it in the container.
-- **Registered agents with the cli toolkit.** Agents without a session flag
+- **Registered agents with the cli toolkit.** <!-- task: cli-registered-agents-cli-toolkit --> Agents without a session flag
   (Codex, Gemini CLI, OpenCode, …) now start without an MCP registration and
   get `rea` on `PATH`, the session daemon and history reporting. The root
   `AGENTS.md` now carries the instruction to use `rene call`, so the agents
@@ -319,11 +336,11 @@ Finish these before the move off MCP is called done.
   `COPILOT_CUSTOM_INSTRUCTIONS_DIRS`. Agents reading another file (Gemini
   CLI's `GEMINI.md`) still need their own way in, and none of them has a
   topic gate (that is Claude Code's hooks).
-- **rene call spends agent tokens on every call.** Partly done: the
+- **rene call spends agent tokens on every call.** <!-- task: cli-rene-call-spends-agent --> Partly done: the
   envelope prints without the fields that repeat the call (item 2 under
   Agent usage and budget, which tracks what is left). An output selector
   (`--field`) would still save the `jq` step on the common read.
-- **rene call cannot carry a long command.** `run_command` accepts a
+- **rene call cannot carry a long command.** <!-- task: cli-rene-call-cannot-carry --> `run_command` accepts a
   `timeout_ms` up to 1,800,000, but the call itself gives up long before
   that: a 45-second command returns, while 60-second and 150-second ones
   came back `Request timed out` on a loaded machine. An agent therefore
@@ -333,37 +350,37 @@ Finish these before the move off MCP is called done.
   for the artifacts lock. Either honour the caller's `timeout_ms`, or let
   `run_command` start a long command and collect its result in a later
   call.
-- **A long shell pipeline hides whether rene did the work.** The agent
+- **A long shell pipeline hides whether rene did the work.** <!-- task: cli-long-shell-pipeline-hides --> The agent
   terminal truncates the displayed command near 90 characters, so a line
   that ends in a rene call can read as a plain `python3` or `grep`
   invocation and claim a provenance the visible text contradicts. Writes
   should use `--stdin-field` rather than building JSON in another
   interpreter; the dependable signal is the workbench rene-call counter.
-- **knip cannot follow a dist import.** `scripts/rene.mjs` loads
+- **knip cannot follow a dist import.** <!-- task: cli-knip-cannot-follow-dist --> `scripts/rene.mjs` loads
   `dist/mcp/agentCli.js` and `dist/mcp/toolCli.js`, which knip's `project`
   globs do not reach, so both TypeScript sources and everything they pull
   in looked unreachable and failed `npm run check` until they were declared
   in `knip.json`. Any future runtime entry point added to `scripts/rene.mjs`
   or `scripts/bundle-runtime.mjs` has to be added there too.
-- **`bin.rene` is not in the published package.** `package.json` declares
+- **`bin.rene` is not in the published package.** <!-- task: cli-bin-rene-published-package --> `package.json` declares
   `"rene": "scripts/rene.mjs"`, but `files` lists only `scripts/rea.mjs` and
   a few others, so a published tarball installs a `rene` command whose entry
   point is absent; `scripts/lib/copilot-tool-policy.mjs`, which it now loads,
   is missing too. Decide whether rene ships: add both to `files`, or drop the
   `bin` entry and keep rene a working-tree tool.
-- **Claude Code outside the workbench has no gate.** The topic gate
+- **Claude Code outside the workbench has no gate.** <!-- task: cli-claude-code-outside-workbench --> The topic gate
   (`PreToolUse` matcher `*`) refuses Claude Code's own `Read`, `Edit`,
   `Write`, `Grep`, `Glob` and any `mcp__rea__*` tool, but only in sessions
   the workbench starts, whose settings file registers the hooks. A Claude
   Code session started by hand in this folder has only `AGENTS.md`; give it
   the hooks through the project's `.claude/settings.json`, as `rene copilot`
   does for Copilot CLI.
-- **The tools denied to Copilot CLI are not verified end to end.** The
+- **The tools denied to Copilot CLI are not verified end to end.** <!-- task: cli-tools-denied-copilot-cli --> The
   arguments are observed to reach the process, but a headless run cannot sign
   in from a detached spawn, so that a denied `view` is actually refused has
   not been observed. Confirm it on the next session the workbench starts, and
   keep a check that fails if the policy stops being passed.
-- **A long command leaves no trace of its progress.** A build, a gate or a
+- **A long command leaves no trace of its progress.** <!-- task: cli-long-command-leaves-trace --> A build, a gate or a
   test run is started detached and polled with `tail`, because `run_command`
   cannot hold a request open for minutes. The history then shows only the
   short poll commands: the user watching it cannot see that a build is
@@ -372,7 +389,7 @@ Finish these before the move off MCP is called done.
   is streamed into the Evidence for that handle, and the history shows it as
   running, with progress, until it ends with its status. The agent polls the
   handle instead of inventing `sleep` and `tail`.
-- **Trim `rea setup` out, phase by phase, keeping everything else it did.**
+- **Trim `rea setup` out, phase by phase, keeping everything else it did.** <!-- task: cli-trim-rea-setup-out -->
   With every agent on `rene call`, setup's MCP registration is gone. Its
   other jobs must have a home before any of its code is removed:
   - _Provider settings for agents._ Registrations carried the saved REA_*
@@ -408,7 +425,7 @@ Finish these before the move off MCP is called done.
      removing those with it; and their tests.
   6. Scripts (`verify-package-setup*`, `verify-copilot-client`, catalog
      client lists), `package.json`, the install docs and the website.
-- **MCP is refused at the launcher, not in rea itself.** `rea` was
+- **MCP is refused at the launcher, not in rea itself.** <!-- task: cli-mcp-refused-at-launcher --> `rea` was
   registered as an MCP server for Claude Code (`~/.claude.json`), Copilot
   CLI (`~/.copilot/mcp-config.json`) and VS Code
   (`~/.config/Code/User/mcp.json`); those entries are removed (backups
@@ -423,26 +440,26 @@ Finish these before the move off MCP is called done.
   view (`frontend/public/setup.js`, `/api/setup/*`) remain; the view's apply
   now fails at the launcher. Decide whether to remove the view and the
   clients, or keep them for use outside this project.
-- **The history has no calendar.** Project history can only be read forward
+- **The history has no calendar.** <!-- task: cli-history-calendar --> Project history can only be read forward
   from what is listed; there is no way to ask what happened on a given day,
   or across a range of dates and times. Give it a calendar: pick a day or a
   span, and see that period's work. Today is always the default.
-- **Turns belong to no topic.** The history reports lines such as "107
+- **Turns belong to no topic.** <!-- task: cli-turns-belong-topic --> The history reports lines such as "107
   conversation turns aren't in any topic", so most of the work sits outside
   the structure meant to group it. Either a turn is attributed to a topic as
   it is recorded, or an untopiced turn is placed under one that stands for
   the session; a count of orphans is not an answer.
-- **History should nest, not flatten.** Group it by `session_id` first, then
+- **History should nest, not flatten.** <!-- task: cli-history-should-nest-flatten --> Group it by `session_id` first, then
   open out into topics, then the conversation turns within them, and finally
   the single rene calls under each turn. The last level is where it is worst
   today: many calls stand alone with nothing to say which turn or topic they
   served.
-- **`run_command` runs with a bare PATH.** It is `/usr/local/bin:/usr/bin`,
+- **`run_command` runs with a bare PATH.** <!-- task: cli-run-command-runs-bare --> It is `/usr/local/bin:/usr/bin`,
   so a tool the user installed under `~/.local/bin` (`copilot`, `claude`,
   `agy`) is not found and has to be called by absolute path. Decide which
   PATH a recorded command should inherit, and say so in the tool's
   description.
-- **Test the daemon's per-connection Android provider release.** Each
+- **Test the daemon's per-connection Android provider release.** <!-- task: cli-android-provider-release --> Each
   connection's server closes its own provider when the connection ends (the
   SDK closes the server; `createServer` closes its providers), and
   `src/main/transport.ts` now drops it from the shutdown list then, keeping
@@ -458,7 +475,7 @@ assessment) is to be built on CodeGraph after its storage moves to DuckDB.
 Topics `56215652-83eb-441d-8b28-7a25d2c27983` (migration) and
 `a9f30caf-22f3-48de-bd64-0e6c04c1c235` (unresolved references).
 
-- **Target `packages/codegraph`**, the CodeGraph rene runs (merged in
+- **Target `packages/codegraph`** <!-- task: duckdb-target-packages-codegraph -->, the CodeGraph rene runs (merged in
   `91f5f99af`, changed since), not the separate `codegraph_duck` fork.
 - **Baseline (SQLite):** 7,010 tests, 6,652 pass, 358 skipped, 0 fail;
   measured with `run_command` `measure`: 115.6 s, peak 6.2 GiB over the
@@ -473,7 +490,7 @@ Topics `56215652-83eb-441d-8b28-7a25d2c27983` (migration) and
   addon built from our Rust and static DuckDB, so CodeGraph's synchronous
   call sites stay as they are. The addon needs the napi-rs crates fetched
   once into cargo's cache (approved; fetched).
-- **Spike** (`packages/codegraph-store`, napi-rs + static DuckDB, built in
+- **Spike** <!-- task: duckdb-spike --> (`packages/codegraph-store`, napi-rs + static DuckDB, built in
   65 s): this repo's index (103,517 symbols, 337,714 links) loads into an
   in-memory DuckDB in 0.6 s (+134 MiB). Aggregates run 23x faster than
   SQLite (top depended-on files 31 ms vs 719 ms) and name prefix search 5x
@@ -502,7 +519,7 @@ Topics `56215652-83eb-441d-8b28-7a25d2c27983` (migration) and
   lets the writer and the read-only query servers share it, so one owner
   process must serve every query. The 150 statements and 349 call sites
   (123 query methods, 14 files) are synchronous.
-- **Unresolved references** (412,940): 57% name packages and 14% built-ins
+- **Unresolved references** <!-- task: duckdb-unresolved-references --> (412,940): 57% name packages and 14% built-ins
   (expected: `node_modules` isn't indexed), 27.5% are locals or receivers
   of unknown type, and 1.2% (4,817) are imported from project files yet
   unlinked: genuine misses, mostly project constants and schemas used as
@@ -515,7 +532,7 @@ Topics `56215652-83eb-441d-8b28-7a25d2c27983` (migration) and
 - **Routes:** the workbench's route tables (`"GET /api/doctor": handler`)
   are indexed as functions named like routes; recognise them, MCP tool
   contracts, CLI commands and rene tools as operations.
-- **`rene call` waited 60 s at most** (the MCP SDK default), so long
+- **`rene call` waited 60 s at most** <!-- task: duckdb-call-wait-limit --> (the MCP SDK default), so long
   builds and test runs failed client-side. Fixed: it waits for the tool's
   own deadline (the call's `timeout_ms`/`analysis_timeout_ms`, else the
   schema's default for it, else two minutes) plus 30 s, and no longer:
@@ -532,96 +549,96 @@ Claude Code session, work the way this project requires. Most valuable first.
 
 **Working in this project**
 
-1. **rene-toolkit**: the operating manual. `rene call`, `tools` and `daemon`,
+1. **rene-toolkit**: <!-- task: skill-rene-toolkit --> the operating manual. `rene call`, `tools` and `daemon`,
    `--stdin-field`, topic declaration, the consent rule, the git rule, what
    the gate refuses and the allowed form of each. Agents with no gate (Codex,
    Gemini CLI, the other registered agents) get only this. Build first.
-2. **rene-tool-building**: adding a rene toolbox tool: contract and schema,
+2. **rene-tool-building**: <!-- task: skill-rene-tool-building --> adding a rene toolbox tool: contract and schema,
    Evidence and provenance, limits from real constraints, tests per
    `docs/testing.md`, docs. Generalises `rea-tool-design` to the toolbox.
-3. **rene-handoff**: reading earlier agents' work
+3. **rene-handoff**: <!-- task: skill-rene-handoff --> reading earlier agents' work
    (`list_agent_conversations`, `read_agent_conversation`, History, topics)
    and leaving a session in a state the next agent can pick up.
-4. **rene-assessment**: keeping `.rene/assessment.md` current: Target,
+4. **rene-assessment**: <!-- task: skill-rene-assessment --> keeping `.rene/assessment.md` current: Target,
    Rules, Findings with history entry ids, Open questions; never the
    generated sections.
-5. **rene-source-graph**: understanding code before changing it:
+5. **rene-source-graph**: <!-- task: skill-rene-source-graph --> understanding code before changing it:
    `explore_source_graph`, callers and callees, `analyze_source_impact`,
    when to rebuild the index.
-6. **safe-change**: staging entry-script and gate changes (a staged copy,
+6. **safe-change**: <!-- task: skill-safe-change --> staging entry-script and gate changes (a staged copy,
    tested, then swapped in with an automatic restore), proving refactors
    equivalent (byte-identical bundles, old and new output on real data), and
    never editing what the running toolkit loads before it is rebuilt.
-7. **rene-verify**: which checks fit a change (`test:focused`,
+7. **rene-verify**: <!-- task: skill-rene-verify --> which checks fit a change (`test:focused`,
    `check:fast`, knip, `docs:check`), lint limits, oxfmt, and reporting
    only what ran.
-8. **workbench-debugging**: a scratch bridge on its own port and
+8. **workbench-debugging**: <!-- task: skill-workbench-debugging --> a scratch bridge on its own port and
    `--agent-dir`, rene's browser tools for the page, reading the bridge log,
    the history store's lock.
-9. **container-and-providers**: `frontend/container` (Containerfile,
+9. **container-and-providers**: <!-- task: skill-container-providers --> `frontend/container` (Containerfile,
    launcher, rebuild with approval), provider releases and pins
    (`providerReleases.mjs`, SHA-256), saved provider paths.
-10. **lifecycle-changes**: owned processes and cleanup with `src/process`
+10. **lifecycle-changes**: <!-- task: skill-lifecycle-changes --> owned processes and cleanup with `src/process`
     supervision; the lifecycle regressions in `docs/testing.md`.
-11. **performance-measurement**: the token, time, CPU and memory reporting
+11. **performance-measurement**: <!-- task: skill-performance-measurement --> the token, time, CPU and memory reporting
     AGENTS.md asks for, cold and warm, before and after.
-12. **issue-and-pr-writing**: CONTRIBUTING's forms: observed versus
+12. **issue-and-pr-writing**: <!-- task: skill-issue-pr-writing --> CONTRIBUTING's forms: observed versus
     derived, `NOT_ENOUGH_INFO`, readiness left to the human.
-13. **rene-agent-models**: configuring `rene agent` for local models and
+13. **rene-agent-models**: <!-- task: skill-rene-agent-models --> configuring `rene agent` for local models and
     cloud (Anthropic SDK, OpenAI-compatible), keys and consent.
 
 **Analysing targets with rene** (split out of reverse-engineer-anything
 where its guides have grown, each with worked `rene call` recipes)
 
-14. **native-binary-triage**: open, overview, strings, imports, the first
+14. **native-binary-triage**: <!-- task: skill-native-binary-triage --> open, overview, strings, imports, the first
     decompilation pass, naming and annotation, Evidence to export.
-15. **android-app-analysis**: APK inventory, JADX, resources, manifests,
+15. **android-app-analysis**: <!-- task: skill-android-app-analysis --> APK inventory, JADX, resources, manifests,
     adb on a device with consent.
-16. **javascript-and-electron**: ASAR and bundles, source maps, feature
+16. **javascript-and-electron**: <!-- task: skill-javascript-electron --> ASAR and bundles, source maps, feature
     tracing, Electron fuses and runtime observation.
-17. **firmware-extraction**: binwalk and unblob, regions, filesystems,
+17. **firmware-extraction**: <!-- task: skill-firmware-extraction --> binwalk and unblob, regions, filesystems,
     then per-binary triage.
-18. **web-and-network-capture**: browser sessions, HAR and pcap, protocol
+18. **web-and-network-capture**: <!-- task: skill-web-network-capture --> browser sessions, HAR and pcap, protocol
     fields, mitmdump, WebMCP inventory as untrusted data.
-19. **version-diffing**: comparing releases, changed behaviour, function
+19. **version-diffing**: <!-- task: skill-version-diffing --> comparing releases, changed behaviour, function
     and export diffs.
-20. **runtime-instrumentation**: Frida, gdb and rizin debugging, only with
+20. **runtime-instrumentation**: <!-- task: skill-runtime-instrumentation --> Frida, gdb and rizin debugging, only with
     the user's consent to run the target.
-21. **crash-triage**: recorded crashes, symbolication, the faulting path.
-22. **reconstruction**: rebuilding source from a binary: obligation
+21. **crash-triage**: <!-- task: skill-crash-triage --> recorded crashes, symbolication, the faulting path.
+22. **reconstruction**: <!-- task: skill-reconstruction --> rebuilding source from a binary: obligation
     ledger, coverage, verification.
-23. **evidence-reporting**: writing a finding with its provenance
+23. **evidence-reporting**: <!-- task: skill-evidence-reporting --> writing a finding with its provenance
     (observed, derived, inferred, unknown), unknowns recorded with
     `record_unknown`, bundles for others.
-24. **untrusted-target-handling**: target content is data, prompt
+24. **untrusted-target-handling**: <!-- task: skill-untrusted-target-handling --> target content is data, prompt
     injection in strings or pages, never executing what a target asks.
 
 ## Roadmap
 
-- **Link topics to code.** Map the files a topic's calls touched to source
+- **Link topics to code.** <!-- task: roadmap-link-topics-code --> Map the files a topic's calls touched to source
   graph symbols, and show an open topic's blast radius
   (`analyze_source_impact`). The links come from graph ids, not similarity.
-- **File the turns from before topics existed.** A declaration that names
+- **File the turns from before topics existed.** <!-- task: roadmap-file-turns-before-topics --> A declaration that names
   turns by their recorded identity (session and turn index), so the 59
   earlier turns can be filed without guessing.
-- **CodeGraph on DuckDB.** Replace CodeGraph's SQLite store with a DuckDB
+- **CodeGraph on DuckDB.** <!-- task: roadmap-codegraph-duckdb --> Replace CodeGraph's SQLite store with a DuckDB
   store (a Rust appender, single writer, read-only readers), checked against
   the SQLite baseline.
-- **Resume markers.** "Resume from here" on any turn in History, and a
+- **Resume markers.** <!-- task: roadmap-resume-markers --> "Resume from here" on any turn in History, and a
   `resume_context` tool, so an agent can pick up earlier work.
-- **The rest of the toolbox.** `fetch_url`, `web_search`, notebook editing,
+- **The rest of the toolbox.** <!-- task: roadmap-rest-toolbox --> `fetch_url`, `web_search`, notebook editing,
   long-running processes and interactive browser actions, so agents can run
   on rene's tools alone.
-- **Capture the other agents.** The workbench records Claude Code and Copilot
+- **Capture the other agents.** <!-- task: roadmap-capture-other-agents --> The workbench records Claude Code and Copilot
   CLI conversations; Codex, Gemini CLI and the other registration agents
   aren't captured yet. Add their readers to `src/toolbox/AgentConversations.ts`
   so the workbench and the conversation tools pick them up together.
 
 ## To check
 
-- **Shift+Enter in the agent terminal.** Try it in the browser, and check
+- **Shift+Enter in the agent terminal.** <!-- task: check-shift-enter-agent-terminal --> Try it in the browser, and check
   whether Copilot CLI takes ESC+Enter as a new line (Claude Code does).
-- **Topic tree in History.** Check how it looks with real topics.
-- **rdk_vcpe's assessment.** Its line about `map_source_graph` failing with
+- **Topic tree in History.** <!-- task: check-topic-tree-history --> Check how it looks with real topics.
+- **rdk_vcpe's assessment.** <!-- task: check-rdk-vcpes-assessment --> Its line about `map_source_graph` failing with
   "Connection closed" is out of date since the read-only query servers;
   remove it there.

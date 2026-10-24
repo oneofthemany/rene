@@ -346,6 +346,14 @@ export const recordTopicInputSchema = z
     topic_id: topicId
       .optional()
       .describe("An existing topic to update; omit to declare a new one."),
+    task: z
+      .string()
+      .min(1)
+      .max(300)
+      .optional()
+      .describe(
+        'The TODO.md or docs/plans task this topic works on, by the id the session briefing lists ("TODO.md#Agent usage and budget › 8."). Kept until a later declaration names another.',
+      ),
     title: z.string().min(1).max(200),
     kind: z
       .enum(TOPIC_KINDS)
@@ -417,6 +425,7 @@ export const recordTopicResultSchema = z.strictObject({
   phase: z.string().nullable(),
   plan: z.array(z.string()).nullable(),
   estimate: topicEstimateSchema.nullable(),
+  task: z.string().nullable(),
   declared_at: z.string(),
   created: z.boolean(),
 });

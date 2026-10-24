@@ -157,6 +157,8 @@ backend serves, config defaults) until the general tool covers them.
 
 ### 3. Subsystems
 
+<!-- task: graph-subsystems -->
+
 Community detection (Louvain or Leiden) over the call and import graph, computed
 by the writer as it seals each version and stored in `generation_summaries`
 beside the code map and hub list. Every node gets a subsystem label that queries
@@ -166,10 +168,14 @@ design asks for.
 
 ### 4. God nodes and bridges
 
+<!-- task: graph-god-nodes-bridges -->
+
 The most depended-on nodes already exist as a per-version summary. Add the nodes
 that connect subsystems (bridges) as another summary at seal time.
 
 ### 5. The tools
+
+<!-- task: graph-tools -->
 
 No new tool family. The existing ones gain the answers:
 
@@ -192,6 +198,8 @@ through git's environment configuration, and whether the two would conflict is
 unchecked.
 
 ### 6. The model pass, last and optional
+
+<!-- task: graph-model-pass-last-optional -->
 
 Everything above is extracted, not guessed. The first draft's INFERRED edges
 come from a model reading docs. That can come later through rene's own agent

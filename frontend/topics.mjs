@@ -78,6 +78,8 @@ export async function currentTopics(history) {
       plan: declared.plan?.length ? declared.plan : (previous?.plan ?? null),
       first_plan:
         previous?.first_plan ?? (declared.plan?.length ? declared.plan : null),
+      // The TODO or plan task it works on (tasks.mjs), until another is named.
+      task: declared.task ?? previous?.task ?? null,
       // The first estimate is the one judged; a later one is a re-estimate.
       estimate: declared.estimate ?? previous?.estimate ?? null,
       first_estimate: previous?.first_estimate ?? declared.estimate ?? null,
