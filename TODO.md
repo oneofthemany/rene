@@ -123,22 +123,32 @@ In order (a task needs those above it it names):
    name with the tools whose names share most words with it. A tool's own
    invalid_input error (old_text not found, a relative path) gets no hint:
    its message names the value. Used about 50 calls against 15–25 budgeted.
-4. **Started: budget panel in the usage bar.** Built (23 Oct): the status
+4. **Done (24 Oct): budget panel in the usage bar.** Built (23 Oct): the status
    line keeps each changed reading in `claude-status-history.jsonl`
    (`REA_STATUS_HISTORY`, trimmed to 8 days past 1 MiB); `budgetOf` and
    `statusReadings` in `frontend/usage.mjs` measure tokens and calls per
    percent of each window from those readings (or the window so far, under
-   5 points), weekly points per session point, the weekly pace (last day,
-   or the week's average) with when it runs out and full sessions left,
-   and price each open task's estimate left (latest estimate less what it
-   used) at this conversation's context and at a fresh one's (60k a call),
-   as fits now, fits fresh, or waits for a reset (when, binding window).
-   `budgetPanel` in `frontend/public/usage.js` shows it; tests in
-   `workbenchUsage` and `workbenchStatusLine`. Left: not yet seen in a
-   browser; readings only accumulate once the workbench restarts a Claude
-   Code session with the new status line; "next ones" are this session's
-   open topics until item 8 brings TODO tasks; the 60k fresh context is
-   assumed, not measured per project. Original scope: for the current task
+   5 points), weekly points per session point, the weekly pace with when
+   it runs out and full sessions left, and price each open task's estimate
+   left (latest estimate less what it used) at this conversation's context
+   and at a fresh one's (measured from the project's recent conversations,
+   60k a call with fewer than 3), as fits now, fits fresh, or waits for a
+   reset (when, binding window). `budgetPanel` in
+   `frontend/public/usage.js` shows it; tests in `workbenchUsage` and
+   `workbenchStatusLine`. Seen (24 Oct) in headless Chromium on a scratch
+   bridge (fake `claude` agent, copies of the projects' history, this
+   conversation's transcript under `CLAUDE_CONFIG_DIR`, the live 101
+   status readings): the current task priced, no page errors, no overflow
+   at 420px. Fixed from it: the weekly pace was labelled "over the last
+   day" but divided by the readings' span, which leaves out idle time (the
+   status line records only while an agent replies), so 3 hours of work
+   said the window ran out that evening; `weekly.paces` now gives both,
+   the pace while working (with its span) and the window's average (idle
+   included), each with when it runs out. Under 1, figures keep two
+   significant digits (0.08 and 0.15 both read 0.1); "1 points" and "1
+   full sessions" plurals. Left: "next ones" are open topics until item 8
+   brings TODO tasks; an umbrella topic (this one) is priced against its
+   topic-level estimate, not the phase in force. Original scope: for the current task
    and the next ones, the estimate as a share of the window at the measured calls per
    percent and the live figure, and whether it fits now, fits in a fresh
    conversation, or waits for the reset. Needs the estimate fields and live

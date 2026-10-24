@@ -664,8 +664,10 @@ const VERDICTS = {
   reset: "Waits for a reset",
   unknown: "Not known yet",
 };
+// Under 1, two significant digits: 0.08 and 0.15 both read 0.1 at one decimal.
 const points = (value) =>
-  value < 1 ? value.toFixed(1) : String(Math.round(value));
+  value < 1 ? String(Number(value.toPrecision(2))) : String(Math.round(value));
+const plural = (shown, noun) => `${shown} ${noun}${shown === "1" ? "" : "s"}`;
 const pointsRange = (range) =>
   range ? `${points(range.low)}–${points(range.high)}%` : "–";
 
@@ -687,15 +689,14 @@ function budgetBasis(budget) {
       `a session point costs ${points(budget.weeklyPerSession)} weekly points (${source(perPercent.weekly)})`,
     );
   const lines = [parts.join("; ") + "."];
-  if (weekly?.pace)
+  const pace = (entry) =>
+    `${plural(points(entry.perHour), "point")} an hour ${entry.source === "readings" ? `while working (${duration(entry.spanMs)} of readings in the last day)` : `over the week so far (${duration(entry.spanMs)})`}, ${entry.runsOutAt ? `runs out by ${when(entry.runsOutAt)}, before its reset` : "lasts to its reset"}`;
+  if (weekly?.paces.length)
     lines.push(
       [
-        `Weekly pace ${points(weekly.pace.perHour)} points an hour ${weekly.pace.source === "day" ? "over the last day" : "on average this week"}`,
-        weekly.runsOutAt
-          ? `runs out by ${when(weekly.runsOutAt)}, before its reset`
-          : "lasts to its reset",
+        `Weekly pace ${weekly.paces.map(pace).join("; ")}`,
         weekly.sessionsLeft !== null
-          ? `about ${points(weekly.sessionsLeft)} full sessions left`
+          ? `about ${plural(points(weekly.sessionsLeft), "full session")} left`
           : undefined,
       ]
         .filter(Boolean)

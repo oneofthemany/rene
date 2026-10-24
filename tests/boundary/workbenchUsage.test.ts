@@ -719,6 +719,70 @@ it("takes the plan's live limits from the status line over Claude Code's older c
   expect(stale.claude.plan.windows[0].percent).toBe(54);
 });
 
+it("gives the weekly pace while working and over the window, each with when it runs out", () => {
+  const { budgetOf } = usageModule;
+  const ledger = {
+    totals: () => ({
+      calls: 0,
+      input: 0,
+      cache_read: 0,
+      cache_write: 0,
+      output: 0,
+      premium_requests: 0,
+    }),
+  };
+  // A reading an hour from T0, in a weekly window resetting at resetsAt.
+  const paces = (resetsAt: number, percents: number[]) => {
+    const window = {
+      group: "weekly",
+      percent: percents.at(-1),
+      resetsAt,
+      rolledOver: false,
+      estimate: null,
+      local: null,
+    };
+    return budgetOf({
+      account: { claude: { plan: { windows: [window] } } },
+      readings: percents.map((percent, step) => ({
+        at: T0 + step * 60 * MINUTE,
+        session: null,
+        weekly: { percent, resets: resetsAt },
+      })),
+      ledger,
+      context: null,
+      now: T0 + (percents.length - 1) * 60 * MINUTE,
+    }).weekly.paces;
+  };
+  // Two hours of readings while working, 40 -> 46: 3 an hour, so the 54
+  // left run out in 18 hours. The window began 2 days before T0, so its
+  // average is 46 over 50 hours.
+  const now = T0 + 120 * MINUTE;
+  const [whileWorking, overWeek] = paces(
+    T0 + 5 * 24 * 60 * MINUTE,
+    [40, 43, 46],
+  );
+  expect(whileWorking).toEqual({
+    source: "readings",
+    perHour: 3,
+    spanMs: 120 * MINUTE,
+    runsOutAt: now + 18 * 60 * MINUTE,
+  });
+  expect(overWeek).toMatchObject({
+    source: "window",
+    perHour: expect.closeTo(46 / 50),
+    spanMs: 50 * 60 * MINUTE,
+    runsOutAt: expect.closeTo(now + (54 / (46 / 50)) * 60 * MINUTE, 0),
+  });
+  // A pace that outlasts the window: 1 point in 2 hours, 3 hours from its
+  // reset.
+  const [late] = paces(T0 + 5 * 60 * MINUTE, [45, 45, 46]);
+  expect(late).toMatchObject({
+    source: "readings",
+    perHour: expect.closeTo(0.5),
+    runsOutAt: null,
+  });
+});
+
 it("prices open tasks in both plan windows from the status line's readings", () => {
   const { budgetOf, statusReadings } = usageModule;
   const sessionReset = T0 + 200 * MINUTE;
@@ -820,7 +884,21 @@ it("prices open tasks in both plan windows from the status line's readings", () 
   expect(budget.perPercent.weekly.tokens).toBe(1_000_000);
   expect(budget.weeklyPerSession).toBe(0.5);
   expect(budget.weekly.sessionsLeft).toBeCloseTo(1.1);
-  expect(budget.weekly.pace.source).toBe("window");
+  // 50 minutes of readings is under an hour: only the window's average, 45
+  // points over the 2 days 50 minutes since it began; its 55 left run out in
+  // about 60 hours, before the reset 5 days on.
+  const average = 45 / (48 + 50 / 60);
+  expect(budget.weekly.paces).toEqual([
+    {
+      source: "window",
+      perHour: expect.closeTo(average),
+      spanMs: 2 * 24 * 60 * MINUTE + 50 * MINUTE,
+      runsOutAt: expect.closeTo(
+        T0 + 50 * MINUTE + (55 / average) * 60 * MINUTE,
+        0,
+      ),
+    },
+  ]);
   expect(budget.tasks.map((task: { id: string }) => task.id)).toEqual([
     "a",
     "b",

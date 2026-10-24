@@ -1330,7 +1330,7 @@ export function freshContext(conversations) {
 const CALIBRATION_MS = 7 * DAY;
 // Readings come in whole percents: fewer points than this are too coarse.
 const MIN_POINTS = 5;
-// The weekly pace: its points over the last day of readings.
+// The weekly pace while working: its points over the last day of readings.
 const WEEKLY_PACE_MS = DAY;
 
 /** The status line's readings (statusLine.mjs's history), oldest first. */
@@ -1405,24 +1405,35 @@ function calibrate(readings, windows, ledger, now) {
   return perPercent;
 }
 
-/** Weekly points an hour: over the last day of readings, or the window so far. */
-function weeklyPace(readings, weekly, now) {
-  if (!weekly?.resetsAt) return null;
+/**
+ * Weekly points an hour, two ways, each with the time it spans: over the last
+ * day's readings (the status line records only while an agent replies, so
+ * their span leaves out idle time: the pace while working), and over the
+ * window so far (idle time included).
+ */
+function weeklyPaces(readings, weekly, now) {
+  if (!weekly?.resetsAt) return [];
+  const paces = [];
   const inWindow = readings.filter(
     (r) => r.weekly?.resets === weekly.resetsAt && r.at >= now - WEEKLY_PACE_MS,
   );
   const [first, last] = [inWindow[0], inWindow.at(-1)];
   if (first && last && last.at - first.at >= HOUR)
-    return {
+    paces.push({
+      source: "readings",
       perHour:
         ((last.weekly.percent - first.weekly.percent) / (last.at - first.at)) *
         HOUR,
-      source: "day",
-    };
+      spanMs: last.at - first.at,
+    });
   const elapsed = now - (weekly.resetsAt - WINDOW_MS.weekly);
-  return elapsed >= HOUR
-    ? { perHour: (weekly.percent / elapsed) * HOUR, source: "window" }
-    : null;
+  if (elapsed >= HOUR)
+    paces.push({
+      source: "window",
+      perHour: (weekly.percent / elapsed) * HOUR,
+      spanMs: elapsed,
+    });
+  return paces;
 }
 
 /** What is left of a task's estimate: its range less what it has used. */
@@ -1568,9 +1579,12 @@ export function budgetOf({
     });
   const perPercent = calibrate(readings, windows, ledger, now);
   const weekly = windows.find((window) => window.group === "weekly");
-  const pace = weeklyPace(readings, weekly, now);
-  const untilOut =
-    pace?.perHour > 0 && weekly ? (weekly.left / pace.perHour) * HOUR : null;
+  // When the weekly window runs out at a pace, if before its reset.
+  const runsOutAt = (pace) => {
+    const at =
+      pace.perHour > 0 ? now + (weekly.left / pace.perHour) * HOUR : Infinity;
+    return at < (weekly.resetsAt ?? 0) ? at : null;
+  };
   const weeklyPerSession =
     perPercent.session && perPercent.weekly
       ? perPercent.session.tokens / perPercent.weekly.tokens
@@ -1591,11 +1605,10 @@ export function budgetOf({
     weeklyPerSession,
     weekly: weekly
       ? {
-          pace,
-          runsOutAt:
-            untilOut !== null && now + untilOut < (weekly.resetsAt ?? 0)
-              ? now + untilOut
-              : null,
+          paces: weeklyPaces(readings, weekly, now).map((pace) => ({
+            ...pace,
+            runsOutAt: runsOutAt(pace),
+          })),
           sessionsLeft: weeklyPerSession
             ? weekly.left / (100 * weeklyPerSession)
             : null,
@@ -1611,6 +1624,6 @@ export function budgetOf({
         ? `Start big tasks in a fresh conversation: each call here reads about ${Math.round(context / 1000)}k tokens of context, against about ${Math.round(perCall / 1000)}k in a fresh one.`
         : null,
     method:
-      "A task's cost is its latest estimate less what it has used: calls left times this conversation's context per call (or its context estimate), plus output left, as tokens. A percent's cost is this machine's tokens between the status line's readings over the last week, divided by the points each window rose; with fewer than 5 points, the window's use so far. The plan's figures count every device and app, so use elsewhere makes a percent look cheaper. A task fits when the top of its range fits what is left of every window; a fresh conversation reads what this project's recent conversations read a call over their first 20 calls (the median of their means), or 60k a call with fewer than 3 to measure. The weekly window runs out at its pace over the last day of readings, or its average so far.",
+      "A task's cost is its latest estimate less what it has used: calls left times this conversation's context per call (or its context estimate), plus output left, as tokens. A percent's cost is this machine's tokens between the status line's readings over the last week, divided by the points each window rose; with fewer than 5 points, the window's use so far. The plan's figures count every device and app, so use elsewhere makes a percent look cheaper. A task fits when the top of its range fits what is left of every window; a fresh conversation reads what this project's recent conversations read a call over their first 20 calls (the median of their means), or 60k a call with fewer than 3 to measure. The weekly window's pace is shown two ways: over the last day's readings, which the status line takes only while an agent replies (the pace while working, idle time left out), and over the window so far (idle time included); each says when the window runs out at it.",
   };
 }
